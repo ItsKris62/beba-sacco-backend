@@ -1,0 +1,384 @@
+// Beba SACCO – Multi-Tenant Database Schema
+// PostgreSQL 15 + Neon + Prisma 5
+//
+// Multi-tenancy strategy (Phase 2 MVP):
+//   "Shared schema, shared tables" – every business model carries a tenantId FK
+//   and all queries are filtered by tenantId via TenantInterceptor + req.tenant.
+//
+//   Phase 3+ will migrate hot tables to per-tenant PostgreSQL schemas using
+//   SET search_path once the DATABASE_URL is switched to the direct (non-pooler) URL.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["public"]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN  // Platform admin (Beba staff)
+  TENANT_ADMIN // SACCO administrator
+  MANAGER      // Branch / department manager
+  TELLER       // Front-office staff
+  MEMBER       // Ordinary SACCO member
+  AUDITOR      // Read-only compliance auditor
+
+  @@schema("public")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+
+  @@schema("public")
+}
+
+enum AccountType {
+  BOSA // Back Office Savings Account
+  FOSA // Front Office Service Account (banking)
+
+  @@schema("public")
+}
+
+enum LoanStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  DISBURSED
+  ACTIVE
+  FULLY_PAID
+  DEFAULTED
+  WRITTEN_OFF
+
+  @@schema("public")
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  LOAN_DISBURSEMENT
+  LOAN_REPAYMENT
+  INTEREST_EARNED
+  DIVIDEND_PAYOUT
+  FEE_CHARGE
+  TRANSFER
+
+  @@schema("public")
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+
+  @@schema("public")
+}
+
+enum InterestType {
+  FLAT              // Interest on original principal
+  REDUCING_BALANCE  // Interest on outstanding balance
+
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC SCHEMA – Platform & Identity
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id           String       @id @default(uuid())
+  name         String
+  slug         String       @unique // e.g., "kc-boda-sacco"
+  schemaName   String       @unique // reserved for Phase 3 schema routing
+  status       TenantStatus @default(ACTIVE)
+  settings     Json?        // SACCO config: interest rates, fee structures, etc.
+  contactEmail String
+  contactPhone String
+  address      String?
+  logoUrl      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  auditLogs    AuditLog[]
+  members      Member[]
+  accounts     Account[]
+  loanProducts LoanProduct[]
+  loans        Loan[]
+  transactions Transaction[]
+  counter      TenantCounter?
+
+  @@index([slug])
+  @@index([status])
+  @@schema("public")
+}
+
+model TenantCounter {
+  id         String @id @default(uuid())
+  tenantId   String @unique
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  memberSeq  Int @default(0)
+  accountSeq Int @default(0)
+  loanSeq    Int @default(0)
+
+  @@schema("public")
+}
+
+model User {
+  id                 String   @id @default(uuid())
+  tenantId           String
+  tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  email              String   @unique
+  passwordHash       String
+  role               UserRole @default(MEMBER)
+
+  firstName          String
+  lastName           String
+  phone              String?
+  isActive           Boolean  @default(true)
+  emailVerified      Boolean  @default(false)
+
+  refreshToken       String?  @db.Text // argon2 hash of refresh JWT
+  lastLoginAt        DateTime?
+  mustChangePassword Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditLogs AuditLog[]
+  member    Member?
+
+  @@index([tenantId])
+  @@index([email])
+  @@index([role])
+  @@schema("public")
+}
+
+model AuditLog {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action     String  // e.g., "AUTH.LOGIN", "LOAN.APPROVE"
+  resource   String  // e.g., "User", "Loan"
+  resourceId String?
+
+  metadata  Json?   // Snapshot of request/response
+  ipAddress String?
+  userAgent String?
+  requestId String? @unique
+
+  timestamp DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUSINESS DOMAIN – Members, Accounts, Loans, Transactions
+// (MVP: shared public schema + tenantId FK; Phase 3: move to per-tenant schemas)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Member {
+  id           String  @id @default(uuid())
+  tenantId     String
+  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId       String  @unique // One User → one Member profile (user already scoped to one tenant)
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  memberNumber String  // Auto-generated: M-000001, M-000002 … (tenant-scoped)
+
+  nationalId   String?
+  kraPin       String?
+  employer     String?
+  occupation   String?
+  dateOfBirth  DateTime?
+
+  isActive     Boolean  @default(true)
+  joinedAt     DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts Account[]
+  loans    Loan[]
+
+  @@unique([tenantId, memberNumber])
+  @@index([tenantId])
+  @@index([tenantId, isActive])
+  @@schema("public")
+}
+
+model Account {
+  id            String      @id @default(uuid())
+  tenantId      String
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  accountNumber String      // Auto-generated: ACC-BOSA-000001
+  accountType   AccountType
+  // Balance stored as Decimal(18,4) – always use Decimal class, never number
+  balance       Decimal     @default(0) @db.Decimal(18, 4)
+  isActive      Boolean     @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions Transaction[]
+
+  @@unique([tenantId, accountNumber])
+  @@index([tenantId, memberId])
+  @@schema("public")
+}
+
+model LoanProduct {
+  id          String @id @default(uuid())
+  tenantId    String
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String? @db.Text
+
+  // All monetary limits in KES, stored as Decimal(18,4)
+  minAmount   Decimal @db.Decimal(18, 4)
+  maxAmount   Decimal @db.Decimal(18, 4)
+
+  // e.g., 0.1200 = 12.00 % per annum
+  interestRate      Decimal      @db.Decimal(7, 4)
+  interestType      InterestType @default(REDUCING_BALANCE)
+  maxTenureMonths   Int
+  processingFeeRate Decimal      @default(0) @db.Decimal(7, 4)
+
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  loans Loan[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isActive])
+  @@schema("public")
+}
+
+model Loan {
+  id            String      @id @default(uuid())
+  tenantId      String
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id])
+  loanProductId String
+  loanProduct   LoanProduct @relation(fields: [loanProductId], references: [id])
+
+  loanNumber   String    // Auto-generated: LN-2025-000001
+  status       LoanStatus @default(DRAFT)
+
+  principalAmount   Decimal @db.Decimal(18, 4)
+  interestRate      Decimal @db.Decimal(7, 4) // Copied from product at application time
+  processingFee     Decimal @default(0) @db.Decimal(18, 4)
+  tenureMonths      Int
+  monthlyInstalment Decimal @db.Decimal(18, 4) // Pre-calculated at application
+
+  appliedAt   DateTime  @default(now())
+  approvedAt  DateTime?
+  approvedBy  String?   // userId
+  disbursedAt DateTime?
+  disbursedBy String?   // userId
+  dueDate     DateTime? // Final repayment due date
+
+  // Repayment tracking (updated on each repayment transaction)
+  totalRepaid    Decimal @default(0) @db.Decimal(18, 4)
+  outstandingBalance Decimal @db.Decimal(18, 4) // = principalAmount initially, decremented on repayment
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions Transaction[]
+
+  @@unique([tenantId, loanNumber])
+  @@index([tenantId, memberId])
+  @@index([tenantId, status])
+  @@schema("public")
+}
+
+model Transaction {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  loanId String?
+  loan   Loan?   @relation(fields: [loanId], references: [id])
+
+  type          TransactionType
+  status        TransactionStatus @default(PENDING)
+  amount        Decimal           @db.Decimal(18, 4)
+  balanceBefore Decimal           @db.Decimal(18, 4)
+  balanceAfter  Decimal           @db.Decimal(18, 4)
+
+  // Unique idempotency key – prevents double-posting
+  reference   String  @unique
+  description String?
+
+  processedBy String? // userId of teller or "SYSTEM"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  mpesaTransaction MpesaTransaction?
+
+  @@index([tenantId, accountId])
+  @@index([tenantId, loanId])
+  @@index([reference])
+  @@index([createdAt])
+  @@schema("public")
+}
+
+model MpesaTransaction {
+  id            String @id @default(uuid())
+  tenantId      String
+
+  transactionId String?      @unique
+  transaction   Transaction? @relation(fields: [transactionId], references: [id])
+
+  checkoutRequestId  String  @unique
+  merchantRequestId  String?
+  phoneNumber        String
+  amount             Decimal @db.Decimal(18, 4)
+
+  status             TransactionStatus @default(PENDING)
+  resultCode         Int?
+  resultDesc         String?
+  mpesaReceiptNumber String?
+  callbackPayload    Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([checkoutRequestId])
+  @@schema("public")
+}
