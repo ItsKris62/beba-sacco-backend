@@ -5,11 +5,14 @@ import {
   ConflictException,
   BadRequestException,
 } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import type { Member, PaginatedResponse } from './members.types';
+import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 
 /**
  * Members Service
@@ -27,7 +30,17 @@ export class MembersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    @InjectQueue(QUEUE_NAMES.EMAIL)
+    private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
+
+  private enqueueEmail(payload: EmailJobPayload, ctx: string): void {
+    this.emailQueue
+      .add('send', payload, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } })
+      .catch((e: unknown) =>
+        this.logger.error(`[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`),
+      );
+  }
 
   // ─── CREATE ──────────────────────────────────────────────────
 
@@ -79,6 +92,20 @@ export class MembersService {
       metadata: { memberNumber, linkedUserId: dto.userId },
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+    // Send welcome email to the new member
+    if (user.email) {
+      const tenant = await this.prisma.tenant.findUnique({
+        where: { id: tenantId },
+        select: { name: true },
+      });
+      this.enqueueEmail({
+        type: 'WELCOME',
+        to: user.email,
+        firstName: user.firstName,
+        saccoName: tenant?.name ?? 'Beba SACCO',
+      }, `members.create:${member.id}`);
+    }
 
     return member as Member;
   }

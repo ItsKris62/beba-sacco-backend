@@ -5,6 +5,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
+import * as Sentry from '@sentry/node';
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
 
@@ -28,7 +29,20 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Buffer logs until nestjs-pino Logger is wired up
     bufferLogs: true,
+    // Preserve raw body bytes so the M-Pesa webhook controller can compute HMAC
+    rawBody: true,
   });
+
+  // ── Sentry ─────────────────────────────────────────────────────
+  // @sentry/node v7 auto-instruments HTTP/Express — no explicit integrations array needed.
+  const sentryDsn = process.env.SENTRY_DSN;
+  if (sentryDsn) {
+    Sentry.init({
+      dsn: sentryDsn,
+      environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV ?? 'production',
+      tracesSampleRate: 0.1,
+    });
+  }
 
   // ── Structured Logging ─────────────────────────────────────────
   app.useLogger(app.get(Logger));
@@ -130,6 +144,18 @@ async function bootstrap() {
   // ── Prisma Graceful Shutdown ──────────────────────────────────
   const prismaService = app.get(PrismaService);
   await prismaService.enableShutdownHooks(app);
+
+  // ── Graceful SIGTERM/SIGINT shutdown ──────────────────────────
+  // Order: stop accepting HTTP → drain BullMQ workers → close Prisma/Redis
+  const shutdown = async (signal: string) => {
+    const shutdownLogger = app.get(Logger);
+    shutdownLogger.log(`${signal} received — starting graceful shutdown`, 'Bootstrap');
+    await app.close();        // Closes HTTP server + triggers NestJS lifecycle hooks
+    shutdownLogger.log('Graceful shutdown complete', 'Bootstrap');
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 
   // ── Start ─────────────────────────────────────────────────────
   await app.listen(port);

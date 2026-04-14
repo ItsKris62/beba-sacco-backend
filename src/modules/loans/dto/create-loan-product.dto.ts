@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsInt, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsEnum, IsInt, IsNumber, IsOptional, IsString, Max, Min, IsBoolean } from 'class-validator';
 import { InterestType } from '@prisma/client';
 
 export class CreateLoanProductDto {
@@ -52,6 +52,20 @@ export class CreateLoanProductDto {
   @IsOptional()
   @IsNumber()
   @Min(0)
-  @Max(0.5) // cap at 50%
+  @Max(0.5)
   processingFeeRate?: number;
+
+  @ApiPropertyOptional({
+    example: 1,
+    description:
+      'Months after disbursement before first repayment is due (grace period). ' +
+      'Interest accrues during this window but no cash collection occurs. ' +
+      '0 = repayment starts the month following disbursement. Max 12.',
+    default: 0,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(12, { message: 'Grace period cannot exceed 12 months' })
+  gracePeriodMonths?: number;
 }

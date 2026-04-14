@@ -6,11 +6,13 @@ import {
   PrismaHealthIndicator,
   MemoryHealthIndicator,
   DiskHealthIndicator,
+  HealthIndicatorResult,
 } from '@nestjs/terminus';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PrismaClient } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../common/services/redis.service';
 
 /**
  * Health Check Controller
@@ -33,7 +35,20 @@ export class HealthController {
     private readonly memory: MemoryHealthIndicator,
     private readonly disk: DiskHealthIndicator,
     private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
   ) {}
+
+  /** Custom Redis health check — pings with a SET/GET round-trip */
+  private async redisCheck(): Promise<HealthIndicatorResult> {
+    const key = 'health:ping';
+    const ok = await Promise.race([
+      this.redis.set(key, '1', 5).then(() => this.redis.get(key)).then((v) => v === '1'),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 2000)),
+    ]);
+    return {
+      redis: ok ? { status: 'up' } : { status: 'down', message: 'Redis ping failed' },
+    };
+  }
 
   @Public()
   @Get()
@@ -46,6 +61,9 @@ export class HealthController {
       // Database connectivity — cast to PrismaClient so terminus typing is satisfied
       () => this.prismaHealth.pingCheck('database', this.prisma as unknown as PrismaClient),
 
+      // Redis connectivity
+      () => this.redisCheck(),
+
       // Heap: alert above 150 MB
       () => this.memory.checkHeap('memory_heap', 150 * 1024 * 1024),
 
@@ -54,9 +72,6 @@ export class HealthController {
 
       // Disk: warn if less than 50 % free
       () => this.disk.checkStorage('storage', { path: '/', thresholdPercent: 0.5 }),
-
-      // TODO: Phase 1 – Redis health indicator
-      // () => this.redis.checkHealth('redis', { client: redisClient }),
     ]);
   }
 

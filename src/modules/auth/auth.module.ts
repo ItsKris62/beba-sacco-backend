@@ -2,11 +2,13 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
+import { QUEUE_NAMES } from '../queue/queue.constants';
 
 /**
  * Auth Module
@@ -38,6 +40,7 @@ import { AuditModule } from '../audit/audit.module';
     }),
 
     AuditModule,
+    BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
   controllers: [AuthController],
   providers: [AuthService, PrismaService, JwtStrategy],

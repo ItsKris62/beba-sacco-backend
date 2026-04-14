@@ -1,23 +1,36 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  ListObjectsV2Command,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { v4 as uuidv4 } from 'uuid';
+
+/** Allowed MIME types for document uploads */
+const ALLOWED_CONTENT_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+]);
+
+const UPLOAD_URL_TTL = 300; // 5 minutes
 
 /**
  * Storage Service
- * 
- * Cloudflare R2 (S3-compatible) integration
- * 
- * Use cases:
- * - Member documents (ID, KRA PIN)
- * - Loan application documents
- * - Report exports (PDF, Excel)
- * - Profile pictures
- * 
- * TODO: Phase 2 - Implement upload with pre-signed URLs
- * TODO: Phase 2 - Add file type validation
- * TODO: Phase 3 - Add virus scanning integration
- * TODO: Phase 4 - Add automatic file cleanup/archival
+ *
+ * S3-compatible integration supporting both Cloudflare R2 (production)
+ * and MinIO (local / staging via R2_ENDPOINT override).
+ *
+ * Pre-signed URL flow:
+ *  1. Client calls POST /members/documents/upload-url with { fileName, contentType }
+ *  2. Server returns { uploadUrl, objectKey, expiresIn }
+ *  3. Client PUTs the file directly to the signed URL (no data passes through server)
+ *  4. Client stores objectKey and calls the appropriate record-update endpoint
  */
 @Injectable()
 export class StorageService {
@@ -29,9 +42,14 @@ export class StorageService {
     const accountId = this.configService.get<string>('app.r2.accountId', '');
     this.bucketName = this.configService.get<string>('app.r2.bucketName', '');
 
+    // R2_ENDPOINT overrides the default Cloudflare endpoint — used for MinIO in dev/staging
+    const endpointOverride = process.env.R2_ENDPOINT;
+
     this.s3Client = new S3Client({
       region: 'auto',
-      endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+      endpoint: endpointOverride ?? `https://${accountId}.r2.cloudflarestorage.com`,
+      // MinIO requires path-style; R2 uses virtual-hosted by default
+      forcePathStyle: !!endpointOverride,
       credentials: {
         accessKeyId: this.configService.get<string>('app.r2.accessKeyId', ''),
         secretAccessKey: this.configService.get<string>('app.r2.secretAccessKey', ''),
@@ -40,60 +58,72 @@ export class StorageService {
   }
 
   /**
-   * Generate pre-signed URL for upload
-   * Frontend uses this URL to upload files directly to R2
-   * 
-   * TODO: Phase 2 - Implement
+   * Generate a pre-signed PUT URL for direct browser-to-storage upload.
+   *
+   * @param tenantId  Scopes the object key so tenants cannot overwrite each other's files
+   * @param memberId  Further namespaces the key under the member
+   * @param fileName  Original file name (used for extension only — never trusted for the key)
+   * @param contentType  Must be in ALLOWED_CONTENT_TYPES
+   * @returns { uploadUrl, objectKey, expiresIn }
    */
-  async getUploadUrl(
-    key: string,
-    contentType: string,
-    expiresIn: number = 3600,
-  ): Promise<string> {
-    // TODO: Phase 2
-    // 1. Validate file type
-    // 2. Generate unique key with tenant/user prefix
-    // 3. Create PutObjectCommand
-    // 4. Generate signed URL
-    // 5. Return URL to frontend
+  async getUploadUrl(params: {
+    tenantId: string;
+    memberId: string;
+    fileName: string;
+    contentType: string;
+  }): Promise<{ uploadUrl: string; objectKey: string; expiresIn: number }> {
+    if (!ALLOWED_CONTENT_TYPES.has(params.contentType)) {
+      throw new BadRequestException(
+        `Unsupported content type "${params.contentType}". ` +
+        `Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}`,
+      );
+    }
+
+    // Derive extension from the declared content type (never from user-supplied filename)
+    const ext = params.contentType.split('/')[1].replace('jpeg', 'jpg');
+    const objectKey = `tenants/${params.tenantId}/members/${params.memberId}/${uuidv4()}.${ext}`;
 
     const command = new PutObjectCommand({
       Bucket: this.bucketName,
-      Key: key,
-      ContentType: contentType,
+      Key: objectKey,
+      ContentType: params.contentType,
     });
 
-    return getSignedUrl(this.s3Client, command, { expiresIn });
+    const uploadUrl = await getSignedUrl(this.s3Client, command, { expiresIn: UPLOAD_URL_TTL });
+
+    return { uploadUrl, objectKey, expiresIn: UPLOAD_URL_TTL };
   }
 
   /**
-   * Generate pre-signed URL for download
-   * 
-   * TODO: Phase 2 - Implement
+   * Generate a pre-signed GET URL for secure file download.
    */
-  async getDownloadUrl(key: string, expiresIn: number = 3600): Promise<string> {
+  async getDownloadUrl(key: string, expiresIn = 3600): Promise<string> {
     const command = new GetObjectCommand({
       Bucket: this.bucketName,
       Key: key,
     });
-
     return getSignedUrl(this.s3Client, command, { expiresIn });
   }
 
   /**
-   * Delete file
-   * TODO: Phase 3 - Implement
+   * Delete a stored object.
    */
   async deleteFile(key: string): Promise<void> {
-    throw new Error('Not implemented - Phase 3');
+    const command = new DeleteObjectCommand({ Bucket: this.bucketName, Key: key });
+    await this.s3Client.send(command);
+    this.logger.log(`Deleted object: ${key}`);
   }
 
   /**
-   * List files by prefix
-   * TODO: Phase 3 - Implement
+   * List objects by prefix (e.g., all documents for a member).
    */
   async listFiles(prefix: string): Promise<string[]> {
-    throw new Error('Not implemented - Phase 3');
+    const command = new ListObjectsV2Command({
+      Bucket: this.bucketName,
+      Prefix: prefix,
+    });
+    const response = await this.s3Client.send(command);
+    return (response.Contents ?? []).map((obj) => obj.Key ?? '').filter(Boolean);
   }
 }
 

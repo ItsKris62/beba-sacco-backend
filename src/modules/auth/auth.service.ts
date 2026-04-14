@@ -5,6 +5,8 @@ import {
   Logger,
   InternalServerErrorException,
 } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
@@ -16,6 +18,7 @@ import { RegisterDto } from './dto/register.dto';
 import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import type { JwtPayload } from './strategies/jwt.strategy';
+import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 
 /**
  * Authentication Service
@@ -39,7 +42,17 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly auditService: AuditService,
+    @InjectQueue(QUEUE_NAMES.EMAIL)
+    private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
+
+  private enqueueEmail(payload: EmailJobPayload, ctx: string): void {
+    this.emailQueue
+      .add('send', payload, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } })
+      .catch((e: unknown) =>
+        this.logger.error(`[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`),
+      );
+  }
 
   // ─────────────────────────── LOGIN ───────────────────────────
 
@@ -223,6 +236,18 @@ export class AuthService {
       metadata: { email: user.email, role: user.role },
       ipAddress,
     });
+
+    // Send welcome email — fetch tenant name for personalisation
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    });
+    this.enqueueEmail({
+      type: 'WELCOME',
+      to: user.email,
+      firstName: user.firstName,
+      saccoName: tenant?.name ?? 'Beba SACCO',
+    }, `auth.register:${user.id}`);
 
     return {
       accessToken,

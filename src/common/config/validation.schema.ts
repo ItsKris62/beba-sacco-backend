@@ -64,6 +64,16 @@ export const validationSchema = Joi.object({
   MPESA_SECURITY_CREDENTIAL: Joi.string().optional(),
   MPESA_CALLBACK_URL: Joi.string().uri().optional(),
   MPESA_ENVIRONMENT: Joi.string().valid('sandbox', 'production').default('sandbox'),
+  MPESA_WEBHOOK_SECRET: Joi.string().optional(),
+
+  // Plunk Transactional Email
+  PLUNK_API_KEY: Joi.string().when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  PLUNK_FROM_EMAIL: Joi.string().email().default('noreply@beba-sacco.com'),
+  PLUNK_FROM_NAME: Joi.string().default('Beba SACCO'),
 
   // CORS
   CORS_ORIGIN: Joi.string().default('http://localhost:3001'),

@@ -1,62 +1,70 @@
-# Multi-stage Dockerfile for NestJS Backend
-# Optimized for production deployment on Render
+# ─────────────────────────────────────────────────────────────────────────────
+# Beba SACCO – Multi-stage Dockerfile
+# Node 20 LTS Alpine for minimal attack surface and image size.
+#
+# Stages:
+#   deps    – install production npm deps + generate Prisma client
+#   builder – compile TypeScript → dist/
+#   runner  – lean production image (no devDeps, no source, non-root)
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Stage 1: Dependencies
-FROM node:18-alpine AS dependencies
+# ── Stage 1: deps ─────────────────────────────────────────────────────────────
+FROM node:20-alpine AS deps
 WORKDIR /app
 
-# Install build dependencies
+# Build tooling needed by native add-ons (argon2, bcrypt)
 RUN apk add --no-cache python3 make g++ libc6-compat
 
-# Copy package files
 COPY package*.json ./
-COPY prisma ./prisma/
+# Install ALL deps here (devDeps needed for Prisma generate in builder)
+RUN npm ci
 
-# Install dependencies
-RUN npm ci --only=production && npm cache clean --force
-
-# Stage 2: Builder
-FROM node:18-alpine AS builder
+# ── Stage 2: builder ──────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Copy dependencies from previous stage
-COPY --from=dependencies /app/node_modules ./node_modules
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Generate Prisma Client
-RUN npx prisma generate
+# Generate Prisma Client from non-standard schema path
+RUN npx prisma generate --schema=src/prisma/schema.prisma
 
-# Build application
+# Compile TypeScript
 RUN npm run build
 
-# Stage 3: Runner
-FROM node:18-alpine AS runner
+# ── Stage 3: runner ───────────────────────────────────────────────────────────
+FROM node:20-alpine AS runner
 WORKDIR /app
 
-# Create non-root user
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nestjs
+# Non-root user for security (principle of least privilege)
+RUN addgroup --system --gid 1001 nodejs \
+ && adduser  --system --uid 1001 --ingroup nodejs nestjs
 
-# Copy necessary files
+# Install only the runtime OS libs that native modules need
+RUN apk add --no-cache libc6-compat
+
+# Reinstall production-only deps in the final layer so devDeps are excluded
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# Copy compiled app
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
-COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nestjs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nestjs:nodejs /app/prisma ./prisma
 
-# Set environment
-ENV NODE_ENV=production
-ENV PORT=3000
+# Copy Prisma client (generated artefacts live in node_modules, already copied above)
+# Copy the schema so `prisma migrate deploy` can run at startup if needed
+COPY --from=builder --chown=nestjs:nodejs /app/src/prisma ./src/prisma
 
-# Expose port
+# Runtime environment defaults (override via docker compose / Kubernetes secrets)
+ENV NODE_ENV=production \
+    PORT=3000
+
 EXPOSE 3000
 
-# Switch to non-root user
 USER nestjs
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+# Lightweight healthcheck using the bundled Node runtime (no wget/curl needed)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
+  CMD node -e "require('http').get({host:'localhost',port:3000,path:'/api/health'}, \
+    r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
-# Start application
 CMD ["node", "dist/main"]
-

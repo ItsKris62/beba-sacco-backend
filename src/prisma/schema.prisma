@@ -51,13 +51,24 @@ enum AccountType {
 
 enum LoanStatus {
   DRAFT
-  PENDING_APPROVAL
+  PENDING_GUARANTORS  // Waiting for guarantors to accept
+  UNDER_REVIEW        // Guarantors confirmed; awaiting loan officer decision
+  PENDING_APPROVAL    // Legacy / direct-approval path (no guarantors required)
   APPROVED
+  REJECTED
   DISBURSED
   ACTIVE
   FULLY_PAID
   DEFAULTED
   WRITTEN_OFF
+
+  @@schema("public")
+}
+
+enum GuarantorStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
 
   @@schema("public")
 }
@@ -117,6 +128,7 @@ model Tenant {
   loanProducts LoanProduct[]
   loans        Loan[]
   transactions Transaction[]
+  guarantors   Guarantor[]
   counter      TenantCounter?
 
   @@index([slug])
@@ -219,8 +231,9 @@ model Member {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  accounts Account[]
-  loans    Loan[]
+  accounts    Account[]
+  loans       Loan[]
+  guarantors  Guarantor[]
 
   @@unique([tenantId, memberNumber])
   @@index([tenantId])
@@ -269,6 +282,11 @@ model LoanProduct {
   maxTenureMonths   Int
   processingFeeRate Decimal      @default(0) @db.Decimal(7, 4)
 
+  // Grace period: months after disbursement before first repayment is due.
+  // During this window interest accrues but no instalment is collected.
+  // 0 = repayments start immediately in the month following disbursement.
+  gracePeriodMonths Int @default(0)
+
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -291,12 +309,14 @@ model Loan {
 
   loanNumber   String    // Auto-generated: LN-2025-000001
   status       LoanStatus @default(DRAFT)
+  purpose      String?   @db.Text // Loan purpose stated by member
 
   principalAmount   Decimal @db.Decimal(18, 4)
   interestRate      Decimal @db.Decimal(7, 4) // Copied from product at application time
   processingFee     Decimal @default(0) @db.Decimal(18, 4)
   tenureMonths      Int
-  monthlyInstalment Decimal @db.Decimal(18, 4) // Pre-calculated at application
+  gracePeriodMonths Int     @default(0)        // Copied from product at application time
+  monthlyInstalment Decimal @db.Decimal(18, 4) // Pre-calculated at application (excludes grace period)
 
   appliedAt   DateTime  @default(now())
   approvedAt  DateTime?
@@ -315,10 +335,37 @@ model Loan {
   updatedAt DateTime @updatedAt
 
   transactions Transaction[]
+  guarantors   Guarantor[]
 
   @@unique([tenantId, loanNumber])
   @@index([tenantId, memberId])
   @@index([tenantId, status])
+  @@schema("public")
+}
+
+model Guarantor {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  loanId   String
+  loan     Loan   @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  memberId String
+  member   Member @relation(fields: [memberId], references: [id])
+
+  status          GuarantorStatus @default(PENDING)
+  guaranteedAmount Decimal        @db.Decimal(18, 4)
+
+  invitedAt   DateTime  @default(now())
+  respondedAt DateTime?
+  notes       String?   @db.Text // Reason for decline, etc.
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([loanId, memberId]) // A member can only guarantee a loan once
+  @@index([tenantId, memberId])
+  @@index([loanId])
   @@schema("public")
 }
 

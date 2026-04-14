@@ -58,6 +58,14 @@ export default registerAs('app', () => ({
     securityCredential: process.env.MPESA_SECURITY_CREDENTIAL,
     callbackUrl: process.env.MPESA_CALLBACK_URL,
     environment: process.env.MPESA_ENVIRONMENT || 'sandbox',
+    webhookSecret: process.env.MPESA_WEBHOOK_SECRET,
+  },
+
+  // Plunk Transactional Email
+  plunk: {
+    apiKey: process.env.PLUNK_API_KEY,
+    fromEmail: process.env.PLUNK_FROM_EMAIL || 'noreply@beba-sacco.com',
+    fromName: process.env.PLUNK_FROM_NAME || 'Beba SACCO',
   },
 
   // Security

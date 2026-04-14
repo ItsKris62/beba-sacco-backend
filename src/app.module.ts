@@ -32,6 +32,8 @@ import { QueueModule } from './modules/queue/queue.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { HealthModule } from './modules/health/health.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { MetricsModule } from './modules/metrics/metrics.module';
 
 // Prisma
 import { PrismaService } from './prisma/prisma.service';
@@ -106,6 +108,8 @@ import { AuditService } from './modules/audit/audit.service';
     StorageModule,
     AnalyticsModule,
     HealthModule,
+    AdminModule,
+    MetricsModule,
   ],
 
   providers: [
