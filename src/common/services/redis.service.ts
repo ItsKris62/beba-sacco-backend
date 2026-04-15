@@ -104,6 +104,33 @@ export class RedisService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Atomic INCRBY – increment by a specific amount.
+   * Returns the new counter value. Returns 0 on Redis error (fail open).
+   */
+  async incrBy(key: string, amount: number, ttlSeconds?: number): Promise<number> {
+    try {
+      const value = await this.client.incrby(key, amount);
+      if (value === amount && ttlSeconds) {
+        await this.client.expire(key, ttlSeconds);
+      }
+      return value;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Set TTL on an existing key.
+   */
+  async expire(key: string, ttlSeconds: number): Promise<void> {
+    try {
+      await this.client.expire(key, ttlSeconds);
+    } catch (err) {
+      this.logger.warn(`Redis expire failed for key ${key}`, err);
+    }
+  }
+
   // ─── Phase 6: PubSub helpers ──────────────────────────────────────────────
 
   /**

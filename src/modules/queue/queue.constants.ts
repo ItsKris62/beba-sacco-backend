@@ -28,6 +28,13 @@ export const QUEUE_NAMES = {
   COMPLIANCE_CHECK: 'compliance.policy-check',
   FEATURE_STORE_EXPORT: 'ml.feature-store-export',
   CANARY_ANALYSIS: 'deploy.canary-analysis',
+  // Phase 7 – Enterprise Operational Maturity
+  SECRET_ROTATION: 'zero-trust.secret-rotation',
+  DATA_ERASURE: 'governance.data-erasure',
+  PARTNER_PROVISION: 'partners.provision',
+  REGULATORY_SUBMISSION: 'compliance.regulatory-submission',
+  EXECUTIVE_REPORT: 'reports.executive',
+  DR_DRILL: 'sre.dr-drill',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

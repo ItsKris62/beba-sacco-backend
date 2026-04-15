@@ -44,6 +44,8 @@ import { IdempotencyMiddleware } from './common/middleware/idempotency.middlewar
 import { ApiVersionInterceptor } from './common/interceptors/api-version.interceptor';
 // Phase 6
 import { Phase6Module } from './modules/admin/phase6/phase6.module';
+// Phase 7
+import { Phase7Module } from './modules/admin/phase7/phase7.module';
 
 // Prisma
 import { PrismaService } from './prisma/prisma.service';
@@ -129,6 +131,8 @@ import { AuditService } from './modules/audit/audit.service';
     IntegrationsModule,
     // Phase 6
     Phase6Module,
+    // Phase 7
+    Phase7Module,
   ],
 
   providers: [

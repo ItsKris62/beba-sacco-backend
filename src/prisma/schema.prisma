@@ -999,3 +999,159 @@ model CanaryDeployment {
   @@index([startedAt])
   @@schema("public")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 7 – Enterprise Operational Maturity, Zero-Trust & Production Launch
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Data Access Log – PII lineage tracking for DPA/GDPR compliance
+model DataAccessLog {
+  id          String   @id @default(uuid())
+  tenantId    String
+  entity      String   // e.g., "Member", "Loan"
+  entityId    String
+  field       String?  // specific PII field accessed
+  accessorId  String   // userId or serviceId
+  accessorRole String
+  purpose     String   // e.g., "CRB_REPORTING", "ADMIN_VIEW"
+  action      String   // READ | EXPORT | MODIFY | DELETE
+  ipAddress   String?
+  requestId   String?
+  timestamp   DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([tenantId, entityId])
+  @@index([accessorId])
+  @@index([timestamp])
+  @@schema("public")
+}
+
+// Consent Registry – tracks member consent lifecycle
+model ConsentRegistry {
+  id        String   @id @default(uuid())
+  tenantId  String
+  memberId  String
+  purpose   String   // CRB_REPORTING | AML_SCREENING | MARKETING | DATA_SHARING | ANALYTICS | THIRD_PARTY
+  granted   Boolean
+  version   String   @default("1.0")
+  channel   String   // WEB | MOBILE | USSD | AGENT | SYSTEM
+  ipAddress String?
+  metadata  Json?
+  timestamp DateTime @default(now())
+
+  @@index([tenantId, memberId])
+  @@index([tenantId, purpose])
+  @@index([timestamp])
+  @@schema("public")
+}
+
+// Erasure Request – right-to-be-forgotten tracking
+model ErasureRequest {
+  id            String    @id @default(uuid())
+  tenantId      String
+  memberId      String
+  reason        String    @db.Text
+  requestedBy   String    // userId
+  status        String    @default("PENDING") // PENDING | PROCESSING | COMPLETED | FAILED
+  jobId         String?
+  certificateId String?
+  certificate   Json?     // ErasureCertificate
+  completedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, memberId])
+  @@index([status])
+  @@schema("public")
+}
+
+// Partner – ecosystem partner with API credentials
+model Partner {
+  id               String    @id @default(uuid())
+  tenantId         String
+  name             String
+  clientId         String    @unique
+  clientSecretHash String
+  apiKeyHash       String
+  scopes           String[]
+  rateLimitTier    String    @default("standard")
+  slaConfig        Json      // { p95LatencyMs, uptimePct, errorRatePct }
+  contactName      String
+  contactEmail     String
+  contactPhone     String?
+  ipWhitelist      String[]
+  status           String    @default("PENDING_KYB") // PENDING_KYB | ACTIVE | SUSPENDED | REVOKED
+  suspendedReason  String?
+  activatedAt      DateTime?
+  keyRotatedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  usageSnapshots PartnerUsageSnapshot[]
+  slaIncidents   SlaIncident[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([clientId])
+  @@index([status])
+  @@schema("public")
+}
+
+// Partner Usage Snapshot – monthly billing aggregates
+model PartnerUsageSnapshot {
+  id           String  @id @default(uuid())
+  partnerId    String
+  partner      Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  period       String  // YYYY-MM
+  totalCalls   Int     @default(0)
+  totalErrors  Int     @default(0)
+  totalBytes   Int     @default(0)
+  avgP95Ms     Float   @default(0)
+  totalCostKes Float   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([partnerId, period])
+  @@index([partnerId])
+  @@schema("public")
+}
+
+// SLA Incident – partner SLA breach records
+model SlaIncident {
+  id                String    @id @default(uuid())
+  partnerId         String
+  partner           Partner   @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  tenantId          String
+  period            String
+  breaches          String[]
+  actualMetrics     Json
+  contractedMetrics Json
+  status            String    @default("OPEN") // OPEN | RESOLVED
+  resolvedAt        DateTime?
+  resolvedBy        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([partnerId])
+  @@index([tenantId])
+  @@index([status])
+  @@schema("public")
+}
+
+// Executive Report – board-ready report snapshots
+model ExecutiveReport {
+  id          String   @id @default(uuid())
+  tenantId    String
+  period      String   // YYYY-MM or YYYY-QN
+  periodType  String   // MONTHLY | QUARTERLY
+  reportData  Json
+  generatedAt DateTime @default(now())
+
+  @@unique([tenantId, period, periodType])
+  @@index([tenantId])
+  @@index([generatedAt])
+  @@schema("public")
+}
