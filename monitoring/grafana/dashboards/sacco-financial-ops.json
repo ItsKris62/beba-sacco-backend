@@ -1,0 +1,78 @@
+{
+  "__inputs": [{ "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }],
+  "title": "SACCO Financial Operations",
+  "uid": "sacco-financial",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "1m",
+  "tags": ["sacco", "financial", "compliance"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Loans by Staging (NPL / Watchlist / Performing)",
+      "type": "piechart",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sacco_loans_by_staging{staging='NPL'}", "legendFormat": "NPL" },
+        { "expr": "sacco_loans_by_staging{staging='WATCHLIST'}", "legendFormat": "Watchlist" },
+        { "expr": "sacco_loans_by_staging{staging='PERFORMING'}", "legendFormat": "Performing" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "M-Pesa Reconciliation Mismatches",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sacco_recon_mismatch_total", "legendFormat": "mismatches" }],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{"value": 0, "color": "green"}, {"value": 1, "color": "red"}] } }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Ledger Drift Accounts",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sacco_ledger_drift_accounts_total", "legendFormat": "drift accounts" }],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{"value": 0, "color": "green"}, {"value": 1, "color": "red"}] } }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Daily Interest Accrual (last 7d)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sacco_accrual_processed_total", "legendFormat": "processed" },
+        { "expr": "sacco_accrual_skipped_total", "legendFormat": "skipped" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Velocity Breaches (last 1h)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum(rate(sacco_velocity_breach_total[1h])) by (action)",
+        "legendFormat": "{{ action }}"
+      }]
+    },
+    {
+      "id": 6,
+      "title": "Outbound Webhook Delivery Success Rate",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 16, "w": 8, "h": 8 },
+      "targets": [{
+        "expr": "100 * sacco_webhook_delivered_total / (sacco_webhook_delivered_total + sacco_webhook_failed_total)",
+        "legendFormat": "success %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "max": 100,
+          "thresholds": { "steps": [{"value": 0, "color": "red"}, {"value": 95, "color": "yellow"}, {"value": 99, "color": "green"}] }
+        }
+      }
+    }
+  ]
+}

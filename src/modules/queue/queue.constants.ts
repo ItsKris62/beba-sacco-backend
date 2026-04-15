@@ -8,6 +8,20 @@ export const QUEUE_NAMES = {
   AUDIT_LOG: 'audit.log',
   LOAN_DISBURSE: 'loan.disburse',
   EMAIL: 'email',
+  // Phase 4 – Financial Operations
+  INTEREST_ACCRUAL: 'financial.interest-accrual',
+  REPAYMENT_SCHEDULE: 'financial.repayment-schedule',
+  MPESA_RECONCILIATION: 'financial.mpesa-reconciliation',
+  LEDGER_INTEGRITY: 'financial.ledger-integrity',
+  // Phase 4 – Outbound Webhooks
+  OUTBOUND_WEBHOOK: 'webhooks.outbound',
+  // Phase 5 – Enterprise Integrations
+  CRB_EXPORT: 'integrations.crb-export',
+  AML_SCREEN: 'integrations.aml-screen',
+  NOTIFY_MULTI: 'notifications.multi-channel',
+  OUTBOX_PUBLISH: 'integrations.outbox-publish',
+  IFRS9_ECL: 'compliance.ifrs9-ecl',
+  DSAR_PROCESS: 'compliance.dsar-process',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -118,4 +132,78 @@ export interface PasswordResetEmailPayload extends BaseEmailPayload {
   type: 'PASSWORD_RESET';
   resetUrl: string;
   expiresInMinutes: number;
+}
+
+// ─── Phase 4 job payload types ────────────────────────────────────────────────
+
+export interface InterestAccrualJobPayload {
+  /** ISO date string (YYYY-MM-DD) – the accrual date, used for idempotency */
+  accrualDate: string;
+  tenantId: string;
+}
+
+export interface RepaymentScheduleJobPayload {
+  loanId: string;
+  tenantId: string;
+  /** ISO date string – scheduled due date for this instalment */
+  dueDate: string;
+  instalmentAmount: number;
+}
+
+export interface MpesaReconciliationJobPayload {
+  /** ISO date string (YYYY-MM-DD) – settlement date to reconcile */
+  settlementDate: string;
+  tenantId: string;
+}
+
+export interface LedgerIntegrityJobPayload {
+  tenantId: string;
+}
+
+export interface OutboundWebhookJobPayload {
+  subscriptionId: string;
+  deliveryId: string;
+  event: string;
+  payload: Record<string, unknown>;
+  attempt: number;
+}
+
+// ─── Phase 5 job payload types ────────────────────────────────────────────────
+
+export interface CrbExportJobPayload {
+  tenantId: string;
+  reportId: string;
+  outboxId: string;
+}
+
+export interface AmlScreenJobPayload {
+  tenantId: string;
+  screeningId: string;
+  memberId: string;
+  trigger: 'KYC' | 'DEPOSIT' | 'MANUAL';
+  triggerRef?: string;
+}
+
+export interface MultiChannelNotifyJobPayload {
+  tenantId: string;
+  notificationId: string;
+  channel: 'EMAIL' | 'SMS' | 'WHATSAPP';
+  recipient: string;
+  templateId: string;
+  payload: Record<string, unknown>;
+}
+
+export interface OutboxPublishJobPayload {
+  outboxId: string;
+}
+
+export interface Ifrs9EclJobPayload {
+  tenantId: string;
+  calculationDate: string; // YYYY-MM-DD
+}
+
+export interface DsarProcessJobPayload {
+  tenantId: string;
+  dsarRequestId: string;
+  memberId: string;
 }

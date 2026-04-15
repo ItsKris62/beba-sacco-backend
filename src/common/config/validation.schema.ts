@@ -84,5 +84,25 @@ export const validationSchema = Joi.object({
 
   // Multi-Tenancy
   DEFAULT_TENANT_ID: Joi.string().optional(),
+
+  // Phase 4 – Data Retention (Kenya Data Protection Act)
+  DATA_RETENTION_YEARS: Joi.number().integer().min(1).default(7),
+
+  // Phase 4 – Alerting
+  SLACK_WEBHOOK_URL: Joi.string().uri().optional(),
+  PAGERDUTY_INTEGRATION_KEY: Joi.string().optional(),
+
+  // Phase 4 – MinIO/S3 Backups
+  MINIO_ENDPOINT: Joi.string().uri().optional(),
+  MINIO_BUCKET: Joi.string().optional(),
+  MINIO_ACCESS_KEY: Joi.string().optional(),
+  MINIO_SECRET_KEY: Joi.string().optional(),
+  BACKUP_RETENTION_DAYS: Joi.number().integer().min(1).default(30),
+
+  // Phase 4 – BullMQ clustering (optional overrides)
+  BULLMQ_CONCURRENCY_ACCRUAL: Joi.number().integer().default(3),
+  BULLMQ_CONCURRENCY_RECON: Joi.number().integer().default(2),
+  BULLMQ_CONCURRENCY_LEDGER: Joi.number().integer().default(2),
+  BULLMQ_CONCURRENCY_WEBHOOK: Joi.number().integer().default(10),
 });
 

@@ -79,6 +79,8 @@ enum TransactionType {
   LOAN_DISBURSEMENT
   LOAN_REPAYMENT
   INTEREST_EARNED
+  INTEREST_ACCRUAL   // Phase 4: daily interest accrual
+  PENALTY            // Phase 4: penalty charge on overdue loan
   DIVIDEND_PAYOUT
   FEE_CHARGE
   TRANSFER
@@ -91,6 +93,114 @@ enum TransactionStatus {
   COMPLETED
   FAILED
   REVERSED
+  RECON_PENDING // Phase 4: flagged by reconciliation engine – awaiting resolution
+
+  @@schema("public")
+}
+
+// Phase 4: loan classification for provisioning & SASRA reporting
+enum LoanStaging {
+  PERFORMING  // < 30 days in arrears
+  WATCHLIST   // 30–89 days in arrears
+  NPL         // ≥ 90 days in arrears (Non-Performing Loan)
+
+  @@schema("public")
+}
+
+// Phase 4: approval chain status
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+
+  @@schema("public")
+}
+
+// Phase 4: webhook event subscription status
+enum WebhookStatus {
+  ACTIVE
+  INACTIVE
+
+  @@schema("public")
+}
+
+// Phase 4: webhook delivery status
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+
+  @@schema("public")
+}
+
+// Phase 5: Integration outbox status
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+  DEAD_LETTER
+
+  @@schema("public")
+}
+
+// Phase 5: AML screening status
+enum AmlScreeningStatus {
+  PENDING
+  CLEAR
+  FLAGGED
+  BLOCKED
+
+  @@schema("public")
+}
+
+// Phase 5: CRB report status
+enum CrbReportStatus {
+  PENDING
+  QUEUED
+  SUBMITTED
+  ACCEPTED
+  REJECTED
+  FAILED
+
+  @@schema("public")
+}
+
+// Phase 5: DSAR request status
+enum DsarRequestStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  EXPIRED
+  REDACTED
+
+  @@schema("public")
+}
+
+// Phase 5: Notification channel
+enum NotificationChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+
+  @@schema("public")
+}
+
+// Phase 5: Notification delivery status
+enum NotificationStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+
+  @@schema("public")
+}
+
+// Phase 5: OAuth2 API client status
+enum ApiClientStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
 
   @@schema("public")
 }
@@ -121,15 +231,16 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users        User[]
-  auditLogs    AuditLog[]
-  members      Member[]
-  accounts     Account[]
-  loanProducts LoanProduct[]
-  loans        Loan[]
-  transactions Transaction[]
-  guarantors   Guarantor[]
-  counter      TenantCounter?
+  users                User[]
+  auditLogs            AuditLog[]
+  members              Member[]
+  accounts             Account[]
+  loanProducts         LoanProduct[]
+  loans                Loan[]
+  transactions         Transaction[]
+  guarantors           Guarantor[]
+  counter              TenantCounter?
+  webhookSubscriptions WebhookSubscription[]
 
   @@index([slug])
   @@index([status])
@@ -196,6 +307,11 @@ model AuditLog {
   userAgent String?
   requestId String? @unique
 
+  // Phase 4 – immutable audit chain: hash of this record's payload
+  // prevHash links to the prior entry's hash, forming a tamper-evident chain
+  prevHash String? @db.Text
+  entryHash String? @db.Text
+
   timestamp DateTime @default(now())
 
   @@index([tenantId])
@@ -227,6 +343,11 @@ model Member {
 
   isActive     Boolean  @default(true)
   joinedAt     DateTime @default(now())
+
+  // Phase 4 – privacy & consent (Kenya Data Protection Act)
+  consentDataSharing Boolean  @default(false)
+  consentUpdatedAt   DateTime?
+  deletedAt          DateTime? // soft-delete for data retention
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -326,20 +447,28 @@ model Loan {
   dueDate     DateTime? // Final repayment due date
 
   // Repayment tracking (updated on each repayment transaction)
-  totalRepaid    Decimal @default(0) @db.Decimal(18, 4)
+  totalRepaid        Decimal @default(0) @db.Decimal(18, 4)
   outstandingBalance Decimal @db.Decimal(18, 4) // = principalAmount initially, decremented on repayment
+
+  // Phase 4 – arrears & staging (updated daily by interest-accrual job)
+  arrearsAmount Decimal      @default(0) @db.Decimal(18, 4)
+  arrearsDays   Int          @default(0)
+  staging       LoanStaging  @default(PERFORMING)
+  lastAccrualDate DateTime?  // last date interest accrual ran for this loan (idempotency)
 
   notes String? @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  transactions Transaction[]
-  guarantors   Guarantor[]
+  transactions   Transaction[]
+  guarantors     Guarantor[]
+  approvalChains LoanApprovalChain[]
 
   @@unique([tenantId, loanNumber])
   @@index([tenantId, memberId])
   @@index([tenantId, status])
+  @@index([tenantId, staging])
   @@schema("public")
 }
 
@@ -427,5 +556,298 @@ model MpesaTransaction {
 
   @@index([tenantId])
   @@index([checkoutRequestId])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 4 – Financial Operations, Compliance & Enterprise Readiness
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 4-eyes principle: tracks the two required approvals for large disbursements
+model LoanApprovalChain {
+  id       String @id @default(uuid())
+  tenantId String
+  loanId   String
+  loan     Loan   @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  approverId String  // userId of approver
+  role       String  // role at time of approval (MANAGER / LOAN_OFFICER)
+  status     ApprovalStatus @default(PENDING)
+  notes      String? @db.Text
+
+  decidedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, loanId])
+  @@schema("public")
+}
+
+// Device / IP fingerprinting for login sessions
+model LoginSession {
+  id       String @id @default(uuid())
+  tenantId String
+  userId   String
+
+  ipHash    String  // SHA-256 of client IP
+  userAgent String? @db.Text
+  geoHint   String? // country/region hint (optional, populated from IP headers)
+
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+  isActive  Boolean  @default(true)
+
+  @@index([tenantId, userId])
+  @@index([ipHash])
+  @@schema("public")
+}
+
+// Outbound webhook subscriptions (tenant-owned)
+model WebhookSubscription {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  url       String       // Target HTTPS URL
+  secret    String       // HMAC-SHA256 signing secret (stored, NOT hashed)
+  events    String[]     // e.g., ["loan.status_changed", "repayment.posted"]
+  status    WebhookStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([tenantId])
+  @@schema("public")
+}
+
+// Delivery log for each outbound webhook dispatch
+model WebhookDelivery {
+  id             String @id @default(uuid())
+  subscriptionId String
+  subscription   WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  event       String // e.g., "loan.status_changed"
+  payload     Json
+  status      WebhookDeliveryStatus @default(PENDING)
+  httpStatus  Int?
+  responseBody String? @db.Text
+  attempts    Int      @default(0)
+  nextRetryAt DateTime?
+
+  createdAt   DateTime @default(now())
+  deliveredAt DateTime?
+
+  @@index([subscriptionId])
+  @@index([status])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 5 – Enterprise Maturity, Ecosystem Integration & SRE Excellence
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Integration Outbox – guarantees at-least-once delivery for all external integrations
+model IntegrationOutbox {
+  id             String       @id @default(uuid())
+  tenantId       String
+  idempotencyKey String       @unique // Prevents duplicate processing
+  integrationType String      // CRB_EXPORT | AML_SCREEN | NOTIFY | WEBHOOK
+  payload        Json         // Serialized payload for the integration
+  status         OutboxStatus @default(PENDING)
+  attempts       Int          @default(0)
+  maxAttempts    Int          @default(5)
+  lastError      String?      @db.Text
+  nextRetryAt    DateTime?
+  processedAt    DateTime?
+  deadLetteredAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([status, nextRetryAt])
+  @@index([integrationType, status])
+  @@schema("public")
+}
+
+// CRB Report – tracks CRB Africa/Metropol submissions
+model CrbReport {
+  id          String          @id @default(uuid())
+  tenantId    String
+  loanIds     String[]        // Loan UUIDs included in this report
+  periodStart DateTime
+  periodEnd   DateTime
+  xmlPayload  String          @db.Text // Generated CRB XML
+  status      CrbReportStatus @default(PENDING)
+  submittedAt DateTime?
+  responseCode String?
+  responseMessage String?     @db.Text
+  outboxId    String?         // Link to IntegrationOutbox entry
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([periodStart, periodEnd])
+  @@schema("public")
+}
+
+// AML/CFT Screening – async screening results
+model AmlScreening {
+  id          String             @id @default(uuid())
+  tenantId    String
+  memberId    String
+  trigger     String             // KYC | DEPOSIT | MANUAL
+  triggerRef  String?            // e.g., transaction ID for deposit triggers
+  riskScore   Int?               // 0–100
+  status      AmlScreeningStatus @default(PENDING)
+  watchlistMatches Json?         // Array of matched entries from sanctions/PEP lists
+  screenedAt  DateTime?
+  reviewedBy  String?            // userId of compliance officer who reviewed
+  reviewNotes String?            @db.Text
+  outboxId    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([memberId])
+  @@index([status])
+  @@schema("public")
+}
+
+// IFRS 9 ECL Provisioning Entry – daily calculated expected credit loss
+model ProvisioningEntry {
+  id          String      @id @default(uuid())
+  tenantId    String
+  loanId      String
+  calculationDate DateTime // Date of ECL calculation
+  staging     LoanStaging // Staging at time of calculation
+
+  // ECL = PD × LGD × EAD
+  pd          Decimal     @db.Decimal(10, 6) // Probability of Default
+  lgd         Decimal     @db.Decimal(10, 6) // Loss Given Default
+  ead         Decimal     @db.Decimal(18, 4) // Exposure at Default
+  eclAmount   Decimal     @db.Decimal(18, 4) // Calculated ECL
+  macroAdjustment Decimal @default(1) @db.Decimal(7, 4) // Macro-economic adjustment factor
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, loanId, calculationDate])
+  @@index([tenantId, calculationDate])
+  @@index([tenantId, staging])
+  @@schema("public")
+}
+
+// DSAR (Data Subject Access Request) – Kenya DPA / GDPR compliance
+model DsarRequest {
+  id          String            @id @default(uuid())
+  tenantId    String
+  memberId    String
+  requestedBy String            // userId who initiated the request
+  status      DsarRequestStatus @default(PENDING)
+  downloadUrl String?           // Pre-signed MinIO URL for encrypted ZIP
+  expiresAt   DateTime?         // URL expiry (30 days from generation)
+  redactedAt  DateTime?         // When auto-redaction occurred
+  auditTrail  Json?             // Tracks what data was included
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([memberId])
+  @@index([status])
+  @@schema("public")
+}
+
+// SASRA Ratio Snapshot – historical liquidity & capital adequacy ratios
+model SasraRatioSnapshot {
+  id          String   @id @default(uuid())
+  tenantId    String
+  period      String   // YYYY-MM format
+  liquidAssets        Decimal @db.Decimal(18, 4)
+  shortTermLiabilities Decimal @db.Decimal(18, 4)
+  liquidityRatio      Decimal @db.Decimal(10, 6)
+  coreCapital         Decimal @db.Decimal(18, 4)
+  totalAssets         Decimal @db.Decimal(18, 4)
+  capitalAdequacyRatio Decimal @db.Decimal(10, 6)
+  totalLoans          Decimal @db.Decimal(18, 4)
+  nplAmount           Decimal @db.Decimal(18, 4)
+  portfolioQualityRatio Decimal @db.Decimal(10, 6)
+  metadata    Json?    // Additional CBK-required fields
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, period])
+  @@index([tenantId])
+  @@schema("public")
+}
+
+// CBK Monthly Return – versioned filing records
+model CbkReturn {
+  id          String   @id @default(uuid())
+  tenantId    String
+  period      String   // YYYY-MM format
+  version     Int      @default(1)
+  csvPayload  String   @db.Text // Generated CSV content
+  loanPortfolio       Decimal @db.Decimal(18, 4)
+  nplRatio            Decimal @db.Decimal(10, 6)
+  depositGrowth       Decimal @db.Decimal(10, 6)
+  capitalAdequacy     Decimal @db.Decimal(10, 6)
+  filingDate  DateTime @default(now())
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, period, version])
+  @@index([tenantId])
+  @@schema("public")
+}
+
+// OAuth2 API Client – partner credentials for Open API Gateway
+model ApiClient {
+  id          String          @id @default(uuid())
+  tenantId    String
+  clientId    String          @unique // OAuth2 client_id
+  clientSecretHash String     // Argon2 hash of client_secret
+  name        String          // Partner name
+  scopes      String[]        // e.g., ["read:loans", "write:deposits"]
+  rateLimitTier String        @default("partner") // internal | partner | public
+  status      ApiClientStatus @default(ACTIVE)
+  webhookUrl  String?         // Optional webhook endpoint
+  ipWhitelist String[]        // Allowed IPs (empty = all)
+  lastUsedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([clientId])
+  @@schema("public")
+}
+
+// Multi-channel notification log
+model NotificationLog {
+  id          String              @id @default(uuid())
+  tenantId    String
+  memberId    String?
+  channel     NotificationChannel
+  recipient   String              // Email, phone number, WhatsApp number
+  templateId  String              // Template identifier
+  payload     Json                // Template variables
+  status      NotificationStatus  @default(PENDING)
+  providerRef String?             // External provider reference ID
+  cost        Decimal?            @db.Decimal(10, 4) // Cost in KES
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  failReason  String?             @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([memberId])
+  @@index([status])
+  @@index([channel, status])
   @@schema("public")
 }

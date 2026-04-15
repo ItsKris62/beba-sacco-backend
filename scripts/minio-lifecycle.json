@@ -1,0 +1,33 @@
+{
+  "Rules": [
+    {
+      "ID": "delete-temp-uploads-7d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "uploads/temp/" },
+      "Expiration": { "Days": 7 }
+    },
+    {
+      "ID": "transition-old-docs-to-cold-storage",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "documents/" },
+      "Transitions": [
+        {
+          "Days": 90,
+          "StorageClass": "GLACIER"
+        }
+      ]
+    },
+    {
+      "ID": "delete-old-backups",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "daily/" },
+      "Expiration": { "Days": 30 }
+    },
+    {
+      "ID": "enable-versioning-cleanup",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 90 }
+    }
+  ]
+}

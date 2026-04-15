@@ -1,0 +1,57 @@
+global:
+  resolve_timeout: 5m
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+
+route:
+  receiver: 'slack-critical'
+  group_by: ['alertname', 'tenant']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    - match:
+        severity: critical
+      receiver: 'slack-critical'
+      repeat_interval: 1h
+
+    - match:
+        severity: warning
+      receiver: 'slack-warning'
+      repeat_interval: 4h
+
+    - match:
+        alertname: LedgerDrift
+      receiver: 'pagerduty-financial'
+      repeat_interval: 30m
+
+receivers:
+  - name: 'slack-critical'
+    slack_configs:
+      - channel: '#sacco-alerts-critical'
+        icon_emoji: ':rotating_light:'
+        title: '[CRITICAL] {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Details:* {{ .Annotations.description }}
+          *Tenant:* {{ .Labels.tenant }}
+          {{ end }}
+        send_resolved: true
+
+  - name: 'slack-warning'
+    slack_configs:
+      - channel: '#sacco-alerts-warning'
+        icon_emoji: ':warning:'
+        title: '[WARNING] {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Details:* {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+
+  - name: 'pagerduty-financial'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_INTEGRATION_KEY}'
+        description: '{{ .GroupLabels.alertname }}: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'

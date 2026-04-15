@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, HttpException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import {
   HealthCheck,
@@ -95,5 +95,62 @@ export class HealthController {
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Phase 4 – Synthetic end-to-end health probe.
+   * Runs DB + Redis + tenant table checks.
+   * Returns 200 only if all pass; 503 on any failure.
+   * Pinged every 2 minutes by uptime monitors.
+   */
+  @Public()
+  @Get('synthetic')
+  @ApiOperation({
+    summary: 'Synthetic e2e health probe (Phase 4)',
+    description: 'DB + Redis + tenant table checks. Returns 200 only if all pass.',
+  })
+  @ApiResponse({ status: 200, description: 'All synthetic checks passed' })
+  @ApiResponse({ status: 503, description: 'One or more checks failed' })
+  async synthetic() {
+    const results: Record<string, { status: 'pass' | 'fail'; latencyMs: number; error?: string }> = {};
+    let allPass = true;
+
+    // 1. DB connectivity
+    const dbStart = Date.now();
+    try {
+      await this.prisma.$queryRaw`SELECT 1`;
+      results.database = { status: 'pass', latencyMs: Date.now() - dbStart };
+    } catch (err) {
+      results.database = { status: 'fail', latencyMs: Date.now() - dbStart, error: String(err) };
+      allPass = false;
+    }
+
+    // 2. Redis round-trip
+    const redisStart = Date.now();
+    try {
+      const testKey = `health:synthetic:${Date.now()}`;
+      await this.redis.set(testKey, '1', 10);
+      const val = await this.redis.get(testKey);
+      if (val !== '1') throw new Error('Round-trip value mismatch');
+      results.redis = { status: 'pass', latencyMs: Date.now() - redisStart };
+    } catch (err) {
+      results.redis = { status: 'fail', latencyMs: Date.now() - redisStart, error: String(err) };
+      allPass = false;
+    }
+
+    // 3. Tenant table readable
+    const tenantStart = Date.now();
+    try {
+      await this.prisma.tenant.count();
+      results.tenantTable = { status: 'pass', latencyMs: Date.now() - tenantStart };
+    } catch (err) {
+      results.tenantTable = { status: 'fail', latencyMs: Date.now() - tenantStart, error: String(err) };
+      allPass = false;
+    }
+
+    const body = { status: allPass ? 'ok' : 'degraded', timestamp: new Date().toISOString(), checks: results };
+
+    if (!allPass) throw new HttpException(body, 503);
+    return body;
   }
 }

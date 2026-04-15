@@ -1,0 +1,232 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Chaos Testing Suite – Phase 5 SRE
+#
+# Defines chaos experiments to validate system resilience.
+# Run with: chaos-mesh (K8s) or custom scripts (Docker Compose).
+#
+# Each test validates:
+#   1. Graceful degradation (no data loss)
+#   2. Circuit breaker activation
+#   3. Queue drain on recovery
+#   4. Correct error responses (not 500s)
+#   5. Alerting fires within SLA
+# ─────────────────────────────────────────────────────────────────────────────
+
+experiments:
+  # ── 1. Database Latency Spike ──────────────────────────────────────────────
+  - name: db-latency-spike
+    description: |
+      Inject 2s latency on PostgreSQL queries.
+      Validates: Circuit breaker trips, read replicas absorb load,
+      API returns 503 with retry-after header.
+    target: postgresql
+    fault:
+      type: network-delay
+      delay: 2000ms
+      duration: 120s
+      jitter: 500ms
+    validation:
+      - metric: api_response_time_p99
+        threshold: "< 5s"
+        description: "p99 should not exceed 5s even under DB stress"
+      - metric: error_rate_5xx
+        threshold: "< 5%"
+        description: "5xx rate should stay below 5%"
+      - metric: circuit_breaker_state
+        expected: OPEN
+        description: "Circuit breaker should trip after 5 consecutive failures"
+      - metric: queue_depth
+        threshold: "< 500"
+        description: "Queues should not overflow"
+    recovery:
+      - description: "Remove latency injection"
+      - description: "Verify circuit breaker resets to CLOSED within 30s"
+      - description: "Verify queued jobs drain within 60s"
+      - description: "Verify zero data loss (compare member/loan counts)"
+
+  # ── 2. Redis Partition (50% packet loss) ───────────────────────────────────
+  - name: redis-partition
+    description: |
+      Simulate 50% packet loss to Redis.
+      Validates: BullMQ retries, rate limiter degrades gracefully,
+      session cache misses handled, no duplicate job processing.
+    target: redis
+    fault:
+      type: network-loss
+      loss_percent: 50
+      duration: 90s
+    validation:
+      - metric: bullmq_failed_jobs
+        threshold: "< 10"
+        description: "Failed jobs should be minimal due to retries"
+      - metric: rate_limiter_fallback
+        expected: true
+        description: "Rate limiter should fall back to in-memory"
+      - metric: duplicate_job_count
+        threshold: "= 0"
+        description: "No duplicate job processing"
+      - metric: session_cache_miss_rate
+        threshold: "< 30%"
+        description: "Cache miss rate should be manageable"
+    recovery:
+      - description: "Restore Redis connectivity"
+      - description: "Verify all pending jobs complete within 120s"
+      - description: "Verify idempotency keys still enforced"
+
+  # ── 3. BullMQ Worker Crash ────────────────────────────────────────────────
+  - name: bullmq-worker-crash
+    description: |
+      Kill all BullMQ worker processes.
+      Validates: Jobs remain in queue, no data loss,
+      workers auto-restart, stalled jobs are retried.
+    target: bullmq-workers
+    fault:
+      type: pod-kill
+      count: all
+      duration: 60s
+    validation:
+      - metric: queue_jobs_waiting
+        threshold: "> 0"
+        description: "Jobs should accumulate in queue"
+      - metric: data_loss
+        threshold: "= 0"
+        description: "Zero data loss"
+      - metric: worker_restart_time
+        threshold: "< 30s"
+        description: "Workers should restart within 30s"
+    recovery:
+      - description: "Workers auto-restart via K8s/PM2"
+      - description: "Stalled jobs detected and retried"
+      - description: "All queued jobs drain within 180s"
+      - description: "Verify job completion count matches expected"
+
+  # ── 4. Daraja API Timeout (HTTP 503) ──────────────────────────────────────
+  - name: daraja-timeout
+    description: |
+      Simulate Safaricom Daraja API returning 503 for all requests.
+      Validates: Circuit breaker trips, M-Pesa transactions queued for retry,
+      user gets meaningful error, no double-disbursements.
+    target: daraja-api
+    fault:
+      type: http-error
+      status_code: 503
+      duration: 120s
+      match:
+        - host: "sandbox.safaricom.co.ke"
+        - host: "api.safaricom.co.ke"
+    validation:
+      - metric: daraja_circuit_breaker
+        expected: OPEN
+        description: "Daraja circuit breaker should trip"
+      - metric: mpesa_retry_queue_depth
+        threshold: "> 0"
+        description: "Failed M-Pesa requests should be queued for retry"
+      - metric: double_disbursement_count
+        threshold: "= 0"
+        description: "No double disbursements"
+      - metric: user_error_response
+        expected: "M-Pesa service temporarily unavailable. Your request has been queued."
+        description: "User should get meaningful error message"
+    recovery:
+      - description: "Restore Daraja API"
+      - description: "Circuit breaker resets within 60s"
+      - description: "Queued M-Pesa requests retry and complete"
+      - description: "Reconciliation confirms all transactions"
+
+  # ── 5. Queue Storm (5000 jobs/min) ────────────────────────────────────────
+  - name: queue-storm
+    description: |
+      Flood BullMQ with 5000 jobs per minute across all queues.
+      Validates: Auto-scaling triggers, backpressure handling,
+      no OOM kills, graceful degradation.
+    target: bullmq-queues
+    fault:
+      type: load-injection
+      rate: 5000/min
+      duration: 300s
+      queues:
+        - mpesa.callback
+        - loan.disburse
+        - audit.log
+        - crb.export
+        - aml.screen
+    validation:
+      - metric: worker_pod_count
+        threshold: "> 2"
+        description: "HPA should scale workers"
+      - metric: oom_kill_count
+        threshold: "= 0"
+        description: "No OOM kills"
+      - metric: queue_processing_rate
+        threshold: "> 1000/min"
+        description: "Processing rate should scale with workers"
+      - metric: oldest_job_age
+        threshold: "< 300s"
+        description: "No job should wait more than 5 minutes"
+    recovery:
+      - description: "Stop load injection"
+      - description: "All queues drain within 600s"
+      - description: "Worker pods scale down within 300s"
+      - description: "Memory usage returns to baseline"
+
+  # ── 6. Primary Database Failover ──────────────────────────────────────────
+  - name: primary-db-failover
+    description: |
+      Kill primary PostgreSQL instance.
+      Validates: Read replica promotes, DNS/connection failover,
+      write operations resume within RTO, zero data loss.
+    target: postgresql-primary
+    fault:
+      type: pod-kill
+      count: 1
+      duration: 180s
+    validation:
+      - metric: read_availability
+        threshold: "> 99%"
+        description: "Read operations should continue via replica"
+      - metric: write_recovery_time
+        threshold: "< 60s"
+        description: "Write operations should resume within 60s"
+      - metric: data_loss
+        threshold: "= 0"
+        description: "Zero data loss (WAL replication)"
+      - metric: connection_pool_recovery
+        threshold: "< 30s"
+        description: "PgBouncer should reconnect within 30s"
+    recovery:
+      - description: "Replica promotes to primary"
+      - description: "PgBouncer reconnects to new primary"
+      - description: "Application health checks pass"
+      - description: "Run data integrity check (member/loan/transaction counts)"
+
+# ── Execution Runbook ────────────────────────────────────────────────────────
+runbook:
+  pre_checks:
+    - "Verify monitoring dashboards are accessible"
+    - "Confirm alerting channels are active (Slack, PagerDuty)"
+    - "Take database snapshot before chaos test"
+    - "Ensure no active deployments in progress"
+    - "Notify team of chaos test window"
+
+  execution_order:
+    - db-latency-spike
+    - redis-partition
+    - bullmq-worker-crash
+    - daraja-timeout
+    - queue-storm
+    - primary-db-failover
+
+  post_checks:
+    - "Verify all services healthy (GET /health)"
+    - "Run data integrity check across all tenants"
+    - "Verify queue depths at zero"
+    - "Check for any orphaned transactions"
+    - "Review alert history for false positives"
+    - "Document findings and update runbook"
+
+  success_criteria:
+    uptime: ">= 99.95%"
+    data_loss: "= 0"
+    p95_latency: "< 150ms (steady state)"
+    error_rate: "< 0.1% (steady state)"
+    recovery_time: "< 60s for all scenarios"

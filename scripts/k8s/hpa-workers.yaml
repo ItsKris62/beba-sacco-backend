@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Horizontal Pod Autoscaler – BullMQ Workers – Phase 5 SRE
+#
+# Scales worker pods based on queue depth (custom metric).
+# Target: Queue depth > 200 → scale between 1 and 6 replicas.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: beba-workers-hpa
+  namespace: beba
+  labels:
+    app: beba-workers
+    phase: "5"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: beba-workers
+  minReplicas: 1
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Custom metric: BullMQ queue depth via Prometheus adapter
+    - type: Pods
+      pods:
+        metric:
+          name: bullmq_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "200"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

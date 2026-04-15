@@ -6,12 +6,12 @@ import Redis from 'ioredis';
  * Redis Service – ioredis wrapper
  *
  * Used by:
- * - IdempotencyService (24h dedup keys)
+ * - IdempotencyMiddleware (24h dedup keys)
  * - MpesaService (Daraja OAuth token cache, ~50 min TTL)
- * - Phase 3+: auth JTI blocklist, tenant lookup cache
+ * - Phase 4: velocity counters, distributed locks for accrual/recon jobs
  *
  * Connection errors are logged but do NOT crash the app — all callers must
- * handle `null` returns gracefully (degraded mode: bypass cache/idempotency).
+ * handle `null` / `false` returns gracefully (degraded mode).
  */
 @Injectable()
 export class RedisService implements OnModuleDestroy {
@@ -42,15 +42,31 @@ export class RedisService implements OnModuleDestroy {
     }
   }
 
-  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+  /**
+   * SET key value [EX ttl] [NX]
+   *
+   * @param key
+   * @param value
+   * @param ttlSeconds  Optional TTL in seconds
+   * @param nx          If true, uses SET NX (only set if key does NOT exist).
+   *                    Returns true when the key was set, false when it already existed.
+   *                    When false (default), always sets and returns true.
+   */
+  async set(key: string, value: string, ttlSeconds?: number, nx?: boolean): Promise<boolean> {
     try {
+      if (nx && ttlSeconds) {
+        const result = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');
+        return result === 'OK';
+      }
       if (ttlSeconds) {
         await this.client.setex(key, ttlSeconds, value);
       } else {
         await this.client.set(key, value);
       }
+      return true;
     } catch (err) {
       this.logger.warn(`Redis set failed for key ${key}`, err);
+      return false;
     }
   }
 
@@ -68,6 +84,22 @@ export class RedisService implements OnModuleDestroy {
       return n > 0;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Atomic INCR + set TTL on first write (for velocity counters).
+   * Returns the new counter value.  Returns 0 on Redis error (fail open).
+   */
+  async incr(key: string, ttlSeconds?: number): Promise<number> {
+    try {
+      const value = await this.client.incr(key);
+      if (value === 1 && ttlSeconds) {
+        await this.client.expire(key, ttlSeconds);
+      }
+      return value;
+    } catch {
+      return 0;
     }
   }
 

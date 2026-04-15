@@ -34,6 +34,14 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { HealthModule } from './modules/health/health.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { MetricsModule } from './modules/metrics/metrics.module';
+import { FinancialModule } from './modules/financial/financial.module';
+import { ComplianceModule } from './modules/compliance/compliance.module';
+import { FraudModule } from './modules/fraud/fraud.module';
+import { WebhooksModule } from './modules/webhooks/webhooks.module';
+// Phase 5
+import { IntegrationsModule } from './modules/integrations/integrations.module';
+import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
+import { ApiVersionInterceptor } from './common/interceptors/api-version.interceptor';
 
 // Prisma
 import { PrismaService } from './prisma/prisma.service';
@@ -110,6 +118,13 @@ import { AuditService } from './modules/audit/audit.service';
     HealthModule,
     AdminModule,
     MetricsModule,
+    // Phase 4
+    FinancialModule,
+    ComplianceModule,
+    FraudModule,
+    WebhooksModule,
+    // Phase 5
+    IntegrationsModule,
   ],
 
   providers: [
@@ -125,6 +140,7 @@ import { AuditService } from './modules/audit/audit.service';
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: TenantInterceptor },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: ApiVersionInterceptor },
 
     // ── Global Filters ────────────────────────────────────────
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
@@ -133,5 +149,7 @@ import { AuditService } from './modules/audit/audit.service';
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     consumer.apply(RequestIdMiddleware).forRoutes('*');
+    // Phase 4 – idempotency enforcement on mutating endpoints
+    consumer.apply(IdempotencyMiddleware).forRoutes('*');
   }
 }
