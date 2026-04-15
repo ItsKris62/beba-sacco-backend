@@ -125,5 +125,25 @@ export class StorageService {
     const response = await this.s3Client.send(command);
     return (response.Contents ?? []).map((obj) => obj.Key ?? '').filter(Boolean);
   }
+
+  /**
+   * Phase 6 – Upload a Buffer directly to storage (server-side upload).
+   * Used by: FeatureStoreService (ML exports), DSARService (encrypted ZIPs).
+   *
+   * @param key          Object key / path in the bucket
+   * @param body         Buffer to upload
+   * @param contentType  MIME type of the content
+   */
+  async uploadBuffer(key: string, body: Buffer, contentType: string): Promise<void> {
+    const command = new PutObjectCommand({
+      Bucket: this.bucketName,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      ContentLength: body.length,
+    });
+    await this.s3Client.send(command);
+    this.logger.log(`Uploaded buffer to ${key} (${body.length} bytes)`);
+  }
 }
 

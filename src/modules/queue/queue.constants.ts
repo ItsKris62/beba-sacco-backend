@@ -22,6 +22,12 @@ export const QUEUE_NAMES = {
   OUTBOX_PUBLISH: 'integrations.outbox-publish',
   IFRS9_ECL: 'compliance.ifrs9-ecl',
   DSAR_PROCESS: 'compliance.dsar-process',
+  // Phase 6 – Scale Intelligence & Policy Automation
+  ANALYTICS_STREAM: 'analytics.stream',
+  RISK_SCORE: 'risk.score',
+  COMPLIANCE_CHECK: 'compliance.policy-check',
+  FEATURE_STORE_EXPORT: 'ml.feature-store-export',
+  CANARY_ANALYSIS: 'deploy.canary-analysis',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -206,4 +212,38 @@ export interface DsarProcessJobPayload {
   tenantId: string;
   dsarRequestId: string;
   memberId: string;
+}
+
+// ─── Phase 6 job payload types ────────────────────────────────────────────────
+
+export interface AnalyticsStreamJobPayload {
+  tenantId: string;
+  entityType: string; // Transaction | Loan | Member | Account
+  entityId: string;
+  operation: 'INSERT' | 'UPDATE' | 'DELETE';
+  payload: Record<string, unknown>;
+  timestamp: string; // ISO string – dedup key
+}
+
+export interface RiskScoreJobPayload {
+  tenantId: string;
+  memberId: string;
+  context: 'LOAN_APPLY' | 'DEPOSIT' | 'LOGIN' | 'MANUAL';
+  triggerRef?: string;
+}
+
+export interface CompliancePolicyCheckJobPayload {
+  tenantId: string;
+  policy?: string; // CBK | SASRA | ODPC – undefined = all
+}
+
+export interface FeatureStoreExportJobPayload {
+  tenantId: string;
+  version: string; // YYYY-MM-DD
+}
+
+export interface CanaryAnalysisJobPayload {
+  deploymentId: string;
+  version: string;
+  prometheusBaseUrl: string;
 }

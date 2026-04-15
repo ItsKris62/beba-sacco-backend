@@ -9,6 +9,7 @@ import Redis from 'ioredis';
  * - IdempotencyMiddleware (24h dedup keys)
  * - MpesaService (Daraja OAuth token cache, ~50 min TTL)
  * - Phase 4: velocity counters, distributed locks for accrual/recon jobs
+ * - Phase 6: PubSub for cross-instance analytics sync, feature flag hot-reload
  *
  * Connection errors are logged but do NOT crash the app — all callers must
  * handle `null` / `false` returns gracefully (degraded mode).
@@ -101,6 +102,59 @@ export class RedisService implements OnModuleDestroy {
     } catch {
       return 0;
     }
+  }
+
+  // ─── Phase 6: PubSub helpers ──────────────────────────────────────────────
+
+  /**
+   * Publish a message to a Redis channel.
+   * Used for cross-instance analytics sync and feature flag hot-reload.
+   */
+  async publish(channel: string, message: string): Promise<void> {
+    try {
+      await this.client.publish(channel, message);
+    } catch (err) {
+      this.logger.warn(`Redis publish failed on channel ${channel}`, err);
+    }
+  }
+
+  /**
+   * Create a dedicated subscriber connection (Redis requires a separate
+   * connection for subscribe mode).
+   */
+  createSubscriber(): Redis {
+    return this.client.duplicate();
+  }
+
+  /**
+   * Get/set JSON values with optional TTL.
+   */
+  async getJson<T>(key: string): Promise<T | null> {
+    const raw = await this.get(key);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  async setJson<T>(key: string, value: T, ttlSeconds?: number): Promise<boolean> {
+    return this.set(key, JSON.stringify(value), ttlSeconds);
+  }
+
+  /**
+   * Scan keys matching a pattern (non-blocking, uses SCAN cursor).
+   */
+  async scanKeys(pattern: string): Promise<string[]> {
+    const keys: string[] = [];
+    let cursor = '0';
+    do {
+      const [nextCursor, batch] = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+      keys.push(...batch);
+    } while (cursor !== '0');
+    return keys;
   }
 
   onModuleDestroy(): void {

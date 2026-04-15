@@ -1,0 +1,107 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-04-15T00:00:00.000Z",
+  "rules": [
+    {
+      "id": "R001",
+      "name": "High Transaction Amount",
+      "description": "Flag transactions above KES 500,000 for enhanced due diligence",
+      "enabled": true,
+      "conditions": [
+        { "field": "amount", "operator": "gt", "value": 500000 }
+      ],
+      "logic": "AND",
+      "scoreImpact": 15,
+      "flag": "HIGH_AMOUNT"
+    },
+    {
+      "id": "R002",
+      "name": "Multiple Failed Logins",
+      "description": "Flag accounts with 3+ failed login attempts in 1 hour",
+      "enabled": true,
+      "conditions": [
+        { "field": "failedLoginAttempts", "operator": "gte", "value": 3 }
+      ],
+      "logic": "AND",
+      "scoreImpact": 20,
+      "flag": "FAILED_LOGINS"
+    },
+    {
+      "id": "R003",
+      "name": "Cross-Region Login",
+      "description": "Flag logins from a country different from the member's registered country",
+      "enabled": true,
+      "conditions": [
+        { "field": "loginCountry", "operator": "neq", "value": "KE" }
+      ],
+      "logic": "AND",
+      "scoreImpact": 25,
+      "flag": "CROSS_REGION_LOGIN"
+    },
+    {
+      "id": "R004",
+      "name": "Rapid Successive Transactions",
+      "description": "Flag when more than 5 transactions occur within 10 minutes",
+      "enabled": true,
+      "conditions": [
+        { "field": "txCountLast10Min", "operator": "gt", "value": 5 }
+      ],
+      "logic": "AND",
+      "scoreImpact": 20,
+      "flag": "RAPID_TRANSACTIONS"
+    },
+    {
+      "id": "R005",
+      "name": "New Device + High Amount",
+      "description": "Flag new device combined with transaction above KES 100,000",
+      "enabled": true,
+      "conditions": [
+        { "field": "isNewDevice", "operator": "eq", "value": true },
+        { "field": "amount", "operator": "gt", "value": 100000 }
+      ],
+      "logic": "AND",
+      "scoreImpact": 30,
+      "flag": "NEW_DEVICE_HIGH_AMOUNT"
+    },
+    {
+      "id": "R006",
+      "name": "Sanctioned Country",
+      "description": "Block transactions from FATF high-risk jurisdictions",
+      "enabled": true,
+      "conditions": [
+        {
+          "field": "loginCountry",
+          "operator": "in",
+          "value": ["KP", "IR", "MM", "SY", "YE", "LY", "SO"]
+        }
+      ],
+      "logic": "AND",
+      "scoreImpact": 80,
+      "flag": "SANCTIONED_COUNTRY"
+    },
+    {
+      "id": "R007",
+      "name": "Dormant Account Activation",
+      "description": "Flag accounts inactive for 180+ days suddenly transacting",
+      "enabled": true,
+      "conditions": [
+        { "field": "daysSinceLastTransaction", "operator": "gte", "value": 180 }
+      ],
+      "logic": "AND",
+      "scoreImpact": 15,
+      "flag": "DORMANT_ACTIVATION"
+    },
+    {
+      "id": "R008",
+      "name": "Round Amount Pattern",
+      "description": "Flag structuring pattern: multiple round-number transactions",
+      "enabled": true,
+      "conditions": [
+        { "field": "roundAmountCount3d", "operator": "gte", "value": 3 }
+      ],
+      "logic": "AND",
+      "scoreImpact": 20,
+      "flag": "STRUCTURING_PATTERN"
+    }
+  ]
+}

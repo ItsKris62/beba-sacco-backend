@@ -42,6 +42,8 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
 import { ApiVersionInterceptor } from './common/interceptors/api-version.interceptor';
+// Phase 6
+import { Phase6Module } from './modules/admin/phase6/phase6.module';
 
 // Prisma
 import { PrismaService } from './prisma/prisma.service';
@@ -125,6 +127,8 @@ import { AuditService } from './modules/audit/audit.service';
     WebhooksModule,
     // Phase 5
     IntegrationsModule,
+    // Phase 6
+    Phase6Module,
   ],
 
   providers: [
