@@ -2,10 +2,10 @@ import * as Joi from 'joi';
 
 /**
  * Environment Variables Validation Schema
- * 
+ *
  * Validates all required environment variables at application startup
  * Application will fail to start if validation fails (fail-fast principle)
- * 
+ *
  * TODO: Phase 1 - Add validation for M-Pesa credentials
  * TODO: Phase 2 - Add validation for production-specific variables
  */
@@ -26,11 +26,14 @@ export const validationSchema = Joi.object({
   JWT_REFRESH_SECRET: Joi.string().min(32).required(),
   JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
 
-  // Redis (Upstash)
+  // Redis – required host/port; password & TLS optional for local dev (no-auth Redis)
   REDIS_HOST: Joi.string().required(),
   REDIS_PORT: Joi.number().default(6379),
-  REDIS_PASSWORD: Joi.string().required(),
-  REDIS_TLS: Joi.boolean().default(true),
+  REDIS_PASSWORD: Joi.string().allow('').optional(),
+  REDIS_TLS: Joi.boolean().default(false),
+  // Upstash REST API credentials (optional for local dev)
+  UPSTASH_REDIS_REST_URL: Joi.string().optional(),
+  UPSTASH_REDIS_REST_TOKEN: Joi.string().allow('').optional(),
 
   // Cloudflare R2
   R2_ACCOUNT_ID: Joi.string().required(),
@@ -105,4 +108,3 @@ export const validationSchema = Joi.object({
   BULLMQ_CONCURRENCY_LEDGER: Joi.number().integer().default(2),
   BULLMQ_CONCURRENCY_WEBHOOK: Joi.number().integer().default(10),
 });
-

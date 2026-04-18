@@ -22,7 +22,6 @@ import { RedisService } from '../../common/services/redis.service';
  *
  * Both endpoints are @Public() (no JWT required).
  *
- * TODO: Phase 1 – add Redis health indicator (requires injecting ioredis client)
  * TODO: Phase 2 – expose OpenTelemetry metrics at /metrics
  */
 @ApiTags('Health')
@@ -38,15 +37,14 @@ export class HealthController {
     private readonly redis: RedisService,
   ) {}
 
-  /** Custom Redis health check — pings with a SET/GET round-trip */
+  /** Custom Redis health check — uses PING command with a 2 s timeout guard */
   private async redisCheck(): Promise<HealthIndicatorResult> {
-    const key = 'health:ping';
     const ok = await Promise.race([
-      this.redis.set(key, '1', 5).then(() => this.redis.get(key)).then((v) => v === '1'),
+      this.redis.ping(),
       new Promise<false>((resolve) => setTimeout(() => resolve(false), 2000)),
     ]);
     return {
-      redis: ok ? { status: 'up' } : { status: 'down', message: 'Redis ping failed' },
+      redis: ok ? { status: 'up' } : { status: 'down', message: 'Redis PING timed out or failed' },
     };
   }
 
@@ -112,7 +110,8 @@ export class HealthController {
   @ApiResponse({ status: 200, description: 'All synthetic checks passed' })
   @ApiResponse({ status: 503, description: 'One or more checks failed' })
   async synthetic() {
-    const results: Record<string, { status: 'pass' | 'fail'; latencyMs: number; error?: string }> = {};
+    const results: Record<string, { status: 'pass' | 'fail'; latencyMs: number; error?: string }> =
+      {};
     let allPass = true;
 
     // 1. DB connectivity
@@ -144,11 +143,19 @@ export class HealthController {
       await this.prisma.tenant.count();
       results.tenantTable = { status: 'pass', latencyMs: Date.now() - tenantStart };
     } catch (err) {
-      results.tenantTable = { status: 'fail', latencyMs: Date.now() - tenantStart, error: String(err) };
+      results.tenantTable = {
+        status: 'fail',
+        latencyMs: Date.now() - tenantStart,
+        error: String(err),
+      };
       allPass = false;
     }
 
-    const body = { status: allPass ? 'ok' : 'degraded', timestamp: new Date().toISOString(), checks: results };
+    const body = {
+      status: allPass ? 'ok' : 'degraded',
+      timestamp: new Date().toISOString(),
+      checks: results,
+    };
 
     if (!allPass) throw new HttpException(body, 503);
     return body;

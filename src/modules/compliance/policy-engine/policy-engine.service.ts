@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -266,7 +267,7 @@ export class PolicyEngineService {
         severity: violation.severity,
         status: 'OPEN',
         message: violation.message,
-        details: violation as unknown as Record<string, unknown>,
+        details: violation as unknown as Prisma.InputJsonValue,
         remediation: violation.remediation,
       },
     });

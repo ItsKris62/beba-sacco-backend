@@ -84,7 +84,7 @@ export class DsarService {
             aggregatedAt: new Date().toISOString(),
             sections: Object.keys(memberData),
             recordCounts: {
-              transactions: memberData.transactions?.length ?? 0,
+              transactions: memberData.accounts.reduce((sum, a) => sum + a.transactions.length, 0),
               loans: memberData.loans?.length ?? 0,
               guarantorships: memberData.guarantorships?.length ?? 0,
               auditLogs: memberData.auditLogs?.length ?? 0,

@@ -4,6 +4,7 @@
  * Audit trail exported for DPA compliance.
  */
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 
 export type ConsentPurpose =
@@ -44,7 +45,7 @@ export class ConsentRegistryService {
         version: consent.version,
         channel: consent.channel,
         ipAddress: consent.ipAddress,
-        metadata: consent.metadata,
+        metadata: consent.metadata as Prisma.InputJsonValue | undefined,
         timestamp: new Date(),
       },
     });

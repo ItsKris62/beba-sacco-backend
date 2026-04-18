@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { StorageService } from '../../storage/storage.service';
 
@@ -175,12 +176,12 @@ export class FeatureStoreService {
           tenantId,
           memberId: f.memberId,
           version,
-          features: f as unknown as Record<string, unknown>,
+          features: f as unknown as Prisma.InputJsonValue,
           exportedAt: new Date(),
           storagePath,
         },
         update: {
-          features: f as unknown as Record<string, unknown>,
+          features: f as unknown as Prisma.InputJsonValue,
           exportedAt: new Date(),
           storagePath,
         },

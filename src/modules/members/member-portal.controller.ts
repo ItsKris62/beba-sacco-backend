@@ -114,6 +114,44 @@ export class MemberPortalController {
     return this.portal.initiateDeposit(user.id, dto.phone, dto.amount, tenant.id, req.ip);
   }
 
+  // ─── MEMBER LOANS LIST ───────────────────────────────────────
+
+  @Get('loans')
+  @ApiOperation({
+    summary: 'List my loans (member self-service)',
+    description: 'Returns paginated loans for the authenticated member.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
+  @ApiQuery({ name: 'status', required: false, type: String, description: 'LoanStatus filter' })
+  @ApiResponse({ status: 200, description: 'Paginated loan list' })
+  getMyLoans(
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Query('page') page = 1,
+    @Query('limit') limit = 50,
+    @Query('status') status?: string,
+  ) {
+    return this.portal.getMyLoans(user.id, tenant.id, +page, +limit, status);
+  }
+
+  // ─── MPESA DEPOSIT STATUS ─────────────────────────────────────
+
+  @Get('deposit/status/:checkoutRequestId')
+  @ApiOperation({
+    summary: 'Check M-Pesa deposit status',
+    description: 'Poll the status of an STK Push transaction by checkoutRequestId.',
+  })
+  @ApiResponse({ status: 200, description: 'Deposit status' })
+  @ApiResponse({ status: 404, description: 'Transaction not found' })
+  getDepositStatus(
+    @Param('checkoutRequestId') checkoutRequestId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.portal.getDepositStatus(user.id, checkoutRequestId, tenant.id);
+  }
+
   // ─── DOCUMENT UPLOAD ─────────────────────────────────────────
 
   @Post('documents/upload-url')

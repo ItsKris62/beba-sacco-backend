@@ -57,8 +57,7 @@ export class AuditService {
   }
 
   /**
-   * Query audit logs with basic filters.
-   * TODO: Phase 3 – add cursor-based pagination, date range, full-text on action
+   * Query audit logs with basic filters and pagination.
    */
   async findAll(filters: {
     tenantId: string;
@@ -68,9 +67,38 @@ export class AuditService {
     toDate?: Date;
     limit?: number;
     offset?: number;
-  }) {
-    // TODO: Phase 3 – implement
-    throw new Error('Not implemented – Phase 3');
+  }): Promise<{ data: unknown[]; total: number }> {
+    const safeLimit = filters.limit ?? 50;
+    const safeOffset = filters.offset ?? 0;
+
+    const where: Prisma.AuditLogWhereInput = {
+      tenantId: filters.tenantId,
+      ...(filters.userId && { userId: filters.userId }),
+      ...(filters.action && { action: { contains: filters.action, mode: 'insensitive' } }),
+      ...((filters.fromDate || filters.toDate) && {
+        timestamp: {
+          ...(filters.fromDate && { gte: filters.fromDate }),
+          ...(filters.toDate && { lte: filters.toDate }),
+        },
+      }),
+    };
+
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.auditLog.findMany({
+        where,
+        orderBy: { timestamp: 'desc' },
+        skip: safeOffset,
+        take: safeLimit,
+        include: {
+          user: {
+            select: { firstName: true, lastName: true, email: true },
+          },
+        },
+      }),
+      this.prisma.auditLog.count({ where }),
+    ]);
+
+    return { data, total };
   }
 
   /**

@@ -122,7 +122,7 @@ export class AuthController {
   // ─────────────────────────── LOGOUT ───────────────────────────
 
   @Post('logout')
-  @HttpCode(HttpStatus.NO_CONTENT)
+  @HttpCode(HttpStatus.OK)
   @SkipThrottle()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -133,19 +133,20 @@ export class AuthController {
       'The access token remains valid until its 15-min TTL. ' +
       'Phase 2 will add Redis jti blocklisting for immediate revocation.',
   })
-  @ApiResponse({ status: 204, description: 'Logged out successfully' })
+  @ApiResponse({ status: 200, description: 'Logged out successfully' })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
   async logout(
     @CurrentUser() user: AuthenticatedUser,
     @Req() req: TenantRequest,
-  ): Promise<void> {
-    return this.authService.logout(user.id, req.tenant.id, req.ip);
+  ): Promise<{ success: boolean; data: null; error: null }> {
+    await this.authService.logout(user.id, req.tenant.id, req.ip);
+    return { success: true, data: null, error: null };
   }
 
   // ─────────────────────────── CHANGE PASSWORD ───────────────────────────
 
   @Patch('change-password')
-  @HttpCode(HttpStatus.NO_CONTENT)
+  @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
@@ -155,14 +156,15 @@ export class AuthController {
       'Clears mustChangePassword flag and invalidates all existing sessions. ' +
       'Users with mustChangePassword=true must call this before accessing other endpoints.',
   })
-  @ApiResponse({ status: 204, description: 'Password changed successfully' })
+  @ApiResponse({ status: 200, description: 'Password changed successfully' })
   @ApiResponse({ status: 401, description: 'Current password is incorrect' })
   async changePassword(
     @Body() dto: ChangePasswordDto,
     @CurrentUser() user: AuthenticatedUser,
     @Req() req: TenantRequest,
-  ): Promise<void> {
-    return this.authService.changePassword(user.id, req.tenant.id, dto, req.ip);
+  ): Promise<{ success: boolean; data: null; error: null }> {
+    await this.authService.changePassword(user.id, req.tenant.id, dto, req.ip);
+    return { success: true, data: null, error: null };
   }
 
   // TODO: Phase 2 – POST /auth/forgot-password

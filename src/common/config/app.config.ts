@@ -19,12 +19,15 @@ export default registerAs('app', () => ({
     refreshExpiration: process.env.JWT_REFRESH_EXPIRATION || '7d',
   },
 
-  // Redis (Upstash)
+  // Redis (Upstash) – ioredis TCP connection
   redis: {
     host: process.env.REDIS_HOST,
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD,
     tls: process.env.REDIS_TLS === 'true',
+    // Upstash REST API (for lightweight HTTP-based reads outside ioredis)
+    restUrl: process.env.UPSTASH_REDIS_REST_URL,
+    restToken: process.env.UPSTASH_REDIS_REST_TOKEN,
   },
 
   // Cloudflare R2
@@ -80,4 +83,3 @@ export default registerAs('app', () => ({
   // Multi-Tenancy
   defaultTenantId: process.env.DEFAULT_TENANT_ID,
 }));
-

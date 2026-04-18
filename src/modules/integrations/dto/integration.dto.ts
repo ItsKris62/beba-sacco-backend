@@ -8,17 +8,17 @@ export class CreateCrbReportDto {
   @IsArray()
   @ArrayMinSize(1)
   @IsString({ each: true })
-  loanIds: string[];
+  loanIds!: string[];
 
   @ApiProperty({ example: '2025-01-01' })
   @IsString()
   @IsNotEmpty()
-  periodStart: string;
+  periodStart!: string;
 
   @ApiProperty({ example: '2025-03-31' })
   @IsString()
   @IsNotEmpty()
-  periodEnd: string;
+  periodEnd!: string;
 }
 
 // ── AML Screening ───────────────────────────────────────────────────────────
@@ -27,11 +27,11 @@ export class CreateAmlScreeningDto {
   @ApiProperty({ description: 'Member UUID to screen' })
   @IsString()
   @IsNotEmpty()
-  memberId: string;
+  memberId!: string;
 
   @ApiProperty({ enum: ['KYC', 'DEPOSIT', 'MANUAL'] })
   @IsEnum(['KYC', 'DEPOSIT', 'MANUAL'])
-  trigger: 'KYC' | 'DEPOSIT' | 'MANUAL';
+  trigger!: 'KYC' | 'DEPOSIT' | 'MANUAL';
 
   @ApiPropertyOptional({ description: 'Reference ID (e.g., transaction ID for deposit triggers)' })
   @IsOptional()
@@ -45,7 +45,7 @@ export class CreateDsarRequestDto {
   @ApiProperty({ description: 'Member UUID for data subject access request' })
   @IsString()
   @IsNotEmpty()
-  memberId: string;
+  memberId!: string;
 }
 
 // ── API Client Registration ─────────────────────────────────────────────────
@@ -54,7 +54,7 @@ export class RegisterApiClientDto {
   @ApiProperty({ description: 'Partner name' })
   @IsString()
   @IsNotEmpty()
-  name: string;
+  name!: string;
 
   @ApiProperty({
     description: 'OAuth2 scopes',
@@ -64,7 +64,7 @@ export class RegisterApiClientDto {
   @IsArray()
   @ArrayMinSize(1)
   @IsString({ each: true })
-  scopes: string[];
+  scopes!: string[];
 
   @ApiPropertyOptional({ enum: ['internal', 'partner', 'public'], default: 'partner' })
   @IsOptional()
@@ -87,12 +87,12 @@ export class TokenExchangeDto {
   @ApiProperty({ description: 'OAuth2 client_id' })
   @IsString()
   @IsNotEmpty()
-  client_id: string;
+  client_id!: string;
 
   @ApiProperty({ description: 'OAuth2 client_secret' })
   @IsString()
   @IsNotEmpty()
-  client_secret: string;
+  client_secret!: string;
 
   @ApiPropertyOptional({ description: 'Requested scopes (space-separated)' })
   @IsOptional()
@@ -105,13 +105,13 @@ export class TokenExchangeDto {
 export class RegisterPartnerWebhookDto {
   @ApiProperty({ description: 'Webhook target URL' })
   @IsUrl()
-  url: string;
+  url!: string;
 
   @ApiProperty({ description: 'Events to subscribe to', type: [String] })
   @IsArray()
   @ArrayMinSize(1)
   @IsString({ each: true })
-  events: string[];
+  events!: string[];
 
   @ApiPropertyOptional({ description: 'HMAC signing secret (auto-generated if omitted)' })
   @IsOptional()

@@ -4,6 +4,7 @@
  * Breach triggers SLA_BREACH event, logs to SlaIncident, notifies account manager.
  */
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
@@ -118,8 +119,8 @@ export class SlaMonitorService {
         tenantId,
         period: status.period,
         breaches,
-        actualMetrics: status.actual as unknown as Record<string, unknown>,
-        contractedMetrics: status.contract as unknown as Record<string, unknown>,
+        actualMetrics: status.actual as unknown as Prisma.InputJsonValue,
+        contractedMetrics: status.contract as unknown as Prisma.InputJsonValue,
         status: 'OPEN',
       },
     });

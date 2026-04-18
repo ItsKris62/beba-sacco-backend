@@ -4,6 +4,7 @@
  * scope assignment, rate limit tier assignment.
  */
 import { Injectable, Logger, ConflictException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -81,7 +82,7 @@ export class PartnerOnboardingService {
         apiKeyHash,
         scopes: req.scopes,
         rateLimitTier: tier,
-        slaConfig: req.slaConfig as unknown as Record<string, unknown>,
+        slaConfig: req.slaConfig as unknown as Prisma.InputJsonValue,
         contactName: req.contact.name,
         contactEmail: req.contact.email,
         contactPhone: req.contact.phone,

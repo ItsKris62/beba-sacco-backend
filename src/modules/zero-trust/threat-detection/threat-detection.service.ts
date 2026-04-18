@@ -6,7 +6,7 @@
  */
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { RedisService } from '../../common/services/redis.service';
+import { RedisService } from '../../../common/services/redis.service';
 
 export interface ThreatMatrix {
   ipReputation: number;       // 0-100 (100 = known malicious)

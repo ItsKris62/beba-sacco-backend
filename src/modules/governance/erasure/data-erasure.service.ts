@@ -4,6 +4,7 @@
  * Generates compliance certificate. Idempotent via memberId.
  */
 import { Injectable, Logger, ConflictException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -180,7 +181,7 @@ export class DataErasureService {
       data: {
         status: 'COMPLETED',
         completedAt: new Date(),
-        certificate: certificate as unknown as Record<string, unknown>,
+        certificate: certificate as unknown as Prisma.InputJsonValue,
       },
     });
 

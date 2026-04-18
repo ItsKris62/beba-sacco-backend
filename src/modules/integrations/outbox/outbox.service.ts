@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -55,7 +56,7 @@ export class OutboxService {
         tenantId: params.tenantId,
         idempotencyKey: params.idempotencyKey,
         integrationType: params.integrationType,
-        payload: params.payload,
+        payload: params.payload as Prisma.InputJsonValue,
         status: 'PENDING',
         maxAttempts: params.maxAttempts ?? 5,
       },

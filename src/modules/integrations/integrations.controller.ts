@@ -21,15 +21,12 @@ import { SasraRatiosService } from './sasra/sasra-ratios.service';
 import { DsarService } from './dsar/dsar.service';
 import { CbkReturnService } from './cbk/cbk-return.service';
 import { ApiGatewayService } from './gateway/api-gateway.service';
-import { WebhooksService } from '../webhooks/webhooks.service';
-
 import {
   CreateCrbReportDto,
   CreateAmlScreeningDto,
   CreateDsarRequestDto,
   RegisterApiClientDto,
   TokenExchangeDto,
-  RegisterPartnerWebhookDto,
 } from './dto/integration.dto';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,10 +239,7 @@ export class CompliancePhase5Controller {
 @ApiTags('API Gateway')
 @Controller('admin/integrations')
 export class ApiGatewayController {
-  constructor(
-    private readonly gateway: ApiGatewayService,
-    private readonly webhooks: WebhooksService,
-  ) {}
+  constructor(private readonly gateway: ApiGatewayService) {}
 
   @Post('api-clients')
   @ApiBearerAuth('bearer')
@@ -278,23 +272,8 @@ export class ApiGatewayController {
     const scopes = dto.scope ? dto.scope.split(' ') : undefined;
     return this.gateway.issueToken(dto.client_id, dto.client_secret, scopes);
   }
-
-  @Post('webhooks')
-  @ApiBearerAuth('bearer')
-  @ApiSecurity('X-Tenant-ID')
-  @ApiHeader({ name: 'X-Tenant-ID', required: true })
-  @Roles(UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
-  @ApiOperation({
-    summary: 'Register partner webhook',
-    description: 'Registers a webhook endpoint for partner event subscriptions. Verifies HMAC.',
-  })
-  registerWebhook(@Body() dto: RegisterPartnerWebhookDto, @CurrentTenant() tenant: Tenant) {
-    return this.webhooks.create(tenant.id, {
-      url: dto.url,
-      events: dto.events,
-      secret: dto.secret,
-    });
-  }
+  // NOTE: Webhook registration is handled by WebhooksController (POST /webhooks).
+  // Removed duplicate registerWebhook method to avoid route collision.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

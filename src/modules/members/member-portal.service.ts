@@ -336,6 +336,141 @@ export class MemberPortalService {
     });
   }
 
+  // ─── MEMBER LOANS LIST ───────────────────────────────────────
+
+  /**
+   * Returns paginated loans for the authenticated member.
+   */
+  async getMyLoans(
+    userId: string,
+    tenantId: string,
+    page: number,
+    limit: number,
+    status?: string,
+  ) {
+    const member = await this.resolveMember(userId, tenantId);
+
+    const safePage = Math.max(1, page);
+    const safeLimit = Math.min(100, Math.max(1, limit));
+    const skip = (safePage - 1) * safeLimit;
+
+    const where = {
+      memberId: member.id,
+      tenantId,
+      ...(status && { status: status as LoanStatus }),
+    };
+
+    const [loans, total] = await this.prisma.$transaction([
+      this.prisma.loan.findMany({
+        where,
+        orderBy: { appliedAt: 'desc' },
+        skip,
+        take: safeLimit,
+        include: {
+          loanProduct: { select: { name: true, interestType: true } },
+          guarantors: {
+            select: {
+              id: true,
+              status: true,
+              guaranteedAmount: true,
+              invitedAt: true,
+              respondedAt: true,
+              member: {
+                select: {
+                  memberNumber: true,
+                  user: { select: { firstName: true, lastName: true } },
+                },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.loan.count({ where }),
+    ]);
+
+    return {
+      data: loans.map((l) => ({
+        ...l,
+        principalAmount: l.principalAmount.toString(),
+        interestRate: l.interestRate.toString(),
+        processingFee: l.processingFee.toString(),
+        monthlyInstalment: l.monthlyInstalment.toString(),
+        outstandingBalance: l.outstandingBalance.toString(),
+        totalRepaid: l.totalRepaid.toString(),
+        guarantors: l.guarantors.map((g) => ({
+          ...g,
+          guaranteedAmount: g.guaranteedAmount.toString(),
+        })),
+      })),
+      meta: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        totalPages: Math.ceil(total / safeLimit),
+      },
+    };
+  }
+
+  // ─── MPESA DEPOSIT STATUS ─────────────────────────────────────
+
+  /**
+   * Check the status of an M-Pesa STK Push transaction.
+   * Verifies the transaction belongs to the calling member's FOSA account.
+   */
+  async getDepositStatus(
+    userId: string,
+    checkoutRequestId: string,
+    tenantId: string,
+  ): Promise<{ status: 'PENDING' | 'SUCCESS' | 'FAILED'; amount?: string; completedAt?: Date | null }> {
+    const member = await this.resolveMember(userId, tenantId);
+
+    const fosaAccount = await this.prisma.account.findFirst({
+      where: { memberId: member.id, tenantId, accountType: 'FOSA', isActive: true },
+      select: { id: true },
+    });
+
+    const mpesaTx = await this.prisma.mpesaTransaction.findFirst({
+      where: { checkoutRequestId, tenantId },
+      select: {
+        status: true,
+        amount: true,
+        updatedAt: true,
+        transactionId: true,
+      },
+    });
+
+    if (!mpesaTx) {
+      throw new NotFoundException('M-Pesa transaction not found');
+    }
+
+    // Verify ownership: if a linked transaction exists, it must belong to this member's FOSA
+    if (mpesaTx.transactionId && fosaAccount) {
+      const linkedTx = await this.prisma.transaction.findUnique({
+        where: { id: mpesaTx.transactionId },
+        select: { accountId: true },
+      });
+      if (linkedTx && linkedTx.accountId !== fosaAccount.id) {
+        throw new NotFoundException('M-Pesa transaction not found');
+      }
+    }
+
+    const statusMap: Record<string, 'PENDING' | 'SUCCESS' | 'FAILED'> = {
+      PENDING: 'PENDING',
+      COMPLETED: 'SUCCESS',
+      FAILED: 'FAILED',
+      REVERSED: 'FAILED',
+      RECON_PENDING: 'PENDING',
+    };
+
+    const mappedStatus = statusMap[mpesaTx.status] ?? 'PENDING';
+
+    return {
+      status: mappedStatus,
+      amount: mpesaTx.amount ? new Decimal(mpesaTx.amount.toString()).toString() : undefined,
+      completedAt: mappedStatus === 'SUCCESS' ? mpesaTx.updatedAt : null,
+    };
+  }
+
   // ─── HELPERS ─────────────────────────────────────────────────
 
   private async resolveMember(userId: string, tenantId: string) {

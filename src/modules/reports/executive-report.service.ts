@@ -5,6 +5,7 @@
  * Scheduled via BullMQ cron.
  */
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -98,11 +99,11 @@ export class ExecutiveReportService {
         tenantId,
         period,
         periodType,
-        reportData: report as unknown as Record<string, unknown>,
+        reportData: report as unknown as Prisma.InputJsonValue,
         generatedAt: new Date(),
       },
       update: {
-        reportData: report as unknown as Record<string, unknown>,
+        reportData: report as unknown as Prisma.InputJsonValue,
         generatedAt: new Date(),
       },
     });

@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { RedisService } from '../../../common/services/redis.service';
 
@@ -63,7 +64,7 @@ export class BehavioralRiskScorerService {
         score,
         flags,
         recommendation,
-        details,
+        details: details as unknown as Prisma.InputJsonValue,
       },
     });
 

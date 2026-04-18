@@ -48,6 +48,7 @@ import { Phase6Module } from './modules/admin/phase6/phase6.module';
 import { Phase7Module } from './modules/admin/phase7/phase7.module';
 
 // Prisma
+import { PrismaModule } from './prisma/prisma.module';
 import { PrismaService } from './prisma/prisma.service';
 import { AuditService } from './modules/audit/audit.service';
 
@@ -71,7 +72,7 @@ import { AuditService } from './modules/audit/audit.service';
       load: [appConfig],
       validationSchema,
       validationOptions: {
-        allowUnknown: false,
+        allowUnknown: true,
         abortEarly: true,
       },
     }),
@@ -94,6 +95,9 @@ import { AuditService } from './modules/audit/audit.service';
         redact: ['req.headers.authorization', 'req.body.password', 'req.body.refreshToken'],
       },
     }),
+
+    // ── Prisma (Global) ────────────────────────────────────────
+    PrismaModule,
 
     // ── Shared Infrastructure (Redis, Idempotency) ────────────
     CommonServicesModule,
