@@ -238,6 +238,14 @@ enum InterestType {
   @@schema("public")
 }
 
+enum KycStatus {
+  PENDING_REVIEW // Submitted, awaiting staff review
+  APPROVED       // KYC cleared; FOSA + BOSA accounts created
+  REJECTED       // KYC rejected; reason stored on member record
+
+  @@schema("public")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC SCHEMA – Platform & Identity
 // ─────────────────────────────────────────────────────────────────────────────
@@ -370,6 +378,11 @@ model Member {
   isActive     Boolean  @default(true)
   joinedAt     DateTime @default(now())
 
+  kycStatus           KycStatus @default(PENDING_REVIEW)
+  kycReviewedAt       DateTime?
+  kycReviewedByUserId String?   // userId of staff who reviewed
+  kycRejectionReason  String?   @db.Text
+
   // Phase 4 – privacy & consent (Kenya Data Protection Act)
   consentDataSharing Boolean  @default(false)
   consentUpdatedAt   DateTime?
@@ -385,6 +398,7 @@ model Member {
   @@unique([tenantId, memberNumber])
   @@index([tenantId])
   @@index([tenantId, isActive])
+  @@index([tenantId, kycStatus])
   @@schema("public")
 }
 

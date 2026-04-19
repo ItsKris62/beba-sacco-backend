@@ -62,6 +62,10 @@ export class EmailProcessor extends WorkerHost {
         return this.repaymentReceipt(payload);
       case 'PASSWORD_RESET':
         return this.passwordReset(payload);
+      case 'MEMBER_APPROVED':
+        return this.memberApproved(payload);
+      case 'MEMBER_REJECTED':
+        return this.memberRejected(payload);
     }
   }
 
@@ -264,6 +268,45 @@ export class EmailProcessor extends WorkerHost {
         <p>This link expires in <strong>${p.expiresInMinutes} minutes</strong>.</p>
         <p>If you did not request a password reset, please ignore this email. Your password will remain unchanged.</p>
         <p>For security, never share this link with anyone.</p>
+      `),
+    };
+  }
+
+  // ── MEMBER KYC APPROVED ───────────────────────────────────────
+
+  private memberApproved(p: Extract<EmailJobPayload, { type: 'MEMBER_APPROVED' }>) {
+    return {
+      subject: `Your ${p.saccoName} membership has been approved`,
+      body: this.wrap(p.firstName, `
+        <h2>Membership Approved ✅</h2>
+        <p>Congratulations! Your KYC documents have been reviewed and your membership application has been <strong>approved</strong>.</p>
+        <div class="highlight">
+          <p style="margin:0"><strong>Member Number:</strong> ${p.memberNumber}</p>
+        </div>
+        <p>Your FOSA and BOSA accounts are now active. Log in to the portal to:</p>
+        <ul>
+          <li>View your account balances</li>
+          <li>Make deposits via M-Pesa</li>
+          <li>Apply for a loan</li>
+        </ul>
+        <p>Welcome to ${p.saccoName}!</p>
+      `),
+    };
+  }
+
+  // ── MEMBER KYC REJECTED ───────────────────────────────────────
+
+  private memberRejected(p: Extract<EmailJobPayload, { type: 'MEMBER_REJECTED' }>) {
+    return {
+      subject: 'Update on your SACCO membership application',
+      body: this.wrap(p.firstName, `
+        <h2>Application Update</h2>
+        <p>We have reviewed your membership application and are unable to approve it at this time.</p>
+        <div class="highlight">
+          <p style="margin:0"><strong>Reason:</strong> ${p.reason}</p>
+        </div>
+        <p>Please address the above and resubmit your application, or visit our offices for assistance.</p>
+        <p>We look forward to welcoming you as a member.</p>
       `),
     };
   }

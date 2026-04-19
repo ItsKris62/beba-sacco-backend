@@ -1,12 +1,16 @@
 import {
-  Injectable, Logger, NotFoundException,
+  Injectable, Logger, NotFoundException, BadRequestException,
 } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { LoanStatus, UserRole } from '@prisma/client';
+import { AccountType, KycStatus, LoanStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
+import { QUEUE_NAMES, type EmailJobPayload } from '../queue/queue.constants';
 import { UpdateKycDto } from './dto/update-kyc.dto';
+import { ReviewMemberDto, ReviewAction } from './dto/review-member.dto';
 
 const STATS_CACHE_TTL = 60; // 60 seconds
 
@@ -24,6 +28,7 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly redis: RedisService,
+    @InjectQueue(QUEUE_NAMES.EMAIL) private readonly emailQueue: Queue,
   ) {}
 
   // ─── DASHBOARD STATS ─────────────────────────────────────────
@@ -63,6 +68,7 @@ export class AdminService {
     const [
       totalMembers,
       activeMembers,
+      pendingKyc,
       totalLoans,
       activeLoans,
       pendingLoans,
@@ -72,6 +78,7 @@ export class AdminService {
     ] = await this.prisma.$transaction([
       this.prisma.member.count({ where: { tenantId } }),
       this.prisma.member.count({ where: { tenantId, isActive: true } }),
+      this.prisma.member.count({ where: { tenantId, kycStatus: KycStatus.PENDING_REVIEW } }),
       this.prisma.loan.count({ where: { tenantId } }),
       this.prisma.loan.findMany({
         where: { tenantId, status: LoanStatus.ACTIVE },
@@ -109,6 +116,7 @@ export class AdminService {
         total: totalMembers,
         active: activeMembers,
         inactive: totalMembers - activeMembers,
+        pendingKyc,
       },
       loans: {
         active: activeLoans.length,
@@ -196,6 +204,199 @@ export class AdminService {
       data,
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
     };
+  }
+
+  // ─── PENDING KYC QUEUE ────────────────────────────────────────
+
+  /**
+   * Returns members whose KYC is awaiting staff review, oldest first (FIFO).
+   * Only TENANT_ADMIN / MANAGER should call this via the controller.
+   */
+  async getPendingMembers(
+    tenantId: string,
+    opts: { search?: string; page?: number; limit?: number } = {},
+  ) {
+    const page = Math.max(1, opts.page ?? 1);
+    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
+    const skip = (page - 1) * limit;
+
+    const where = {
+      tenantId,
+      kycStatus: KycStatus.PENDING_REVIEW,
+      ...(opts.search && {
+        OR: [
+          { memberNumber: { contains: opts.search, mode: 'insensitive' as const } },
+          { user: { firstName: { contains: opts.search, mode: 'insensitive' as const } } },
+          { user: { lastName: { contains: opts.search, mode: 'insensitive' as const } } },
+          { user: { email: { contains: opts.search, mode: 'insensitive' as const } } },
+          { nationalId: { contains: opts.search, mode: 'insensitive' as const } },
+        ],
+      }),
+    };
+
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.member.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { joinedAt: 'asc' }, // FIFO – oldest submission reviewed first
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              createdAt: true,
+            },
+          },
+        },
+      }),
+      this.prisma.member.count({ where }),
+    ]);
+
+    return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  }
+
+  // ─── KYC REVIEW (APPROVE / REJECT) ───────────────────────────
+
+  /**
+   * Approve or reject a member's KYC submission.
+   *
+   * APPROVE path (atomic transaction):
+   *   1. Set kycStatus = APPROVED, record reviewer + timestamp
+   *   2. Increment TenantCounter.accountSeq by 2 (FOSA + BOSA)
+   *   3. Create FOSA account (ACC-FOSA-XXXXXX)
+   *   4. Create BOSA account (ACC-BOSA-XXXXXX)
+   *
+   * REJECT path:
+   *   1. Set kycStatus = REJECTED, store reason + reviewer + timestamp
+   *
+   * Both paths:
+   *   - Enqueue email notification (fire-and-forget)
+   *   - Audit log
+   *   - Invalidate dashboard cache
+   */
+  async reviewMember(
+    memberId: string,
+    dto: ReviewMemberDto,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const member = await this.prisma.member.findFirst({
+      where: { id: memberId, tenantId, kycStatus: KycStatus.PENDING_REVIEW },
+      include: {
+        user: { select: { email: true, firstName: true, lastName: true } },
+      },
+    });
+    if (!member) {
+      throw new NotFoundException(
+        'Pending member not found — may already have been reviewed',
+      );
+    }
+
+    if (dto.action === ReviewAction.APPROVE) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.member.update({
+          where: { id: memberId },
+          data: {
+            kycStatus: KycStatus.APPROVED,
+            kycReviewedAt: new Date(),
+            kycReviewedByUserId: actor.id,
+            kycRejectionReason: null,
+          },
+        });
+
+        // Atomically claim two account sequence numbers
+        const counter = await tx.tenantCounter.upsert({
+          where: { tenantId },
+          update: { accountSeq: { increment: 2 } },
+          create: { tenantId, memberSeq: 0, accountSeq: 2, loanSeq: 0 },
+          select: { accountSeq: true },
+        });
+
+        const fosaSeq = counter.accountSeq - 1;
+        const bosaSeq = counter.accountSeq;
+
+        await tx.account.create({
+          data: {
+            tenantId,
+            memberId,
+            accountNumber: `ACC-FOSA-${String(fosaSeq).padStart(6, '0')}`,
+            accountType: AccountType.FOSA,
+          },
+        });
+
+        await tx.account.create({
+          data: {
+            tenantId,
+            memberId,
+            accountNumber: `ACC-BOSA-${String(bosaSeq).padStart(6, '0')}`,
+            accountType: AccountType.BOSA,
+          },
+        });
+      });
+
+      await this.emailQueue
+        .add('send', {
+          type: 'MEMBER_APPROVED',
+          to: member.user.email,
+          firstName: member.user.firstName,
+          saccoName: 'Your SACCO', // Phase 3: resolve from tenant.name
+          memberNumber: member.memberNumber,
+        } satisfies EmailJobPayload)
+        .catch((e: unknown) => this.logger.error('Email enqueue failed (non-fatal)', e));
+
+    } else {
+      if (!dto.reason?.trim()) {
+        throw new BadRequestException('A rejection reason is required');
+      }
+
+      await this.prisma.member.update({
+        where: { id: memberId },
+        data: {
+          kycStatus: KycStatus.REJECTED,
+          kycReviewedAt: new Date(),
+          kycReviewedByUserId: actor.id,
+          kycRejectionReason: dto.reason.trim(),
+        },
+      });
+
+      await this.emailQueue
+        .add('send', {
+          type: 'MEMBER_REJECTED',
+          to: member.user.email,
+          firstName: member.user.firstName,
+          reason: dto.reason.trim(),
+        } satisfies EmailJobPayload)
+        .catch((e: unknown) => this.logger.error('Email enqueue failed (non-fatal)', e));
+    }
+
+    await this.audit
+      .create({
+        tenantId,
+        userId: actor.id,
+        action:
+          dto.action === ReviewAction.APPROVE
+            ? 'MEMBER.KYC_APPROVE'
+            : 'MEMBER.KYC_REJECT',
+        resource: 'Member',
+        resourceId: memberId,
+        metadata: {
+          action: dto.action,
+          reason: dto.reason,
+          reviewedBy: actor.id,
+          actorRole: actor.role,
+        },
+        ipAddress,
+      })
+      .catch((e: unknown) => this.logger.error('Audit write failed (non-fatal)', e));
+
+    await this.invalidateDashboardCache(tenantId);
+
+    return { success: true, action: dto.action };
   }
 
   // ─── KYC UPDATE ──────────────────────────────────────────────

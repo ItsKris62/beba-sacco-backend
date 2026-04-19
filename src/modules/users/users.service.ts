@@ -9,6 +9,25 @@ import { AuditService } from '../audit/audit.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
+/** Roles that can be created/managed within a tenant context. */
+const TENANT_MANAGEABLE_ROLES: UserRole[] = [
+  UserRole.TENANT_ADMIN,
+  UserRole.MANAGER,
+  UserRole.TELLER,
+  UserRole.AUDITOR,
+  UserRole.MEMBER,
+];
+
+/**
+ * Roles that a MANAGER is allowed to manage.
+ * MANAGER cannot create or modify TENANT_ADMIN accounts — only TENANT_ADMIN can.
+ */
+const MANAGER_MANAGEABLE_ROLES: UserRole[] = [
+  UserRole.TELLER,
+  UserRole.AUDITOR,
+  UserRole.MEMBER,
+];
+
 const USER_SELECT = {
   id: true,
   email: true,
@@ -37,12 +56,33 @@ export class UsersService {
 
   /**
    * Create a staff/member account with a temporary password.
-   * mustChangePassword is set to true — the user must change on first login.
-   * SUPER_ADMIN cannot be created through this endpoint.
+   * mustChangePassword is forced to true — user must change on first login.
+   *
+   * Role restrictions:
+   *   - SUPER_ADMIN cannot be assigned via this endpoint (platform-only role)
+   *   - MANAGER cannot create TENANT_ADMIN accounts (role hierarchy)
+   *   - TENANT_ADMIN can create any tenant-level role
+   *
+   * Phase 3 hook: enqueue a welcome + set-password email to the new user.
    */
-  async create(dto: CreateUserDto, tenantId: string, createdBy: string, ipAddress?: string) {
+  async create(
+    dto: CreateUserDto,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
     if (dto.role === UserRole.SUPER_ADMIN) {
       throw new ForbiddenException('SUPER_ADMIN cannot be assigned via this endpoint');
+    }
+
+    // MANAGER cannot promote someone to TENANT_ADMIN
+    if (
+      actor.role === UserRole.MANAGER &&
+      !MANAGER_MANAGEABLE_ROLES.includes(dto.role)
+    ) {
+      throw new ForbiddenException(
+        `MANAGER cannot create accounts with role ${dto.role}`,
+      );
     }
 
     const existing = await this.prisma.user.findUnique({
@@ -72,15 +112,15 @@ export class UsersService {
       select: USER_SELECT,
     });
 
-    await this.audit.create({
+    await this.auditSafe({
       tenantId,
-      userId: createdBy,
+      userId: actor.id,
       action: 'USER.CREATE',
       resource: 'User',
       resourceId: user.id,
-      metadata: { email: user.email, role: user.role, createdForTenant: tenantId },
+      metadata: { email: user.email, role: user.role, createdBy: actor.id },
       ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    });
 
     return user;
   }
@@ -144,13 +184,32 @@ export class UsersService {
 
   // ─── UPDATE ──────────────────────────────────────────────────
 
-  async update(id: string, dto: UpdateUserDto, tenantId: string, updatedBy: string, ipAddress?: string) {
-    const user = await this.prisma.user.findFirst({ where: { id, tenantId }, select: { id: true, role: true } });
-    if (!user) throw new NotFoundException('User not found');
+  async update(
+    id: string,
+    dto: UpdateUserDto,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, role: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
 
-    // Prevent elevating to SUPER_ADMIN
+    // Hard block: SUPER_ADMIN can never be assigned via this endpoint
     if (dto.role === UserRole.SUPER_ADMIN) {
       throw new ForbiddenException('SUPER_ADMIN cannot be assigned via this endpoint');
+    }
+
+    // MANAGER cannot elevate a user to TENANT_ADMIN, nor modify an existing TENANT_ADMIN
+    if (actor.role === UserRole.MANAGER) {
+      if (target.role === UserRole.TENANT_ADMIN) {
+        throw new ForbiddenException('MANAGER cannot modify a TENANT_ADMIN account');
+      }
+      if (dto.role !== undefined && !MANAGER_MANAGEABLE_ROLES.includes(dto.role)) {
+        throw new ForbiddenException(`MANAGER cannot assign role ${dto.role}`);
+      }
     }
 
     const updated = await this.prisma.user.update({
@@ -165,28 +224,42 @@ export class UsersService {
       select: USER_SELECT,
     });
 
-    await this.audit.create({
+    await this.auditSafe({
       tenantId,
-      userId: updatedBy,
+      userId: actor.id,
       action: 'USER.UPDATE',
       resource: 'User',
       resourceId: id,
-      metadata: { changes: dto },
+      metadata: { changes: dto, actorRole: actor.role },
       ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    });
 
     return updated;
   }
 
   // ─── DEACTIVATE ──────────────────────────────────────────────
 
-  async deactivate(id: string, tenantId: string, deactivatedBy: string, ipAddress?: string) {
-    const user = await this.prisma.user.findFirst({ where: { id, tenantId }, select: { id: true, isActive: true } });
-    if (!user) throw new NotFoundException('User not found');
-    if (!user.isActive) throw new BadRequestException('User is already inactive');
+  async deactivate(
+    id: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, isActive: true, role: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+    if (!target.isActive) throw new BadRequestException('User is already inactive');
 
-    // Prevent self-deactivation
-    if (id === deactivatedBy) throw new ForbiddenException('Cannot deactivate your own account');
+    if (id === actor.id) {
+      throw new ForbiddenException('Cannot deactivate your own account');
+    }
+
+    // MANAGER cannot deactivate a TENANT_ADMIN
+    if (actor.role === UserRole.MANAGER && target.role === UserRole.TENANT_ADMIN) {
+      throw new ForbiddenException('MANAGER cannot deactivate a TENANT_ADMIN account');
+    }
 
     const updated = await this.prisma.user.update({
       where: { id },
@@ -194,40 +267,109 @@ export class UsersService {
       select: USER_SELECT,
     });
 
-    await this.audit.create({
+    await this.auditSafe({
       tenantId,
-      userId: deactivatedBy,
+      userId: actor.id,
       action: 'USER.DEACTIVATE',
       resource: 'User',
       resourceId: id,
-      metadata: {},
+      metadata: { targetRole: target.role },
       ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    });
 
     return updated;
   }
 
   // ─── FORCE PASSWORD RESET ────────────────────────────────────
 
-  async forcePasswordReset(id: string, tenantId: string, requestedBy: string, ipAddress?: string) {
-    const user = await this.prisma.user.findFirst({ where: { id, tenantId }, select: { id: true } });
-    if (!user) throw new NotFoundException('User not found');
+  /**
+   * Admin-initiated password reset.
+   *
+   * Effects:
+   *   - Sets mustChangePassword = true → JwtAuthGuard will block the user from all
+   *     routes except PATCH /auth/change-password until they set a new password.
+   *   - Clears refreshToken → invalidates all existing sessions immediately.
+   *
+   * Role hierarchy enforced:
+   *   - MANAGER cannot force-reset a TENANT_ADMIN's password.
+   *   - No user can force-reset their own password via this endpoint (use
+   *     PATCH /auth/change-password for self-service).
+   *
+   * Phase 2 hook: also add user's access token jti to Redis blocklist so the
+   *   current 15-min window is revoked immediately, not just after expiry.
+   * Phase 3 hook: enqueue a "your password was reset by an admin" notification email.
+   */
+  async forcePasswordReset(
+    id: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, email: true, role: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    // Prevent self-reset via this admin endpoint (use /auth/change-password instead)
+    if (id === actor.id) {
+      throw new ForbiddenException(
+        'Cannot force-reset your own password via this endpoint — use PATCH /auth/change-password',
+      );
+    }
+
+    // MANAGER cannot force-reset a TENANT_ADMIN or another MANAGER
+    if (
+      actor.role === UserRole.MANAGER &&
+      !MANAGER_MANAGEABLE_ROLES.includes(target.role)
+    ) {
+      throw new ForbiddenException(
+        `MANAGER cannot force a password reset for a ${target.role} account`,
+      );
+    }
 
     await this.prisma.user.update({
       where: { id },
-      data: { mustChangePassword: true, refreshToken: null },
+      data: {
+        mustChangePassword: true,
+        refreshToken: null,  // Invalidate all active sessions immediately
+      },
     });
 
-    await this.audit.create({
+    await this.auditSafe({
       tenantId,
-      userId: requestedBy,
+      userId: actor.id,
       action: 'USER.FORCE_PASSWORD_RESET',
       resource: 'User',
       resourceId: id,
-      metadata: { requestedBy },
+      metadata: {
+        targetEmail: target.email,
+        targetRole: target.role,
+        requestedBy: actor.id,
+        actorRole: actor.role,
+      },
       ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    });
 
-    return { message: 'Password reset forced. User will be required to set a new password on next login.' };
+    // Phase 2 hook: enqueue notification email to target.email informing them
+    // that an admin has reset their password and they must log in to set a new one.
+
+    return {
+      success: true,
+      message:
+        'Password reset forced. All existing sessions have been invalidated. ' +
+        'The user must log in and set a new password before accessing any resources.',
+    };
+  }
+
+  // ─── PRIVATE HELPERS ─────────────────────────────────────────
+
+  /** Fire-and-forget audit write — never let an audit failure break the user flow. */
+  private async auditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {
+    await this.audit
+      .create(params)
+      .catch((e: unknown) =>
+        this.logger.error('Audit write failed (non-fatal)', e instanceof Error ? e.stack : e),
+      );
   }
 }

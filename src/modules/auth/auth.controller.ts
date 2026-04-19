@@ -23,6 +23,7 @@ import { LoginDto, LoginResponseDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
 import { Public } from '../../common/decorators/public.decorator';
+import { SkipPasswordCheck } from '../../common/decorators/skip-password-check.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -100,6 +101,7 @@ export class AuthController {
   // ─────────────────────────── REFRESH ───────────────────────────
 
   @Public()
+  @SkipPasswordCheck()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @SkipThrottle()
@@ -124,6 +126,7 @@ export class AuthController {
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   @SkipThrottle()
+  @SkipPasswordCheck()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
@@ -147,6 +150,7 @@ export class AuthController {
 
   @Patch('change-password')
   @HttpCode(HttpStatus.OK)
+  @SkipPasswordCheck()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({

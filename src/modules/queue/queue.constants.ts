@@ -82,7 +82,9 @@ export type EmailJobPayload =
   | GuarantorInviteEmailPayload
   | GuarantorReminderEmailPayload
   | RepaymentReceiptEmailPayload
-  | PasswordResetEmailPayload;
+  | PasswordResetEmailPayload
+  | MemberApprovedEmailPayload
+  | MemberRejectedEmailPayload;
 
 interface BaseEmailPayload {
   to: string;       // recipient email address
@@ -145,6 +147,17 @@ export interface PasswordResetEmailPayload extends BaseEmailPayload {
   type: 'PASSWORD_RESET';
   resetUrl: string;
   expiresInMinutes: number;
+}
+
+export interface MemberApprovedEmailPayload extends BaseEmailPayload {
+  type: 'MEMBER_APPROVED';
+  saccoName: string;
+  memberNumber: string;
+}
+
+export interface MemberRejectedEmailPayload extends BaseEmailPayload {
+  type: 'MEMBER_REJECTED';
+  reason: string;
 }
 
 // ─── Phase 4 job payload types ────────────────────────────────────────────────

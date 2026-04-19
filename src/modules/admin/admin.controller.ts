@@ -10,6 +10,7 @@ import { UserRole } from '@prisma/client';
 import { Request } from 'express';
 import { AdminService } from './admin.service';
 import { UpdateKycDto } from './dto/update-kyc.dto';
+import { ReviewMemberDto } from './dto/review-member.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
@@ -30,7 +31,7 @@ export class AdminController {
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
   @ApiOperation({
     summary: 'Admin dashboard stats',
-    description: 'Returns total members, active loans, pending approvals, M-Pesa volume, and default rate.',
+    description: 'Returns total members, active loans, pending KYC count, pending approvals, M-Pesa volume, and default rate.',
   })
   @ApiResponse({ status: 200, description: 'Aggregated metrics' })
   getDashboardStats(@CurrentTenant() tenant: Tenant) {
@@ -56,6 +57,56 @@ export class AdminController {
     @Query('role') role?: UserRole,
   ) {
     return this.adminService.getMembers(tenant.id, { search, page, limit, status, role });
+  }
+
+  // ─── PENDING KYC QUEUE ───────────────────────────────────────
+
+  @Get('members/pending')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'List members pending KYC review (oldest first)',
+    description: 'Returns members with kycStatus = PENDING_REVIEW in FIFO order.',
+  })
+  @ApiQuery({ name: 'search', required: false })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'Paginated pending members' })
+  getPendingMembers(
+    @CurrentTenant() tenant: Tenant,
+    @Query('search') search?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.adminService.getPendingMembers(tenant.id, { search, page, limit });
+  }
+
+  // ─── KYC REVIEW (APPROVE / REJECT) ───────────────────────────
+
+  @Patch('members/:id/review')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Approve or reject a member KYC submission',
+    description:
+      'APPROVE: atomically sets kycStatus = APPROVED and creates FOSA + BOSA accounts. ' +
+      'REJECT: sets kycStatus = REJECTED and stores the rejection reason. ' +
+      'Both actions send an email notification and audit log.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Review recorded',
+    schema: { example: { success: true, action: 'APPROVE' } },
+  })
+  @ApiResponse({ status: 400, description: 'Rejection reason missing' })
+  @ApiResponse({ status: 404, description: 'Pending member not found or already reviewed' })
+  reviewMember(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReviewMemberDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.adminService.reviewMember(id, dto, tenant.id, actor, req.ip);
   }
 
   // ─── KYC UPDATE ──────────────────────────────────────────────
