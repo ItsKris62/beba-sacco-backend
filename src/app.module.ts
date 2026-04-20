@@ -50,6 +50,8 @@ import { Phase7Module } from './modules/admin/phase7/phase7.module';
 import { LocationsModule } from './modules/locations/locations.module';
 import { ApplicationsModule } from './modules/applications/applications.module';
 import { StagesModule } from './modules/stages/stages.module';
+// Sprint 2
+import { DataImportModule } from './modules/data-import/data-import.module';
 
 // Prisma
 import { PrismaModule } from './prisma/prisma.module';
@@ -145,6 +147,8 @@ import { AuditService } from './modules/audit/audit.service';
     LocationsModule,
     ApplicationsModule,
     StagesModule,
+    // Sprint 2 – Legacy Data Import
+    DataImportModule,
   ],
 
   providers: [

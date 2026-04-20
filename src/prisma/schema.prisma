@@ -246,6 +246,17 @@ enum KycStatus {
   @@schema("public")
 }
 
+// Sprint 2: Data import job status
+enum ImportJobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  PARTIAL // Completed with some failures
+
+  @@schema("public")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC SCHEMA – Platform & Identity
 // ─────────────────────────────────────────────────────────────────────────────
@@ -275,6 +286,7 @@ model Tenant {
   guarantors           Guarantor[]
   counter              TenantCounter?
   webhookSubscriptions WebhookSubscription[]
+  dataImportLogs       DataImportLog[]
 
   @@index([slug])
   @@index([status])
@@ -322,6 +334,11 @@ model User {
   wardId      String?          // FK to Ward – set on member approval
   userStatus  String   @default("ACTIVE") // ACTIVE | SUSPENDED | PENDING
 
+  // Sprint 2 – Legacy import fields (additive, nullable)
+  nextOfKinPhone String?       // Optional next-of-kin contact from CSV
+  legacyMemberNo String?       // CSV "NO." column reference
+  importBatchId  String?       // UUID linking to DataImportLog
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -333,6 +350,7 @@ model User {
   @@index([email])
   @@index([role])
   @@index([idNumber])
+  @@index([importBatchId])
   @@schema("public")
 }
 
@@ -1299,5 +1317,58 @@ model StageAssignment {
   @@unique([userId, stageId])
   @@index([stageId])
   @@index([userId])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPRINT 2 – Legacy Data Import & Migration Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tracks every CSV/Excel import job with full audit trail
+model DataImportLog {
+  id          String          @id @default(uuid())
+  tenantId    String
+  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// UUID used as idempotency key – stored on imported User.importBatchId
+  batchId     String          @unique @default(uuid())
+
+  /// Who triggered the import
+  initiatedBy String          // userId of TENANT_ADMIN
+
+  /// Source file metadata
+  fileName    String
+  fileSize    Int             // bytes
+  totalRows   Int             @default(0)
+
+  /// Processing counters (updated by worker)
+  successCount Int            @default(0)
+  failedCount  Int            @default(0)
+  warningCount Int            @default(0)
+  skippedCount Int            @default(0)
+
+  status      ImportJobStatus @default(QUEUED)
+
+  /// Whether this was a dry-run (preview only, no DB writes)
+  dryRun      Boolean         @default(false)
+
+  /// Row-level validation failures: { row, field, value, reason, errorCode }[]
+  errorDetails Json?
+
+  /// Structured summary report
+  reportData  Json?
+
+  /// BullMQ job ID for polling
+  queueJobId  String?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([batchId])
+  @@index([initiatedBy])
   @@schema("public")
 }
