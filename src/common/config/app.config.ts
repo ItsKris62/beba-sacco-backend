@@ -7,6 +7,8 @@ export default registerAs('app', () => ({
   apiPrefix: process.env.API_PREFIX || 'api',
   appName: process.env.APP_NAME || 'Beba SACCO Backend',
   appVersion: process.env.APP_VERSION || '1.0.0',
+  /** Frontend base URL — used to build password reset links in emails */
+  appUrl: process.env.APP_URL || 'http://localhost:3001',
 
   // Database
   databaseUrl: process.env.DATABASE_URL,

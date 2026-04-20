@@ -312,15 +312,27 @@ model User {
   lastLoginAt        DateTime?
   mustChangePassword Boolean  @default(false)
 
+  // Password reset (stateless JWT + nonce pattern)
+  passwordResetToken  String?   @db.Text // argon2 hash of one-time nonce
+  passwordResetExpiry DateTime?           // expiry enforced at DB level too
+
+  // Sprint 1 – Onboarding & Location fields (additive, nullable for backward compat)
+  idNumber    String?  @unique // Kenyan National ID (7–8 digits) – set on member approval
+  phoneNumber String?  @unique // Kenyan phone (2547xxxxxxxx) – set on member approval
+  wardId      String?          // FK to Ward – set on member approval
+  userStatus  String   @default("ACTIVE") // ACTIVE | SUSPENDED | PENDING
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  auditLogs AuditLog[]
-  member    Member?
+  auditLogs        AuditLog[]
+  member           Member?
+  stageAssignments StageAssignment[]
 
   @@index([tenantId])
   @@index([email])
   @@index([role])
+  @@index([idNumber])
   @@schema("public")
 }
 
@@ -1167,5 +1179,125 @@ model ExecutiveReport {
   @@unique([tenantId, period, periodType])
   @@index([tenantId])
   @@index([generatedAt])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPRINT 1 – Admin-Driven Onboarding, Role Hierarchy & Location Scoping
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Location Hierarchy (Scoped to Nairobi + Western Kenya) ───────────────────
+
+model County {
+  id             String         @id @default(cuid())
+  code           String         @unique
+  name           String
+  constituencies Constituency[]
+
+  @@index([code])
+  @@schema("public")
+}
+
+model Constituency {
+  id       String @id @default(cuid())
+  code     String @unique
+  name     String
+  countyId String
+  county   County @relation(fields: [countyId], references: [id])
+  wards    Ward[]
+
+  @@index([countyId])
+  @@schema("public")
+}
+
+model Ward {
+  id               String        @id @default(cuid())
+  code             String        @unique
+  name             String
+  constituencyId   String
+  constituency     Constituency  @relation(fields: [constituencyId], references: [id])
+  stages           Stage[]
+  memberApplications MemberApplication[]
+
+  @@index([constituencyId])
+  @@schema("public")
+}
+
+// ── Pre-Onboarding Form Queue ─────────────────────────────────────────────────
+
+enum ApplicationStatus {
+  SUBMITTED
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+
+  @@schema("public")
+}
+
+model MemberApplication {
+  id          String            @id @default(cuid())
+  firstName   String
+  lastName    String
+  idNumber    String            // Mandatory – Kenyan National ID (7–8 digits)
+  phoneNumber String            // Mandatory – format: 2547xxxxxxxx or 07xxxxxxxx
+  stageName   String
+  position    String            @default("MEMBER") // CHAIRMAN | SECRETARY | TREASURER | MEMBER
+  wardId      String
+  ward        Ward              @relation(fields: [wardId], references: [id])
+  status      ApplicationStatus @default(SUBMITTED)
+  documentUrl String?           // MinIO pre-signed URL for KYC form scan
+  reviewedBy  String?           // userId of reviewer
+  reviewNotes String?           @db.Text
+  tenantId    String
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([idNumber])
+  @@index([phoneNumber])
+  @@schema("public")
+}
+
+// ── Operational Stages ────────────────────────────────────────────────────────
+
+enum StagePosition {
+  CHAIRMAN
+  SECRETARY
+  TREASURER
+  MEMBER
+
+  @@schema("public")
+}
+
+model Stage {
+  id          String          @id @default(cuid())
+  name        String
+  wardId      String
+  ward        Ward            @relation(fields: [wardId], references: [id])
+  tenantId    String
+  assignments StageAssignment[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([name, wardId, tenantId])
+  @@index([tenantId])
+  @@index([wardId])
+  @@schema("public")
+}
+
+model StageAssignment {
+  id       String        @id @default(cuid())
+  userId   String
+  stageId  String
+  position StagePosition @default(MEMBER)
+  joinedAt DateTime      @default(now())
+  isActive Boolean       @default(true)
+  user     User          @relation(fields: [userId], references: [id])
+  stage    Stage         @relation(fields: [stageId], references: [id])
+
+  @@unique([userId, stageId])
+  @@index([stageId])
+  @@index([userId])
   @@schema("public")
 }

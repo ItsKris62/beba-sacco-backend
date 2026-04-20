@@ -8,8 +8,9 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
-import { TenantStatus } from '@prisma/client';
+import { TenantStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import type { AuthenticatedUser } from '../../modules/auth/strategies/jwt.strategy';
 
 /**
  * Routes that do NOT require X-Tenant-ID.
@@ -95,12 +96,19 @@ export class TenantInterceptor implements NestInterceptor {
       throw new BadRequestException('Unknown tenant');
     }
 
-    if (tenant.status === TenantStatus.SUSPENDED) {
-      throw new UnauthorizedException('This SACCO account has been suspended. Contact support.');
-    }
+    // SUPER_ADMIN can access any tenant regardless of status (for management/recovery purposes).
+    // All other roles are blocked from suspended or inactive tenants.
+    const requestUser = (request as unknown as { user?: AuthenticatedUser }).user;
+    const isSuperAdmin = requestUser?.role === UserRole.SUPER_ADMIN;
 
-    if (tenant.status === TenantStatus.INACTIVE) {
-      throw new UnauthorizedException('This SACCO account is inactive.');
+    if (!isSuperAdmin) {
+      if (tenant.status === TenantStatus.SUSPENDED) {
+        throw new UnauthorizedException('This SACCO account has been suspended. Contact support.');
+      }
+
+      if (tenant.status === TenantStatus.INACTIVE) {
+        throw new UnauthorizedException('This SACCO account is inactive.');
+      }
     }
 
     // Attach full tenant object for downstream use (@CurrentTenant() decorator)

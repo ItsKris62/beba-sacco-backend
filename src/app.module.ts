@@ -46,6 +46,10 @@ import { ApiVersionInterceptor } from './common/interceptors/api-version.interce
 import { Phase6Module } from './modules/admin/phase6/phase6.module';
 // Phase 7
 import { Phase7Module } from './modules/admin/phase7/phase7.module';
+// Sprint 1
+import { LocationsModule } from './modules/locations/locations.module';
+import { ApplicationsModule } from './modules/applications/applications.module';
+import { StagesModule } from './modules/stages/stages.module';
 
 // Prisma
 import { PrismaModule } from './prisma/prisma.module';
@@ -137,6 +141,10 @@ import { AuditService } from './modules/audit/audit.service';
     Phase6Module,
     // Phase 7
     Phase7Module,
+    // Sprint 1 – Onboarding, Locations, Stages
+    LocationsModule,
+    ApplicationsModule,
+    StagesModule,
   ],
 
   providers: [

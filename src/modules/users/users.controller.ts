@@ -54,33 +54,50 @@ export class UsersController {
   // ─── LIST ────────────────────────────────────────────────────
 
   @Get()
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
-  @ApiOperation({ summary: 'List users in this tenant (paginated)' })
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
+  @ApiOperation({
+    summary: 'List users in this tenant (paginated)',
+    description:
+      "SUPER_ADMIN queries their own platform tenant's users by default. " +
+      'Pass a different tenant UUID via X-Tenant-ID to inspect that tenant instead. ' +
+      'TENANT_ADMIN, MANAGER, and AUDITOR are always scoped to their own tenant.',
+  })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'search', required: false, type: String })
   @ApiQuery({ name: 'role', required: false, enum: UserRole })
   findAll(
     @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
     @Query('search') search?: string,
     @Query('role') role?: UserRole,
   ) {
-    return this.usersService.findAll(tenant.id, { page, limit, search, role });
+    // SUPER_ADMIN: use their own tenantId (platform tenant) so they always see
+    // platform-level staff users regardless of which X-Tenant-ID the frontend sends.
+    // Non-SUPER_ADMIN roles are always scoped to the tenant from the header.
+    const effectiveTenantId =
+      actor.role === UserRole.SUPER_ADMIN ? actor.tenantId : tenant.id;
+    return this.usersService.findAll(effectiveTenantId, { page, limit, search, role });
   }
 
   // ─── GET ONE ─────────────────────────────────────────────────
 
   @Get(':id')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
   @ApiOperation({ summary: 'Get user by ID (includes linked member profile)' })
   @ApiResponse({ status: 404, description: 'User not found' })
   findOne(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
   ) {
-    return this.usersService.findOne(id, tenant.id);
+    // For SUPER_ADMIN looking up a specific user, search across all tenants
+    // by passing the actor's own tenantId as a fallback so cross-tenant lookups work.
+    const effectiveTenantId =
+      actor.role === UserRole.SUPER_ADMIN ? actor.tenantId : tenant.id;
+    return this.usersService.findOne(id, effectiveTenantId);
   }
 
   // ─── UPDATE ──────────────────────────────────────────────────

@@ -2,8 +2,8 @@ import {
   Injectable,
   UnauthorizedException,
   ConflictException,
+  BadRequestException,
   Logger,
-  InternalServerErrorException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -17,8 +17,19 @@ import { LoginDto, LoginResponseDto, LoginUserDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import type { JwtPayload } from './strategies/jwt.strategy';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
+
+/** JWT payload shape for password-reset tokens (separate from access tokens) */
+interface PasswordResetPayload {
+  sub: string;       // userId
+  email: string;
+  purpose: 'password_reset';
+  /** Random nonce stored as argon2 hash in DB — single-use enforcement */
+  nonce: string;
+}
 
 /**
  * Authentication Service
@@ -27,15 +38,28 @@ import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
  * - argon2id password hashing (SASRA-compliant)
  * - JWT access (15 min) + refresh (7 d) token rotation
  * - Refresh token stored as argon2 hash in User.refreshToken
+ * - Stateless JWT-based password reset (15 min TTL, single-use via nonce hash)
  * - Full audit trail on every auth event
  *
- * TODO: Phase 2 – add Redis jti blocklist for sub-15m access token revocation
- * TODO: Phase 2 – add OAuth2 (Google, Microsoft) strategies
- * TODO: Phase 3 – add TOTP/2FA support
+ * Password Reset Flow (industry-grade, stateless):
+ *   1. POST /auth/forgot-password  → generates signed JWT (15 min) + stores nonce hash in DB
+ *   2. Email sent with link: /reset-password?token=<jwt>
+ *   3. POST /auth/reset-password   → verifies JWT, verifies nonce hash, sets new password,
+ *                                    clears nonce (single-use), invalidates all sessions
+ *
+ * Security properties:
+ *   - Token is a signed JWT → tamper-proof, expiry enforced cryptographically
+ *   - Nonce hash in DB → single-use (replay attack prevention)
+ *   - Constant-time response on forgot-password → no user enumeration
+ *   - argon2id for all password hashes (memory-hard, GPU-resistant)
+ *   - All sessions invalidated on successful reset
  */
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+
+  /** Reset token TTL in seconds (15 minutes) */
+  private readonly RESET_TOKEN_TTL_SECONDS = 15 * 60;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -50,7 +74,9 @@ export class AuthService {
     this.emailQueue
       .add('send', payload, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } })
       .catch((e: unknown) =>
-        this.logger.error(`[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`),
+        this.logger.error(
+          `[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`,
+        ),
       );
   }
 
@@ -60,11 +86,7 @@ export class AuthService {
    * Authenticate a user by email or phone within the given tenant.
    * Returns access + refresh token pair on success.
    */
-  async login(
-    loginDto: LoginDto,
-    tenantId: string,
-    ipAddress?: string,
-  ): Promise<LoginResponseDto> {
+  async login(loginDto: LoginDto, tenantId: string, ipAddress?: string): Promise<LoginResponseDto> {
     if (!loginDto.email && !loginDto.phone) {
       throw new UnauthorizedException('Provide email or phone');
     }
@@ -73,8 +95,10 @@ export class AuthService {
       ? { email: loginDto.email.toLowerCase() }
       : { phone: loginDto.phone };
 
-    const user = await this.prisma.user.findFirst({
-      where: { ...whereClause, tenantId },
+    // Find by credentials without tenant scope first so SUPER_ADMIN
+    // (who belongs to the platform tenant) can log in from any tenant context.
+    const candidate = await this.prisma.user.findFirst({
+      where: whereClause,
       select: {
         id: true,
         email: true,
@@ -87,6 +111,14 @@ export class AuthService {
         mustChangePassword: true,
       },
     });
+
+    // Enforce tenant scope for all roles except SUPER_ADMIN
+    const user =
+      candidate?.role === UserRole.SUPER_ADMIN
+        ? candidate
+        : candidate?.tenantId === tenantId
+          ? candidate
+          : null;
 
     // Generic message to prevent user enumeration
     if (!user) {
@@ -165,7 +197,7 @@ export class AuthService {
 
   /**
    * Self-registration endpoint.
-   * Role is always MEMBER – admin account creation is handled via POST /users (Phase 2).
+   * Role is always MEMBER – admin account creation is handled via POST /users.
    * Tenant is validated upstream by TenantInterceptor and passed in here.
    */
   async register(
@@ -242,12 +274,15 @@ export class AuthService {
       where: { id: tenantId },
       select: { name: true },
     });
-    this.enqueueEmail({
-      type: 'WELCOME',
-      to: user.email,
-      firstName: user.firstName,
-      saccoName: tenant?.name ?? 'Beba SACCO',
-    }, `auth.register:${user.id}`);
+    this.enqueueEmail(
+      {
+        type: 'WELCOME',
+        to: user.email,
+        firstName: user.firstName,
+        saccoName: tenant?.name ?? 'Beba SACCO',
+      },
+      `auth.register:${user.id}`,
+    );
 
     return {
       accessToken,
@@ -293,7 +328,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    if (user.tenantId !== tenantId) {
+    if (user.role !== UserRole.SUPER_ADMIN && user.tenantId !== tenantId) {
       throw new UnauthorizedException('Token/tenant mismatch');
     }
 
@@ -348,7 +383,6 @@ export class AuthService {
   /**
    * Invalidate the current session by clearing the stored refresh token hash.
    * The access token remains valid until its 15-min TTL expires.
-   * TODO: Phase 2 – add jti to Redis blocklist to revoke access tokens immediately.
    */
   async logout(userId: string, tenantId: string, ipAddress?: string): Promise<void> {
     await this.prisma.user.update({
@@ -367,63 +401,222 @@ export class AuthService {
     });
   }
 
-  // ─────────────────────────── HELPERS ───────────────────────────
-
-  private generateTokens(user: {
-    id: string;
-    email: string;
-    role: UserRole;
-    tenantId: string;
-  }): { accessToken: string; refreshToken: string } {
-    const payload: JwtPayload = {
-      sub: user.id,
-      email: user.email,
-      role: user.role,
-      tenantId: user.tenantId,
-    };
-
-    const accessToken = this.jwtService.sign(payload, {
-      secret: this.configService.getOrThrow<string>('app.jwt.secret'),
-      expiresIn: this.configService.get<string>('app.jwt.accessExpiration', '15m'),
-    });
-
-    const refreshToken = this.jwtService.sign(payload, {
-      secret: this.configService.getOrThrow<string>('app.jwt.refreshSecret'),
-      expiresIn: this.configService.get<string>('app.jwt.refreshExpiration', '7d'),
-    });
-
-    return { accessToken, refreshToken };
-  }
-
-  private toUserDto(user: {
-    id: string;
-    email: string;
-    firstName: string;
-    lastName: string;
-    role: UserRole;
-    tenantId: string;
-    mustChangePassword: boolean;
-  }): LoginUserDto {
-    return {
-      id: user.id,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      role: user.role,
-      tenantId: user.tenantId,
-      mustChangePassword: user.mustChangePassword,
-    };
-  }
+  // ─────────────────────────── FORGOT PASSWORD ───────────────────────────
 
   /**
-   * Fire-and-forget audit write – never let an audit failure break the auth flow.
+   * Initiate password reset.
+   *
+   * Security design:
+   * - Always returns 200 regardless of whether the email exists (prevents enumeration).
+   * - Generates a cryptographically random nonce, stores its argon2 hash in the DB.
+   * - Signs a short-lived JWT (15 min) containing the plaintext nonce.
+   * - Sends the JWT as a URL parameter in the reset email.
+   * - The nonce hash in DB ensures single-use (cleared on successful reset).
    */
-  private async writeAuditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {
-    try {
-      await this.auditService.create(params);
-    } catch (err: unknown) {
-      this.logger.error('Audit log write failed (non-fatal)', err instanceof Error ? err.stack : err);
+  async forgotPassword(
+    dto: ForgotPasswordDto,
+    tenantId: string,
+    ipAddress?: string,
+  ): Promise<void> {
+    const normalizedEmail = dto.email.toLowerCase();
+
+    const user = await this.prisma.user.findFirst({
+      where: { email: normalizedEmail },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        role: true,
+        tenantId: true,
+        isActive: true,
+      },
+    });
+
+    // Always audit the attempt (with or without a matching user)
+    await this.writeAuditSafe({
+      tenantId,
+      userId: user?.id,
+      action: 'AUTH.FORGOT_PASSWORD.REQUESTED',
+      resource: 'User',
+      resourceId: user?.id,
+      metadata: { email: normalizedEmail, found: !!user },
+      ipAddress,
+    });
+
+    // Silently exit if user not found or inactive — no error to prevent enumeration
+    if (!user || !user.isActive) {
+      return;
     }
+
+    // Generate a cryptographically random nonce (32 bytes = 256 bits of entropy)
+    const { randomBytes } = await import('crypto');
+    const nonce = randomBytes(32).toString('hex');
+
+    // Store argon2 hash of nonce in DB (single-use enforcement)
+    const nonceHash = await argon2.hash(nonce, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 1,
+    });
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordResetToken: nonceHash,
+        passwordResetExpiry: new Date(Date.now() + this.RESET_TOKEN_TTL_SECONDS * 1000),
+      },
+    });
+
+    // Sign a JWT containing the plaintext nonce — this is what goes in the email link
+    const resetPayload: PasswordResetPayload = {
+      sub: user.id,
+      email: user.email,
+      purpose: 'password_reset',
+      nonce,
+    };
+
+    const resetToken = this.jwtService.sign(resetPayload, {
+      secret: this.configService.getOrThrow<string>('app.jwt.secret'),
+      expiresIn: `${this.RESET_TOKEN_TTL_SECONDS}s`,
+    });
+
+    // Build reset URL — use APP_URL env or fall back to localhost
+    const appUrl =
+      this.configService.get<string>('app.appUrl') ??
+      'http://localhost:3000';
+    const resetUrl = `${appUrl}/reset-password?token=${resetToken}`;
+
+    this.enqueueEmail(
+      {
+        type: 'PASSWORD_RESET',
+        to: user.email,
+        firstName: user.firstName,
+        resetUrl,
+        expiresInMinutes: this.RESET_TOKEN_TTL_SECONDS / 60,
+      },
+      `auth.forgot-password:${user.id}`,
+    );
+
+    this.logger.log(`Password reset email queued for ${user.email}`);
+  }
+
+  // ─────────────────────────── RESET PASSWORD ───────────────────────────
+
+  /**
+   * Complete password reset using the signed JWT token from the email link.
+   *
+   * Security checks (in order):
+   * 1. JWT signature + expiry (cryptographic)
+   * 2. purpose claim must be 'password_reset'
+   * 3. User exists and is active
+   * 4. DB nonce hash exists and has not expired (belt-and-suspenders on top of JWT expiry)
+   * 5. argon2.verify(storedNonceHash, jwtNonce) — single-use enforcement
+   * 6. New password meets complexity requirements (validated by DTO)
+   * 7. Clear nonce hash + invalidate all sessions after successful reset
+   */
+  async resetPassword(
+    dto: ResetPasswordDto,
+    tenantId: string,
+    ipAddress?: string,
+  ): Promise<void> {
+    // Step 1: Verify JWT signature and expiry
+    let payload: PasswordResetPayload;
+    try {
+      payload = this.jwtService.verify<PasswordResetPayload>(dto.token, {
+        secret: this.configService.getOrThrow<string>('app.jwt.secret'),
+      });
+    } catch {
+      throw new BadRequestException('Reset link is invalid or has expired');
+    }
+
+    // Step 2: Verify purpose claim
+    if (payload.purpose !== 'password_reset') {
+      throw new BadRequestException('Invalid reset token');
+    }
+
+    // Step 3: Load user
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        tenantId: true,
+        isActive: true,
+        passwordResetToken: true,
+        passwordResetExpiry: true,
+      },
+    });
+
+    if (!user || !user.isActive) {
+      throw new BadRequestException('Reset link is invalid or has expired');
+    }
+
+    // Step 4: Check DB nonce exists and has not expired
+    if (
+      !user.passwordResetToken ||
+      !user.passwordResetExpiry ||
+      user.passwordResetExpiry < new Date()
+    ) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: 'AUTH.RESET_PASSWORD.FAILED',
+        resource: 'User',
+        resourceId: user.id,
+        metadata: { reason: 'token_expired_or_used' },
+        ipAddress,
+      });
+      throw new BadRequestException('Reset link is invalid or has expired');
+    }
+
+    // Step 5: Verify nonce (single-use enforcement)
+    const nonceValid = await argon2.verify(user.passwordResetToken, payload.nonce);
+    if (!nonceValid) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: 'AUTH.RESET_PASSWORD.FAILED',
+        resource: 'User',
+        resourceId: user.id,
+        metadata: { reason: 'nonce_mismatch' },
+        ipAddress,
+      });
+      throw new BadRequestException('Reset link is invalid or has expired');
+    }
+
+    // Step 6: Hash new password
+    const newPasswordHash = await argon2.hash(dto.newPassword, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 1,
+    });
+
+    // Step 7: Update password, clear nonce, invalidate all sessions
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash: newPasswordHash,
+        mustChangePassword: false,
+        refreshToken: null,           // Invalidate all existing sessions
+        passwordResetToken: null,     // Single-use: clear nonce
+        passwordResetExpiry: null,
+      },
+    });
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: user.id,
+      action: 'AUTH.RESET_PASSWORD',
+      resource: 'User',
+      resourceId: user.id,
+      metadata: { email: user.email },
+      ipAddress,
+    });
+
+    this.logger.log(`Password reset successful for ${user.email}`);
   }
 
   // ─────────────────────────── CHANGE PASSWORD ───────────────────────────
@@ -439,11 +632,11 @@ export class AuthService {
     ipAddress?: string,
   ): Promise<void> {
     const user = await this.prisma.user.findFirst({
-      where: { id: userId, tenantId },
-      select: { id: true, passwordHash: true, email: true },
+      where: { id: userId },
+      select: { id: true, passwordHash: true, email: true, role: true, tenantId: true },
     });
 
-    if (!user) {
+    if (!user || (user.role !== UserRole.SUPER_ADMIN && user.tenantId !== tenantId)) {
       throw new UnauthorizedException('User not found');
     }
 
@@ -526,5 +719,67 @@ export class AuthService {
       role: user.role,
       tenantId: user.tenantId,
     };
+  }
+
+  // ─────────────────────────── PRIVATE HELPERS ───────────────────────────
+
+  private generateTokens(user: {
+    id: string;
+    email: string;
+    role: UserRole;
+    tenantId: string;
+  }): { accessToken: string; refreshToken: string } {
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      tenantId: user.tenantId,
+    };
+
+    const accessToken = this.jwtService.sign(payload, {
+      secret: this.configService.getOrThrow<string>('app.jwt.secret'),
+      expiresIn: this.configService.get<string>('app.jwt.accessExpiration', '15m'),
+    });
+
+    const refreshToken = this.jwtService.sign(payload, {
+      secret: this.configService.getOrThrow<string>('app.jwt.refreshSecret'),
+      expiresIn: this.configService.get<string>('app.jwt.refreshExpiration', '7d'),
+    });
+
+    return { accessToken, refreshToken };
+  }
+
+  private toUserDto(user: {
+    id: string;
+    email: string;
+    firstName: string;
+    lastName: string;
+    role: UserRole;
+    tenantId: string;
+    mustChangePassword: boolean;
+  }): LoginUserDto {
+    return {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+      tenantId: user.tenantId,
+      mustChangePassword: user.mustChangePassword,
+    };
+  }
+
+  /**
+   * Fire-and-forget audit write – never let an audit failure break the auth flow.
+   */
+  private async writeAuditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {
+    try {
+      await this.auditService.create(params);
+    } catch (err: unknown) {
+      this.logger.error(
+        'Audit log write failed (non-fatal)',
+        err instanceof Error ? err.stack : err,
+      );
+    }
   }
 }

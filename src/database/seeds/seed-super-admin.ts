@@ -71,7 +71,7 @@ async function main() {
       firstName: 'Beba',
       lastName: 'Platform',
       role: UserRole.SUPER_ADMIN,
-      mustChangePassword: true, // Force password change on first login
+      mustChangePassword: false,
     },
     select: { id: true, email: true },
   });
