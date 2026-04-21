@@ -1321,6 +1321,122 @@ model StageAssignment {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SPRINT 3 – Financial Reconciliation, Dashboards & ODPC Compliance
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Savings type enum
+enum SavingsType {
+  INDIVIDUAL
+  GROUP_WELFARE
+
+  @@schema("public")
+}
+
+/// Loan repayment schedule entry (immutable ledger – no deletes)
+model LoanRepayment {
+  id          String   @id @default(cuid())
+  loanId      String
+  dayNumber   Int      // 1-30 per CSV 30-day schedule
+  amountPaid  Decimal  @db.Decimal(10, 2)
+  paymentDate DateTime
+  method      String   @default("CASH")
+  status      String   @default("CONFIRMED")
+  recordedBy  String?  // userId of teller
+  tenantId    String
+  createdAt   DateTime @default(now())
+
+  @@unique([loanId, dayNumber, tenantId])
+  @@index([tenantId, loanId])
+  @@index([tenantId])
+  @@schema("public")
+}
+
+/// Individual or group savings record (immutable – no deletes)
+model SavingsRecord {
+  id            String      @id @default(cuid())
+  memberId      String?     // Nullable for group welfare entries
+  groupId       String?
+  weekNumber    Int         // 1-52
+  amount        Decimal     @db.Decimal(10, 2)
+  periodDate    DateTime
+  recordType    SavingsType
+  tenantId      String
+  importBatchId String?
+  createdAt     DateTime    @default(now())
+
+  @@index([tenantId])
+  @@index([tenantId, memberId])
+  @@index([tenantId, groupId])
+  @@schema("public")
+}
+
+/// Group welfare (receivership) entity
+model GroupWelfare {
+  id            String   @id @default(cuid())
+  stageId       String
+  name          String
+  weeklyTarget  Decimal  @db.Decimal(10, 2) @default(300)
+  tenantId      String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  collections GroupWelfareCollection[]
+
+  @@index([tenantId])
+  @@index([stageId])
+  @@schema("public")
+}
+
+/// Weekly group welfare collection record (immutable)
+model GroupWelfareCollection {
+  id              String   @id @default(cuid())
+  groupId         String
+  weekNumber      Int
+  amountCollected Decimal  @db.Decimal(10, 2)
+  periodDate      DateTime
+  deficit         Decimal  @db.Decimal(10, 2) @default(0)
+  tenantId        String
+  createdAt       DateTime @default(now())
+
+  group GroupWelfare @relation(fields: [groupId], references: [id])
+
+  @@unique([groupId, weekNumber, tenantId])
+  @@index([tenantId])
+  @@index([groupId])
+  @@schema("public")
+}
+
+/// JWT refresh session with device binding (Sprint 3 security)
+model RefreshSession {
+  id          String   @id @default(cuid())
+  userId      String
+  deviceId    String   // SHA-256 of user-agent + timezone + screen-res
+  fingerprint String   // Raw fingerprint string (for display)
+  expiresAt   DateTime
+  isRevoked   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId, expiresAt])
+  @@index([userId])
+  @@schema("public")
+}
+
+/// ODPC data consent tracking (Kenya Data Protection Act)
+model DataConsent {
+  id          String   @id @default(cuid())
+  userId      String
+  consentType String   // "DATA_PROCESSING" | "STATEMENT_EXPORT" | "LOAN_TERMS"
+  version     String   @default("1.0")
+  acceptedAt  DateTime
+  ipAddress   String
+  userAgent   String?
+
+  @@unique([userId, consentType, version])
+  @@index([userId])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SPRINT 2 – Legacy Data Import & Migration Pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -52,6 +52,8 @@ import { ApplicationsModule } from './modules/applications/applications.module';
 import { StagesModule } from './modules/stages/stages.module';
 // Sprint 2
 import { DataImportModule } from './modules/data-import/data-import.module';
+// Sprint 3
+import { Sprint3Module } from './modules/sprint3/sprint3.module';
 
 // Prisma
 import { PrismaModule } from './prisma/prisma.module';
@@ -149,6 +151,8 @@ import { AuditService } from './modules/audit/audit.service';
     StagesModule,
     // Sprint 2 – Legacy Data Import
     DataImportModule,
+    // Sprint 3 – Financial Reconciliation, Dashboards & ODPC Compliance
+    Sprint3Module,
   ],
 
   providers: [
