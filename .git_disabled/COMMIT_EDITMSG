@@ -1,0 +1,7 @@
+fix(sprint3): resolve schema mismatches in statements and audit retention
+
+- audit: Changed AuditRetentionProcessor to use `timestamp` instead of `createdAt`
+- audit: Implemented ARCHIVED_SENTINEL in `requestId` to track archival state without schema changes
+- statements: Fixed LoanRepayment fetching in StatementService by resolving missing schema back-relations
+- statements: Extended RequestUser type in StatementController to fix memberId TypeScript errors
+- import: Updated financial import controller and data import service logic

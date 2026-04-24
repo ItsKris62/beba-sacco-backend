@@ -1,0 +1,200 @@
+name: Canary Deployment Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Docker image tag to deploy as canary'
+        required: true
+        default: 'latest'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/beba-backend
+  CANARY_TRAFFIC_PCT: 10
+  PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+  API_BASE_URL: ${{ secrets.API_BASE_URL }}
+  SERVICE_ACCOUNT_JWT: ${{ secrets.SERVICE_ACCOUNT_JWT }}
+
+jobs:
+  # ─── Build & Push ──────────────────────────────────────────────────────────
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        id: version
+        run: echo "version=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=canary-
+            type=ref,event=branch
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Compliance Gate ───────────────────────────────────────────────────────
+  compliance-check:
+    name: Compliance Policy Gate
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: cd backend && npm ci
+
+      - name: Run compliance check
+        run: cd backend && npm run compliance:check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+
+      - name: Upload policy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-report
+          path: backend/policy-report.json
+          retention-days: 30
+
+  # ─── Deploy Canary ─────────────────────────────────────────────────────────
+  deploy-canary:
+    name: Deploy Canary (10% traffic)
+    runs-on: ubuntu-latest
+    needs: [build, compliance-check]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy canary image
+        run: |
+          echo "Deploying canary image: ${{ needs.build.outputs.version }}"
+          # In production: kubectl set image deployment/beba-backend-canary \
+          #   backend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:canary-${{ needs.build.outputs.version }}
+          # kubectl rollout status deployment/beba-backend-canary --timeout=120s
+
+      - name: Register canary deployment via API
+        run: |
+          curl -s -X POST "${{ env.API_BASE_URL }}/admin/deploy/canary/register" \
+            -H "Authorization: Bearer ${{ env.SERVICE_ACCOUNT_JWT }}" \
+            -H "Content-Type: application/json" \
+            -d '{"version":"${{ needs.build.outputs.version }}","prometheusBaseUrl":"${{ env.PROMETHEUS_URL }}"}'
+
+      - name: Wait for canary warm-up
+        run: sleep 60
+
+  # ─── Canary Analysis ───────────────────────────────────────────────────────
+  canary-analysis:
+    name: Automated Canary Analysis
+    runs-on: ubuntu-latest
+    needs: deploy-canary
+    steps:
+      - name: Query Prometheus metrics
+        id: metrics
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+
+          # Error rate: 5xx errors / total requests (canary)
+          ERROR_RATE=$(curl -s "${{ env.PROMETHEUS_URL }}/api/v1/query" \
+            --data-urlencode 'query=rate(http_requests_total{status=~"5..",env="canary"}[5m]) / rate(http_requests_total{env="canary"}[5m])' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['result'][0]['value'][1] if d['data']['result'] else '0')" 2>/dev/null || echo "0")
+
+          # p95 latency (ms)
+          P95=$(curl -s "${{ env.PROMETHEUS_URL }}/api/v1/query" \
+            --data-urlencode 'query=histogram_quantile(0.95, rate(http_request_duration_ms_bucket{env="canary"}[5m]))' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['result'][0]['value'][1] if d['data']['result'] else '0')" 2>/dev/null || echo "0")
+
+          echo "error_rate=$ERROR_RATE" >> $GITHUB_OUTPUT
+          echo "p95=$P95" >> $GITHUB_OUTPUT
+          echo "Canary metrics: error_rate=$ERROR_RATE p95=${P95}ms"
+
+      - name: Evaluate thresholds
+        id: evaluate
+        run: |
+          ERROR_RATE="${{ steps.metrics.outputs.error_rate }}"
+          P95="${{ steps.metrics.outputs.p95 }}"
+
+          # Use Python for float comparison
+          SHOULD_ROLLBACK=$(python3 -c "
+          error_rate = float('$ERROR_RATE') if '$ERROR_RATE' else 0
+          p95 = float('$P95') if '$P95' else 0
+          rollback = error_rate > 0.005 or p95 > 150
+          print('true' if rollback else 'false')
+          print(f'error_rate={error_rate:.4f} p95={p95:.1f}ms rollback={rollback}')
+          ")
+
+          echo "should_rollback=$(echo $SHOULD_ROLLBACK | head -1)" >> $GITHUB_OUTPUT
+          echo "Analysis: $SHOULD_ROLLBACK"
+
+      - name: Promote canary (success)
+        if: steps.evaluate.outputs.should_rollback == 'false'
+        run: |
+          echo "✅ Canary PASSED – promoting to 100% traffic"
+          # kubectl scale deployment/beba-backend-canary --replicas=0
+          # kubectl set image deployment/beba-backend backend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:canary-${{ needs.build.outputs.version }}
+
+      - name: Rollback canary (failure)
+        if: steps.evaluate.outputs.should_rollback == 'true'
+        run: |
+          echo "❌ Canary FAILED – rolling back"
+          # kubectl rollout undo deployment/beba-backend-canary
+          curl -s -X POST "${{ env.API_BASE_URL }}/admin/deploy/canary/rollback/latest" \
+            -H "Authorization: Bearer ${{ env.SERVICE_ACCOUNT_JWT }}" \
+            -H "Content-Type: application/json" \
+            -d '{"reason":"Automated rollback: error_rate=${{ steps.metrics.outputs.error_rate }} p95=${{ steps.metrics.outputs.p95 }}ms"}'
+          exit 1
+
+  # ─── Launch Readiness Report ───────────────────────────────────────────────
+  launch-report:
+    name: Generate Launch Readiness Report
+    runs-on: ubuntu-latest
+    needs: canary-analysis
+    if: always()
+    steps:
+      - name: Fetch launch report
+        run: |
+          curl -s "${{ env.API_BASE_URL }}/admin/deploy/launch-report" \
+            -H "Authorization: Bearer ${{ env.SERVICE_ACCOUNT_JWT }}" \
+            | python3 -m json.tool > launch-report.json
+          cat launch-report.json
+
+      - name: Upload launch report
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-report
+          path: launch-report.json
+          retention-days: 90

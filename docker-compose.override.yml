@@ -1,0 +1,184 @@
+# docker-compose.override.yml
+# Sprint 4 – M-Pesa Integration Hardening
+#
+# Adds three capabilities on top of docker-compose.yml:
+#   1. Redis persistence upgrade  – switches from RDB snapshots to append-only
+#      WAL so BullMQ jobs survive host reboots without data loss.
+#   2. Redis UI (always-on)       – BullMQ / DLQ inspector on http://localhost:8081
+#      (distinct from the tools-profile redis-commander; no profile gate).
+#   3. Ngrok sidecar              – ephemeral HTTPS tunnel so Safaricom Daraja
+#      can POST callbacks to http://localhost:3000 during sandbox testing.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+#   bash scripts/setup-mpesa-tunnel.sh          # patches .env with public URL
+#
+# After stopping:
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml down
+#
+# ⚠  SASRA/CBK: This file is LOCAL DEV ONLY. Ngrok URLs are ephemeral and must
+#    NEVER be used as production callback URLs.
+
+name: beba-sacco
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+#
+# beba_net    : defined in docker-compose.yml – existing services live here.
+#               Referenced (not redefined) so Sprint 4 services can reach Redis.
+# sacco-local : Sprint 4 overlay network. Ngrok only needs this network because
+#               it exits to the host via host.docker.internal, not beba_net.
+#               redis-ui is on both networks to reach Redis on beba_net while
+#               being logically grouped with other Sprint 4 services.
+networks:
+  beba_net: {}          # inherit; do NOT add driver/options – that would conflict
+  sacco-local:
+    driver: bridge
+    name: sacco-local   # explicit name prevents docker compose project-prefix mangling
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+# redis_data already defined in docker-compose.yml. No new volumes needed;
+# appendonly AOF files land in the same /data mount.
+
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  # ── Redis – upgrade to append-only persistence ───────────────────────────────
+  #
+  # Override replaces the base `command` (single-value field → full replacement).
+  # Change: --save 60 1 (RDB snapshot) → --appendonly yes + --appendfsync everysec
+  # Why: BullMQ delayed-jobs and rate-limit counters survive host restarts without
+  # the ~1 min data-loss window that RDB snapshots carry.
+  #
+  # REDIS_PASSWORD is added as an explicit env var so the $$REDIS_PASSWORD trick
+  # in health-check CMD-SHELL resolves from the container environment rather than
+  # relying on Docker Compose interpolation at parse time.
+  redis:
+    command: >-
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-beba_redis_secret}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --loglevel notice
+    environment:
+      # Exposes the password inside the container for the health-check shell.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-beba_redis_secret}
+    healthcheck:
+      # CMD-SHELL: $$REDIS_PASSWORD → the container shell expands $REDIS_PASSWORD
+      # from the container env, never from the host shell or Compose interpolation.
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - beba_net      # already set in base; Compose merges list fields
+      - sacco-local   # adds Sprint 4 network membership
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 320M   # 256 MB maxmemory + headroom for AOF rewrite buffers
+
+  # ── Redis UI – always-on BullMQ / DLQ inspector ──────────────────────────────
+  #
+  # Why redis-commander over redis-stack:
+  #   • No bundled Redis server — zero port conflicts with the beba_net redis
+  #   • Native key-prefix filter: type "bull:*" in the Search box to surface
+  #     all BullMQ queues (waiting, active, delayed, failed/DLQ) instantly
+  #   • Manual job retry and DLQ drain via the UI without writing code
+  #   • ~50 MB image; redis-stack is ~300 MB and meant for production clusters
+  #
+  # This is a NEW service (container name: beba_redis_ui_sprint4, port 8081).
+  # It is intentionally distinct from the tools-profile `redis-commander` in
+  # docker-compose.yml — Docker Compose cannot remove a profile via override,
+  # so a separate service is required to guarantee always-on behaviour.
+  #
+  # Do NOT start --profile tools while this override is active: both would
+  # attempt to bind 127.0.0.1:8081 and Docker will reject the duplicate port.
+  #
+  # Browse: http://localhost:8081  (credentials: REDIS_UI_USER / REDIS_UI_PASSWORD)
+  # BullMQ filter: Search box → bull:*
+  redis-ui:
+    image: rediscommander/redis-commander:latest
+    container_name: beba_redis_ui_sprint4
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      # REDIS_HOSTS format: label:host:port:db:password
+      # "redis" resolves via Docker DNS on beba_net.
+      REDIS_HOSTS: "sprint4:redis:6379:0:${REDIS_PASSWORD:-beba_redis_secret}"
+      HTTP_USER: ${REDIS_UI_USER:-admin}
+      HTTP_PASSWORD: ${REDIS_UI_PASSWORD:?REDIS_UI_PASSWORD must be set in .env}
+    ports:
+      - "127.0.0.1:8081:8081"   # bound to localhost only; never exposed to LAN
+    networks:
+      - beba_net      # reaches Redis container by service-name DNS
+      - sacco-local   # Sprint 4 logical grouping
+    healthcheck:
+      # busybox wget is in node:*-alpine (redis-commander base); fetches root page
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:8081/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  # ── Ngrok sidecar – HTTPS tunnel for Daraja callbacks ─────────────────────────
+  #
+  # Tunnel path:
+  #   Safaricom Daraja → ngrok cloud edge (HTTPS) → container :4040
+  #   → host.docker.internal:3000 → NestJS running on the host machine
+  #
+  # host.docker.internal resolution:
+  #   Docker Desktop (Mac/Windows): hostname injected automatically by the runtime;
+  #     extra_hosts below is effectively a no-op but harmless.
+  #   Docker Engine on Linux: host-gateway is the moby bridge gateway IP
+  #     (typically 172.17.0.1); extra_hosts injects it into /etc/hosts at start.
+  #     Without this, host.docker.internal is undefined on Linux and the tunnel
+  #     would fail to connect.
+  #
+  # Port 4040: serves both the Ngrok Inspector web UI and the REST API that
+  #   setup-mpesa-tunnel.sh polls to extract the ephemeral public_url.
+  #
+  # NGROK_AUTHTOKEN: required. Free-tier accounts get 1 tunnel, 1 agent.
+  #   Get yours: https://dashboard.ngrok.com/authtokens
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: beba_ngrok_sprint4
+    restart: unless-stopped
+    # ngrok/ngrok:latest entrypoint is `ngrok`; command args are appended directly
+    command:
+      - "http"
+      - "host.docker.internal:3000"   # forward to NestJS on the Docker host
+      - "--log=stdout"
+      - "--log-level=info"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?NGROK_AUTHTOKEN must be set — see https://dashboard.ngrok.com/authtokens}
+    extra_hosts:
+      # Linux host routing: maps host.docker.internal → Docker gateway IP.
+      # Docker Desktop already provides this; the entry is idempotent on both.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:4040:4040"   # Ngrok inspector + API; localhost-only
+    networks:
+      - sacco-local   # Ngrok exits to host via extra_hosts; beba_net not needed
+    healthcheck:
+      # Tunnel is live only when public_url appears — verifies Daraja-reachable
+      test: ["CMD-SHELL", "curl -sf http://localhost:4040/api/tunnels | grep -q 'public_url'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M

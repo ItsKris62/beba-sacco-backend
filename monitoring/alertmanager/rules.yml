@@ -1,0 +1,92 @@
+groups:
+  - name: sacco_api
+    interval: 60s
+    rules:
+      # ── HTTP Error Rate ───────────────────────────────────────────────────
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m]))
+          /
+          sum(rate(http_request_duration_seconds_count[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTP error rate > 1% (5m)"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+      # ── P99 Latency ───────────────────────────────────────────────────────
+      - alert: HighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 latency > 500ms (5m)"
+          description: "p99 latency is {{ $value | humanizeDuration }}."
+
+      # ── Queue Depth ───────────────────────────────────────────────────────
+      - alert: QueueBacklog
+        expr: bullmq_queue_waiting_total > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BullMQ queue depth > 100 for 10m"
+          description: "Queue {{ $labels.queue }} has {{ $value }} waiting jobs."
+
+      # ── DB Connections ────────────────────────────────────────────────────
+      - alert: DbConnectionsHigh
+        expr: pg_stat_database_numbackends / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB connections above 80%"
+          description: "Connection pool utilisation: {{ $value | humanizePercentage }}."
+
+      # ── M-Pesa Reconciliation Mismatch ────────────────────────────────────
+      - alert: ReconMismatch
+        expr: sacco_recon_mismatch_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "M-Pesa reconciliation mismatch detected"
+          description: "{{ $value }} unresolved transaction mismatch(es). Investigate immediately."
+
+      # ── Ledger Drift ──────────────────────────────────────────────────────
+      - alert: LedgerDrift
+        expr: sacco_ledger_drift_accounts_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger integrity drift detected"
+          description: "{{ $value }} account(s) have balance drift. Disbursement blocked."
+
+      # ── Interest Accrual Failure ──────────────────────────────────────────
+      - alert: AccrualJobFailed
+        expr: increase(sacco_accrual_skipped_total[1h]) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Interest accrual job skipped > 5 loans in 1h"
+          description: "{{ $value }} loans skipped during accrual. Check processor logs."
+
+  - name: sacco_synthetic
+    interval: 120s
+    rules:
+      # ── Synthetic Health Probe ────────────────────────────────────────────
+      - alert: SyntheticHealthFailed
+        expr: probe_success{job="synthetic"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Synthetic health probe failing"
+          description: "GET /api/health/synthetic has been failing for 2 minutes."

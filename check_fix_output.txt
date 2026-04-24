@@ -1,0 +1,14 @@
+=== CHECKING USERS IN DATABASE ===
+Total users: 1
+---
+Email: superadmin@beba.co.ke
+Role: SUPER_ADMIN
+Active: true
+TenantId: 10929626-da22-4b25-8d4d-b55fbff5eaa1
+Hash type: argon2
+
+=== FIXING DEMO ACCOUNT PASSWORDS (argon2id) ===
+NOT FOUND: admin@beba-sacco.com
+NOT FOUND: member@beba-sacco.com
+
+=== DONE ===

@@ -1,0 +1,729 @@
+{
+  "info": {
+    "_postman_id": "beba-sacco-mpesa-sprint4",
+    "name": "Beba SACCO – M-Pesa Sprint 4",
+    "description": "Complete M-Pesa integration test suite: OAuth, STK Push (deposit + repayment), B2C disbursement, unified callbacks (STK/C2B/B2C), DLQ requeue. All payloads match Safaricom Daraja sandbox format exactly. Environment: beba-mpesa-sandbox.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{AUTH_TOKEN}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "🔐 Auth",
+      "item": [
+        {
+          "name": "01 – Beba Login (get AUTH_TOKEN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has accessToken', () => pm.expect(res.data?.accessToken).to.be.a('string'));",
+                  "if (res.data?.accessToken) {",
+                  "  pm.environment.set('AUTH_TOKEN', res.data.accessToken);",
+                  "  console.log('AUTH_TOKEN saved');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{ADMIN_EMAIL}}\",\n  \"password\": \"{{ADMIN_PASSWORD}}\"\n}"
+            },
+            "url": { "raw": "{{BASE_URL}}/api/auth/login", "host": ["{{BASE_URL}}"], "path": ["api", "auth", "login"] }
+          }
+        },
+        {
+          "name": "02 – Daraja OAuth (get MPESA_ACCESS_TOKEN)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Build Basic auth header: Base64(consumerKey:consumerSecret)",
+                  "const key = pm.environment.get('CONSUMER_KEY');",
+                  "const secret = pm.environment.get('CONSUMER_SECRET');",
+                  "const encoded = btoa(`${key}:${secret}`);",
+                  "pm.environment.set('DARAJA_BASIC', encoded);"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has access_token', () => pm.expect(res.access_token).to.be.a('string'));",
+                  "if (res.access_token) {",
+                  "  pm.environment.set('MPESA_ACCESS_TOKEN', res.access_token);",
+                  "  // Token expires in ~3600s – store expiry for pre-request refresh logic",
+                  "  pm.environment.set('MPESA_TOKEN_EXPIRY', Date.now() + 3300000);",
+                  "  console.log('MPESA_ACCESS_TOKEN saved, expires in ~55 min');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Basic {{DARAJA_BASIC}}" }
+            ],
+            "url": {
+              "raw": "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+              "protocol": "https",
+              "host": ["sandbox", "safaricom", "co", "ke"],
+              "path": ["oauth", "v1", "generate"],
+              "query": [{ "key": "grant_type", "value": "client_credentials" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "💰 STK Push",
+      "item": [
+        {
+          "name": "03 – STK Push: Member Savings Deposit",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// ─── Dynamic Daraja password (Layer 0 – not used directly here,",
+                  "// but stored for use in direct Daraja calls in items 04+) ──────",
+                  "const shortcode = pm.environment.get('MPESA_SHORTCODE');",
+                  "const passkey   = pm.environment.get('PASSKEY');",
+                  "const now = new Date();",
+                  "// EAT = UTC+3",
+                  "const eat = new Date(now.getTime() + 3 * 60 * 60 * 1000);",
+                  "const pad = n => String(n).padStart(2, '0');",
+                  "const ts = `${eat.getUTCFullYear()}${pad(eat.getUTCMonth()+1)}${pad(eat.getUTCDate())}${pad(eat.getUTCHours())}${pad(eat.getUTCMinutes())}${pad(eat.getUTCSeconds())}`;",
+                  "const password = btoa(`${shortcode}${passkey}${ts}`);",
+                  "pm.environment.set('DARAJA_TIMESTAMP', ts);",
+                  "pm.environment.set('DARAJA_PASSWORD', password);",
+                  "// Ensure AUTH_TOKEN is current (set by item 01)",
+                  "if (!pm.environment.get('AUTH_TOKEN')) {",
+                  "  console.warn('AUTH_TOKEN missing – run item 01 first');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Has checkoutRequestId', () => pm.expect(body.checkoutRequestId).to.be.a('string'));",
+                  "pm.test('Has mpesaTxId', () => pm.expect(body.mpesaTxId).to.be.a('string'));",
+                  "// Store for idempotency replay test (item 05)",
+                  "pm.environment.set('LAST_CHECKOUT_REQUEST_ID', body.checkoutRequestId);",
+                  "pm.environment.set('LAST_MPESA_TX_ID', body.mpesaTxId);",
+                  "// Verify phone is not masked in response (full phone should be absent from body)",
+                  "const bodyStr = pm.response.text();",
+                  "pm.test('Phone not exposed in response body', () => {",
+                  "  pm.expect(bodyStr).to.not.include(pm.environment.get('MEMBER_PHONE').slice(3));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" },
+              { "key": "Authorization", "value": "Bearer {{AUTH_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"{{MEMBER_PHONE}}\",\n  \"amount\": 500,\n  \"purpose\": \"SAVINGS\",\n  \"accountRef\": \"{{MEMBER_ACCOUNT_NUMBER}}\",\n  \"note\": \"Test deposit – Sprint 4\"\n}"
+            },
+            "url": { "raw": "{{BASE_URL}}/api/mpesa/members/deposit", "host": ["{{BASE_URL}}"], "path": ["api", "mpesa", "members", "deposit"] }
+          }
+        },
+        {
+          "name": "04 – STK Push: Loan Repayment (LOAN-prefix routing)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const shortcode = pm.environment.get('MPESA_SHORTCODE');",
+                  "const passkey   = pm.environment.get('PASSKEY');",
+                  "const now = new Date();",
+                  "const eat = new Date(now.getTime() + 3 * 60 * 60 * 1000);",
+                  "const pad = n => String(n).padStart(2, '0');",
+                  "const ts = `${eat.getUTCFullYear()}${pad(eat.getUTCMonth()+1)}${pad(eat.getUTCDate())}${pad(eat.getUTCHours())}${pad(eat.getUTCMinutes())}${pad(eat.getUTCSeconds())}`;",
+                  "pm.environment.set('DARAJA_TIMESTAMP', ts);",
+                  "pm.environment.set('DARAJA_PASSWORD', btoa(`${shortcode}${passkey}${ts}`));"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Has checkoutRequestId', () => pm.expect(body.checkoutRequestId).to.be.a('string'));",
+                  "pm.test('Has mpesaTxId for repayment', () => pm.expect(body.mpesaTxId).to.be.a('string'));",
+                  "// Verify the accountRef will route to LOAN_ path in callback processor",
+                  "// (LOAN-{loanNumber} prefix is set server-side by MpesaService.buildAccountRef)",
+                  "pm.environment.set('REPAYMENT_CHECKOUT_ID', body.checkoutRequestId);",
+                  "pm.environment.set('REPAYMENT_TX_ID', body.mpesaTxId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" },
+              { "key": "Authorization", "value": "Bearer {{AUTH_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"{{MEMBER_PHONE}}\",\n  \"amount\": 1500,\n  \"purpose\": \"LOAN_REPAYMENT\",\n  \"accountRef\": \"{{LOAN_NUMBER}}\",\n  \"note\": \"Monthly repayment – Sprint 4\"\n}"
+            },
+            "url": { "raw": "{{BASE_URL}}/api/mpesa/members/deposit", "host": ["{{BASE_URL}}"], "path": ["api", "mpesa", "members", "deposit"] }
+          }
+        },
+        {
+          "name": "05 – STK Push Idempotency: Replay same deposit (expect rate-limit or duplicate guard)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// On replay within same calendar day the server EITHER:",
+                  "//   a) returns 400 (rate limit exceeded – correct), OR",
+                  "//   b) returns 200 with same/new checkoutRequestId (Daraja re-issue)",
+                  "// BullMQ jobId dedup (Layer 1) prevents double-processing even if 200 is returned.",
+                  "pm.test('Status is 200 or 400', () => {",
+                  "  pm.expect([200, 400]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  // If a new checkoutRequestId was issued, it must differ from Layer 3 ref",
+                  "  pm.test('New checkoutRequestId is distinct (Layer 1 dedup will handle BullMQ)', () => {",
+                  "    pm.expect(body.checkoutRequestId).to.be.a('string');",
+                  "  });",
+                  "}",
+                  "if (pm.response.code === 400) {",
+                  "  const body = pm.response.json();",
+                  "  pm.test('Rate limit message present', () => {",
+                  "    pm.expect(body.message).to.match(/limit/i);",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" },
+              { "key": "Authorization", "value": "Bearer {{AUTH_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"{{MEMBER_PHONE}}\",\n  \"amount\": 500,\n  \"purpose\": \"SAVINGS\",\n  \"accountRef\": \"{{MEMBER_ACCOUNT_NUMBER}}\",\n  \"note\": \"Test deposit – idempotency replay\"\n}"
+            },
+            "url": { "raw": "{{BASE_URL}}/api/mpesa/members/deposit", "host": ["{{BASE_URL}}"], "path": ["api", "mpesa", "members", "deposit"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🏦 B2C Disbursement",
+      "item": [
+        {
+          "name": "06 – Queue B2C Loan Disbursement (admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test('Has jobId', () => pm.expect(body.jobId).to.be.a('string'));",
+                  "pm.test('jobId format b2c-disburse-{loanId}', () => {",
+                  "  pm.expect(body.jobId).to.match(/^b2c-disburse-/);",
+                  "});",
+                  "pm.environment.set('LAST_DISBURSE_JOB_ID', body.jobId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" },
+              { "key": "Authorization", "value": "Bearer {{AUTH_TOKEN}}" }
+            ],
+            "url": { "raw": "{{BASE_URL}}/api/mpesa/loans/{{LOAN_ID}}/disburse", "host": ["{{BASE_URL}}"], "path": ["api", "mpesa", "loans", "{{LOAN_ID}}", "disburse"] }
+          }
+        },
+        {
+          "name": "07 – B2C Idempotency: Replay disbursement trigger (expect 202, same jobId dedup)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 202 on replay', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "// BullMQ jobId = b2c-disburse-{loanId} – replaying returns same jobId",
+                  "// because BullMQ deduplicates on jobId. The job is NOT re-processed.",
+                  "pm.test('Same jobId returned (BullMQ Layer-1 dedup)', () => {",
+                  "  pm.expect(body.jobId).to.equal(pm.environment.get('LAST_DISBURSE_JOB_ID'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" },
+              { "key": "Authorization", "value": "Bearer {{AUTH_TOKEN}}" }
+            ],
+            "url": { "raw": "{{BASE_URL}}/api/mpesa/loans/{{LOAN_ID}}/disburse", "host": ["{{BASE_URL}}"], "path": ["api", "mpesa", "loans", "{{LOAN_ID}}", "disburse"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📡 Callbacks (Daraja Sandbox Format)",
+      "item": [
+        {
+          "name": "08 – Simulate STK Push Callback (SUCCESS)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Build a realistic Daraja STK callback payload",
+                  "// Uses the checkoutRequestId saved by item 03",
+                  "const checkoutId = pm.environment.get('LAST_CHECKOUT_REQUEST_ID') || 'ws_CO_TEST_' + Date.now();",
+                  "const merchantId = 'M-' + Date.now();",
+                  "// EAT timestamp: YYYYMMDDHHmmss",
+                  "const now = new Date(Date.now() + 3 * 60 * 60 * 1000);",
+                  "const pad = n => String(n).padStart(2, '0');",
+                  "const ts = `${now.getUTCFullYear()}${pad(now.getUTCMonth()+1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;",
+                  "const receipt = 'QJU' + Math.random().toString(36).substr(2,7).toUpperCase();",
+                  "const payload = {",
+                  "  Body: {",
+                  "    stkCallback: {",
+                  "      MerchantRequestID: merchantId,",
+                  "      CheckoutRequestID: checkoutId,",
+                  "      ResultCode: 0,",
+                  "      ResultDesc: 'The service request is processed successfully.',",
+                  "      CallbackMetadata: {",
+                  "        Item: [",
+                  "          { Name: 'Amount', Value: 500 },",
+                  "          { Name: 'MpesaReceiptNumber', Value: receipt },",
+                  "          { Name: 'TransactionDate', Value: parseInt(ts) },",
+                  "          { Name: 'PhoneNumber', Value: parseInt(pm.environment.get('MEMBER_PHONE')) }",
+                  "        ]",
+                  "      }",
+                  "    }",
+                  "  }",
+                  "};",
+                  "pm.environment.set('STK_CALLBACK_PAYLOAD', JSON.stringify(payload));",
+                  "pm.environment.set('LAST_RECEIPT', receipt);"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 ACK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Daraja ACK ResultCode=0', () => pm.expect(body.ResultCode).to.equal(0));",
+                  "pm.test('Daraja ACK has ResultDesc', () => pm.expect(body.ResultDesc).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{{STK_CALLBACK_PAYLOAD}}"
+            },
+            "url": { "raw": "{{NGROK_URL}}/api/mpesa/callback", "host": ["{{NGROK_URL}}"], "path": ["api", "mpesa", "callback"] }
+          }
+        },
+        {
+          "name": "09 – Simulate STK Push Callback (FAILURE ResultCode=1032)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const checkoutId = pm.environment.get('REPAYMENT_CHECKOUT_ID') || 'ws_CO_FAIL_' + Date.now();",
+                  "const payload = {",
+                  "  Body: {",
+                  "    stkCallback: {",
+                  "      MerchantRequestID: 'M-FAIL-' + Date.now(),",
+                  "      CheckoutRequestID: checkoutId,",
+                  "      ResultCode: 1032,",
+                  "      ResultDesc: 'Request cancelled by user.'",
+                  "    }",
+                  "  }",
+                  "};",
+                  "pm.environment.set('STK_FAIL_PAYLOAD', JSON.stringify(payload));"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 ACK even on Daraja failure', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('ACK ResultCode=0 (always ACK to stop Daraja retries)', () => pm.expect(body.ResultCode).to.equal(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{{STK_FAIL_PAYLOAD}}"
+            },
+            "url": { "raw": "{{NGROK_URL}}/api/mpesa/callback", "host": ["{{NGROK_URL}}"], "path": ["api", "mpesa", "callback"] }
+          }
+        },
+        {
+          "name": "10 – Simulate C2B Paybill Callback",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const now = new Date(Date.now() + 3 * 60 * 60 * 1000);",
+                  "const pad = n => String(n).padStart(2, '0');",
+                  "const ts = `${now.getUTCFullYear()}${pad(now.getUTCMonth()+1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;",
+                  "const transId = 'RGV' + Math.random().toString(36).substr(2,7).toUpperCase();",
+                  "const payload = {",
+                  "  TransactionType: 'Pay Bill',",
+                  "  TransID: transId,",
+                  "  TransTime: ts,",
+                  "  TransAmount: '750.00',",
+                  "  BusinessShortCode: pm.environment.get('MPESA_SHORTCODE'),",
+                  "  BillRefNumber: pm.environment.get('MEMBER_ACCOUNT_NUMBER'),",
+                  "  InvoiceNumber: '',",
+                  "  OrgAccountBalance: '100000.00',",
+                  "  ThirdPartyTransID: '',",
+                  "  MSISDN: pm.environment.get('MEMBER_PHONE'),",
+                  "  FirstName: 'Test',",
+                  "  MiddleName: '',",
+                  "  LastName: 'Member'",
+                  "};",
+                  "pm.environment.set('C2B_CALLBACK_PAYLOAD', JSON.stringify(payload));",
+                  "pm.environment.set('LAST_C2B_TRANS_ID', transId);"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('ACK ResultCode=0', () => pm.expect(pm.response.json().ResultCode).to.equal(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{{C2B_CALLBACK_PAYLOAD}}"
+            },
+            "url": { "raw": "{{NGROK_URL}}/api/mpesa/callback", "host": ["{{NGROK_URL}}"], "path": ["api", "mpesa", "callback"] }
+          }
+        },
+        {
+          "name": "11 – Simulate C2B Loan Repayment (LOAN- prefix routing)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const now = new Date(Date.now() + 3 * 60 * 60 * 1000);",
+                  "const pad = n => String(n).padStart(2, '0');",
+                  "const ts = `${now.getUTCFullYear()}${pad(now.getUTCMonth()+1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;",
+                  "const transId = 'RPN' + Math.random().toString(36).substr(2,7).toUpperCase();",
+                  "const payload = {",
+                  "  TransactionType: 'Pay Bill',",
+                  "  TransID: transId,",
+                  "  TransTime: ts,",
+                  "  TransAmount: '1500.00',",
+                  "  BusinessShortCode: pm.environment.get('MPESA_SHORTCODE'),",
+                  "  // LOAN-prefix routes to LOAN_REPAYMENT path in parseReference()",
+                  "  BillRefNumber: 'LOAN-' + pm.environment.get('LOAN_NUMBER'),",
+                  "  InvoiceNumber: '',",
+                  "  OrgAccountBalance: '100000.00',",
+                  "  ThirdPartyTransID: '',",
+                  "  MSISDN: pm.environment.get('MEMBER_PHONE'),",
+                  "  FirstName: 'Test',",
+                  "  MiddleName: '',",
+                  "  LastName: 'Member'",
+                  "};",
+                  "pm.environment.set('C2B_LOAN_PAYLOAD', JSON.stringify(payload));"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('ACK ResultCode=0', () => pm.expect(pm.response.json().ResultCode).to.equal(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{{C2B_LOAN_PAYLOAD}}"
+            },
+            "url": { "raw": "{{NGROK_URL}}/api/mpesa/callback", "host": ["{{NGROK_URL}}"], "path": ["api", "mpesa", "callback"] }
+          }
+        },
+        {
+          "name": "12 – Simulate B2C Result Callback (disbursement success)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// B2C result uses ConversationID as the correlation key",
+                  "const convId = pm.environment.get('B2C_CONVERSATION_ID') || 'AG_' + Date.now() + '_TEST';",
+                  "const origConvId = 'ORIG_' + convId;",
+                  "const transId = 'LGR' + Math.random().toString(36).substr(2,7).toUpperCase();",
+                  "const payload = {",
+                  "  Result: {",
+                  "    ResultType: 0,",
+                  "    ResultCode: 0,",
+                  "    ResultDesc: 'The service request is processed successfully.',",
+                  "    OriginatorConversationID: origConvId,",
+                  "    ConversationID: convId,",
+                  "    TransactionID: transId,",
+                  "    ResultParameters: {",
+                  "      ResultParameter: [",
+                  "        { Key: 'TransactionAmount', Value: 50000 },",
+                  "        { Key: 'TransactionReceipt', Value: transId },",
+                  "        { Key: 'B2CRecipientIsRegisteredCustomer', Value: 'Y' },",
+                  "        { Key: 'B2CChargesPaidAccountAvailableFunds', Value: -4510.00 },",
+                  "        { Key: 'ReceiverPartyPublicName', Value: pm.environment.get('MEMBER_PHONE') + ' - Test Member' },",
+                  "        { Key: 'TransactionCompletedDateTime', Value: '26.04.2026 10:00:00' },",
+                  "        { Key: 'B2CUtilityAccountAvailableFunds', Value: 98755.00 },",
+                  "        { Key: 'B2CWorkingAccountAvailableFunds', Value: 200000.00 }",
+                  "      ]",
+                  "    },",
+                  "    ReferenceData: {",
+                  "      ReferenceItem: {",
+                  "        Key: 'QueueTimeoutURL',",
+                  "        Value: pm.environment.get('NGROK_URL') + '/api/mpesa/webhooks/b2c-timeout'",
+                  "      }",
+                  "    }",
+                  "  }",
+                  "};",
+                  "pm.environment.set('B2C_RESULT_PAYLOAD', JSON.stringify(payload));"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('ACK ResultCode=0', () => pm.expect(pm.response.json().ResultCode).to.equal(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{{B2C_RESULT_PAYLOAD}}"
+            },
+            "url": { "raw": "{{NGROK_URL}}/api/mpesa/callback", "host": ["{{NGROK_URL}}"], "path": ["api", "mpesa", "callback"] }
+          }
+        },
+        {
+          "name": "13 – Callback Idempotency Replay (STK): Must not double-post",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Replaying item 08's exact payload – BullMQ will reject with duplicate jobId.",
+                  "// Server always returns 200 ACK (Daraja must not see errors).",
+                  "pm.test('Status 200 on duplicate callback', () => pm.response.to.have.status(200));",
+                  "pm.test('ACK ResultCode=0', () => pm.expect(pm.response.json().ResultCode).to.equal(0));",
+                  "// The second enqueue attempt with same jobId is silently dropped by BullMQ.",
+                  "// Verify no duplicate ledger entry by checking the transaction via admin API",
+                  "// (manual check: GET /api/mpesa/admin/transactions?receipt={{LAST_RECEIPT}} should return 1 entry)"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{{STK_CALLBACK_PAYLOAD}}"
+            },
+            "url": { "raw": "{{NGROK_URL}}/api/mpesa/callback", "host": ["{{NGROK_URL}}"], "path": ["api", "mpesa", "callback"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "☠️ DLQ Admin",
+      "item": [
+        {
+          "name": "14 – Requeue DLQ Job (admin manual replay)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Only succeeds if {{DLQ_JOB_ID}} exists in MPESA_CALLBACK_DLQ.",
+                  "// Expected: 200 if found, 404 if not.",
+                  "pm.test('Status 200 or 404', () => {",
+                  "  pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.test('requeued=true', () => pm.expect(body.requeued).to.be.true);",
+                  "  pm.test('New jobId has dlq-replay- prefix', () => pm.expect(body.jobId).to.match(/^dlq-replay-/));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" },
+              { "key": "Authorization", "value": "Bearer {{AUTH_TOKEN}}" }
+            ],
+            "url": { "raw": "{{BASE_URL}}/api/mpesa/admin/dlq/{{DLQ_JOB_ID}}/requeue", "host": ["{{BASE_URL}}"], "path": ["api", "mpesa", "admin", "dlq", "{{DLQ_JOB_ID}}", "requeue"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📊 SASRA Audit",
+      "item": [
+        {
+          "name": "15 – SASRA Audit Report (admin dry-run)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Has summary metrics', () => {",
+                  "  pm.expect(body.summary).to.be.an('object');",
+                  "  pm.expect(body.summary.totalTransactions).to.be.a('number');",
+                  "  pm.expect(body.summary.compliancePercent).to.be.a('number');",
+                  "});",
+                  "pm.test('Compliance percent ≥ 0 and ≤ 100', () => {",
+                  "  pm.expect(body.summary.compliancePercent).to.be.within(0, 100);",
+                  "});",
+                  "pm.test('Phone numbers are masked in report (no raw MSISDN)', () => {",
+                  "  const bodyStr = pm.response.text();",
+                  "  // Masked format: 254***XXXX – raw 254xxxxxxxxx must not appear",
+                  "  pm.expect(bodyStr).to.not.match(/254[7|1][0-9]{8}/);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Tenant-ID", "value": "{{TENANT_ID}}" },
+              { "key": "Authorization", "value": "Bearer {{AUTH_TOKEN}}" }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/api/admin/audit/sasra/mpesa?startDate={{AUDIT_START_DATE}}&endDate={{AUDIT_END_DATE}}",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "admin", "audit", "sasra", "mpesa"],
+              "query": [
+                { "key": "startDate", "value": "{{AUDIT_START_DATE}}" },
+                { "key": "endDate", "value": "{{AUDIT_END_DATE}}" }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

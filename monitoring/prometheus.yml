@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: beba-sacco
+    env: production
+
+# Phase 4 – Alertmanager integration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+# Phase 4 – Load alert rules
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: beba_api
+    static_configs:
+      - targets: ['app:3000']
+    metrics_path: /api/metrics
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  # Phase 4 – Synthetic probe via Blackbox Exporter
+  - job_name: synthetic
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://app:3000/api/health/synthetic
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115

@@ -1,0 +1,60 @@
+{
+  "__inputs": [{ "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }],
+  "title": "SACCO API Performance",
+  "uid": "sacco-api-perf",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "tags": ["sacco", "api"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum(rate(http_request_duration_seconds_count[1m]))",
+        "legendFormat": "req/s",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+      }]
+    },
+    {
+      "id": 2,
+      "title": "p50 / p95 / p99 Latency",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "HTTP Error Rate %",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "100 * sum(rate(http_request_duration_seconds_count{status=~'5..'}[5m])) / sum(rate(http_request_duration_seconds_count[5m]))",
+        "legendFormat": "error %"
+      }],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{"value": 0, "color": "green"}, {"value": 1, "color": "red"}] } }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active DB Connections",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 8 },
+      "targets": [{ "expr": "pg_stat_database_numbackends", "legendFormat": "connections" }]
+    },
+    {
+      "id": 5,
+      "title": "BullMQ Queue Depth",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 8 },
+      "targets": [{ "expr": "sum(bullmq_queue_waiting_total)", "legendFormat": "waiting" }]
+    }
+  ]
+}

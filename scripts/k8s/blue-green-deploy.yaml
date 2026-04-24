@@ -1,0 +1,216 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Blue-Green Deployment – Beba API – Phase 5 SRE
+#
+# Zero-downtime deployment strategy:
+#   1. Deploy new version as "green" alongside existing "blue"
+#   2. Health checks gate traffic switch
+#   3. Rollback on p99 > 1s or error rate > 0.5%
+#   4. DB migrations run in preStop hook with lock timeout
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Blue Deployment (current production) ─────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beba-api-blue
+  namespace: beba
+  labels:
+    app: beba-api
+    slot: blue
+    phase: "5"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: beba-api
+      slot: blue
+  template:
+    metadata:
+      labels:
+        app: beba-api
+        slot: blue
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: beba-api
+          image: beba/api:stable
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DEPLOYMENT_SLOT
+              value: blue
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - "sleep 15"  # Allow in-flight requests to complete
+
+---
+# ── Green Deployment (new version) ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beba-api-green
+  namespace: beba
+  labels:
+    app: beba-api
+    slot: green
+    phase: "5"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: beba-api
+      slot: green
+  template:
+    metadata:
+      labels:
+        app: beba-api
+        slot: green
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        # Run DB migrations before app starts
+        - name: db-migrate
+          image: beba/api:canary
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Running Prisma migrations..."
+              npx prisma migrate deploy --schema=/app/prisma/schema.prisma
+              echo "Migrations complete."
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: beba-db-credentials
+                  key: url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      containers:
+        - name: beba-api
+          image: beba/api:canary
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DEPLOYMENT_SLOT
+              value: green
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - "sleep 15"
+
+---
+# ── Service (routes to active slot) ─────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: beba-api
+  namespace: beba
+  labels:
+    app: beba-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 3000
+      protocol: TCP
+      name: http
+  # Switch between blue/green by changing this selector
+  selector:
+    app: beba-api
+    slot: blue  # Change to "green" to switch traffic
+
+---
+# ── PodDisruptionBudget ─────────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: beba-api-pdb
+  namespace: beba
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: beba-api

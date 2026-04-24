@@ -1,0 +1,74 @@
+# ─── Compiled output ──────────────────────────────────────────────────────────
+/dist
+/build
+
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+/node_modules
+/.pnp
+.pnp.js
+
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+# NEVER commit real env files — only the example template is allowed
+.env
+.env.*
+!.env.example
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ─── Test & Coverage ──────────────────────────────────────────────────────────
+/coverage
+/.nyc_output
+*.lcov
+
+# ─── TypeScript ───────────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDEs & Editors ───────────────────────────────────────────────────────────
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# ─── Caches ───────────────────────────────────────────────────────────────────
+.npm
+.eslintcache
+.stylelintcache
+.cache
+.parcel-cache
+.svelte-kit/
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+*.tgz
+*.tmp
+*.bak
+*.swp
+.node_repl_history
+.yarn-integrity
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+pids/
+*.pid
+*.pid.lock
+temp/
+tmp/
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+
