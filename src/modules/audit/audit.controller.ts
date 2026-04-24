@@ -83,22 +83,9 @@ export class AuditController {
     }));
   }
 
+
   // ─── SASRA M-Pesa Audit Report ────────────────────────────────────────────
 
-  /**
-   * GET /api/admin/audit/sasra/mpesa
-   *
-   * Runs the SASRA compliance validator over all MpesaTransaction rows in the
-   * given date window. Returns a structured JSON report (default) or a CSV
-   * file download (?format=csv).
-   *
-   * Access: TENANT_ADMIN, AUDITOR only (MANAGER excluded – auditor-level data).
-   *
-   * SASRA compliance note:
-   *   - Phone numbers in all output are masked as 254***{last4}.
-   *   - Raw MSISDN is stored only in MpesaTransaction.phoneNumber (encrypted DB).
-   *   - dlqCount = -1 signals "check Bull Board" – BullMQ stores DLQ state in Redis.
-   */
   @Get('sasra/mpesa')
   @Roles(UserRole.TENANT_ADMIN, UserRole.AUDITOR, UserRole.SUPER_ADMIN)
   @ApiOperation({

@@ -58,22 +58,16 @@ export default registerAs('app', () => ({
     consumerKey: process.env.MPESA_CONSUMER_KEY,
     consumerSecret: process.env.MPESA_CONSUMER_SECRET,
     passkey: process.env.MPESA_PASSKEY,
-    // STK Push shortcode (Paybill or Till number)
     shortcode: process.env.MPESA_SHORTCODE || '174379',
-    // B2C uses the same shortcode but may differ in some configurations
     b2cShortcode: process.env.MPESA_B2C_SHORTCODE || process.env.MPESA_SHORTCODE || '600000',
     initiatorName: process.env.MPESA_INITIATOR_NAME || 'testapi',
-    // Encrypted initiator password (openssl rsautl encrypted with Safaricom cert)
     securityCredential: process.env.MPESA_SECURITY_CREDENTIAL,
-    // Base URL for all callbacks; must be HTTPS in production
     callbackUrl: process.env.MPESA_CALLBACK_URL,
     b2cResultUrl: process.env.MPESA_B2C_RESULT_URL || process.env.MPESA_CALLBACK_URL,
     b2cQueueTimeoutUrl: process.env.MPESA_B2C_QUEUE_TIMEOUT_URL || process.env.MPESA_CALLBACK_URL,
     environment: process.env.MPESA_ENVIRONMENT || 'sandbox',
     webhookSecret: process.env.MPESA_WEBHOOK_SECRET,
-    // Comma-separated Safaricom IP ranges for callback IP whitelisting
     allowedIps: (process.env.MPESA_ALLOWED_IPS || '').split(',').map((ip) => ip.trim()).filter(Boolean),
-    // Max STK Push requests per member per calendar day (SASRA rate-control)
     stkRateLimitPerDay: parseInt(process.env.MPESA_STK_RATE_LIMIT_PER_DAY || '3', 10),
   },
 

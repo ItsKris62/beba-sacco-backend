@@ -52,7 +52,7 @@ import { ApplicationsModule } from './modules/applications/applications.module';
 import { StagesModule } from './modules/stages/stages.module';
 // Sprint 2
 import { DataImportModule } from './modules/data-import/data-import.module';
-// Domain modules
+// Sprint 3 – domain modules
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { StatementsModule } from './modules/statements/statements.module';
 
@@ -152,9 +152,8 @@ import { AuditService } from './modules/audit/audit.service';
     StagesModule,
     // Sprint 2 – Legacy Data Import
     DataImportModule,
-    // Dashboard – Admin KPI surface
+    // Sprint 3 – Dashboard, Statements, Session & ODPC Compliance
     DashboardModule,
-    // Statements – FOSA/BOSA member statements and PDF export
     StatementsModule,
   ],
 

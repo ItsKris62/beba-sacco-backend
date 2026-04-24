@@ -19,8 +19,6 @@ import { Public } from '../../common/decorators/public.decorator';
 import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaService } from './mpesa.service';
 import {
-  isStkCallback,
-  isC2bCallback,
   isB2cCallback,
   StkCallbackPayload,
 } from './dto/mpesa-callback.dto';
