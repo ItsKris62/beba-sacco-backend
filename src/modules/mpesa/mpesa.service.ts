@@ -75,10 +75,8 @@ export class MpesaService {
 
     const maxPerDay = this.config.get<number>('app.mpesa.stkRateLimitPerDay', 3);
     const rlKey = stkRateLimitKey(tenantId, memberId);
-    const currentCount = await this.redis.incr(rlKey);
-    if (currentCount === 1) {
-      await this.redis.expire(rlKey, secondsUntilMidnightEAT());
-    }
+    const midnightEatMs = Date.now() + secondsUntilMidnightEAT() * 1000;
+    const currentCount = await this.redis.incrWithExpireAt(rlKey, midnightEatMs);
     if (currentCount > maxPerDay) {
       throw new BadRequestException(
         `STK Push limit reached: ${maxPerDay} requests per day per member`,
@@ -91,7 +89,7 @@ export class MpesaService {
     const baseUrl = this.config.get<string>('app.mpesa.callbackUrl', '');
     const callbackUrl = `${baseUrl}/mpesa/callback`;
 
-    const amount = Math.ceil(dto.amount);
+    const amount = Math.round(dto.amount);
     const transactionDesc =
       dto.note ?? (dto.purpose === DepositPurpose.LOAN_REPAYMENT ? 'Loan repay' : 'Deposit');
 

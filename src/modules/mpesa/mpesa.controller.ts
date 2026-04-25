@@ -3,9 +3,12 @@ import {
   Post,
   Body,
   Param,
+  Headers,
+  Req,
   HttpCode,
   HttpStatus,
   UseGuards,
+  Logger,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -17,6 +20,10 @@ import {
   ApiParam,
 } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
+import { RawBodyRequest } from '@nestjs/common';
+import { Request } from 'express';
+import * as crypto from 'crypto';
+import { ConfigService } from '@nestjs/config';
 import { UserRole, MpesaTriggerSource } from '@prisma/client';
 import { MpesaService } from './mpesa.service';
 import { MemberDepositDto } from './dto/deposit-request.dto';
@@ -60,7 +67,15 @@ const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
 @Controller('mpesa')
 export class MpesaController {
-  constructor(private readonly mpesaService: MpesaService) {}
+  private readonly logger = new Logger(MpesaController.name);
+  private readonly webhookSecret: string | undefined;
+
+  constructor(
+    private readonly mpesaService: MpesaService,
+    private readonly config: ConfigService,
+  ) {
+    this.webhookSecret = this.config.get<string>('app.mpesa.webhookSecret');
+  }
 
   // ─── Member deposit / repayment ──────────────────────────────────────────
 
@@ -176,7 +191,16 @@ export class MpesaController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Unified Safaricom Daraja callback (STK / C2B / B2C)' })
   @ApiResponse({ status: 200, description: 'Callback acknowledged' })
-  async unifiedCallback(@Body() body: Record<string, unknown>) {
+  async unifiedCallback(
+    @Req() req: RawBodyRequest<Request>,
+    @Body() body: Record<string, unknown>,
+    @Headers('x-mpesa-signature') signature?: string,
+  ) {
+    if (!this.isSignatureValid(req.rawBody, signature)) {
+      this.logger.warn('Unified callback: invalid HMAC signature – discarding');
+      return DARAJA_ACK;
+    }
+
     if (isStkCallback(body)) {
       const checkoutId = body.Body.stkCallback.CheckoutRequestID;
       await this.mpesaService.enqueueCallback(body as Record<string, unknown>, 'STK_PUSH', checkoutId);
@@ -193,5 +217,30 @@ export class MpesaController {
       );
     }
     return DARAJA_ACK;
+  }
+
+  /**
+   * Validates HMAC-SHA256 signature using the raw request bytes.
+   * Permissive when MPESA_WEBHOOK_SECRET is not configured (dev/sandbox).
+   * Uses constant-time comparison to prevent timing-oracle attacks.
+   */
+  private isSignatureValid(rawBody: Buffer | undefined, signature: string | undefined): boolean {
+    if (!this.webhookSecret) return true;
+    if (!signature || !rawBody) return false;
+
+    const expected = crypto
+      .createHmac('sha256', this.webhookSecret)
+      .update(rawBody)
+      .digest('hex');
+
+    const expectedBuf = Buffer.from(expected, 'hex');
+    let sigBuf: Buffer;
+    try {
+      sigBuf = Buffer.from(signature, 'hex');
+    } catch {
+      return false;
+    }
+    if (expectedBuf.length !== sigBuf.length) return false;
+    return crypto.timingSafeEqual(expectedBuf, sigBuf);
   }
 }

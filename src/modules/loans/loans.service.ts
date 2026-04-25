@@ -173,44 +173,41 @@ export class LoansService {
     );
 
     // Auto-generate loan number: LN-YYYY-000001
+    // Counter upsert and loan create are wrapped in a single transaction so a
+    // failed loan.create() does not leave an orphaned incremented counter.
     const year = new Date().getFullYear();
-    const counter = await this.prisma.tenantCounter.upsert({
-      where: { tenantId },
-      create: { tenantId, loanSeq: 1 },
-      update: { loanSeq: { increment: 1 } },
-    });
-    const loanNumber = `LN-${year}-${String(counter.loanSeq).padStart(6, '0')}`;
+    const loan = await this.prisma.$transaction(async (tx) => {
+      const counter = await tx.tenantCounter.upsert({
+        where: { tenantId },
+        create: { tenantId, loanSeq: 1 },
+        update: { loanSeq: { increment: 1 } },
+      });
+      const loanNumber = `LN-${year}-${String(counter.loanSeq).padStart(6, '0')}`;
 
-    const loan = await this.prisma.loan.create({
-      data: {
-        tenantId,
-        memberId: dto.memberId,
-        loanProductId: dto.loanProductId,
-        loanNumber,
-        // Loan starts in DRAFT. The workflow from here is:
-        //   DRAFT → (staff invites guarantors) → PENDING_GUARANTORS
-        //         → (coverage met)             → UNDER_REVIEW
-        //         → (loan officer decides)     → APPROVED | REJECTED
-        //         → (manager disburses)        → ACTIVE
-        // Loans that skip the guarantor step can be manually moved by staff
-        // directly to UNDER_REVIEW via the invite-guarantors endpoint with 0 guarantors
-        // or approved directly if product config allows (Phase 3).
-        status: LoanStatus.DRAFT,
-        purpose: dto.purpose,
-        principalAmount: principal.toDecimalPlaces(4).toString(),
-        interestRate: annualRate.toDecimalPlaces(4).toString(),
-        processingFee: processingFee.toString(),
-        tenureMonths: dto.tenureMonths,
-        gracePeriodMonths: product.gracePeriodMonths,
-        monthlyInstalment: monthlyInstalment.toDecimalPlaces(4).toString(),
-        outstandingBalance: principal.toDecimalPlaces(4).toString(),
-        notes: dto.notes,
-      },
-      include: {
-        member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
-        loanProduct: { select: { name: true, interestType: true } },
-      },
+      return tx.loan.create({
+        data: {
+          tenantId,
+          memberId: dto.memberId,
+          loanProductId: dto.loanProductId,
+          loanNumber,
+          status: LoanStatus.DRAFT,
+          purpose: dto.purpose,
+          principalAmount: principal.toDecimalPlaces(4).toString(),
+          interestRate: annualRate.toDecimalPlaces(4).toString(),
+          processingFee: processingFee.toString(),
+          tenureMonths: dto.tenureMonths,
+          gracePeriodMonths: product.gracePeriodMonths,
+          monthlyInstalment: monthlyInstalment.toDecimalPlaces(4).toString(),
+          outstandingBalance: principal.toDecimalPlaces(4).toString(),
+          notes: dto.notes,
+        },
+        include: {
+          member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
+          loanProduct: { select: { name: true, interestType: true } },
+        },
+      });
     });
+    const loanNumber = loan.loanNumber;
 
     await this.audit.create({
       tenantId,

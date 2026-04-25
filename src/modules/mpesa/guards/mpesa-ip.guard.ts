@@ -55,16 +55,21 @@ export class MpesaIpGuard implements CanActivate {
 
   /**
    * Resolve the actual caller IP.
-   * In production the app sits behind a reverse proxy (nginx / Cloud Run),
-   * so we read X-Forwarded-For. We trust only the leftmost (client) IP.
+   *
+   * Render's load balancer appends the true connection source as the LAST
+   * entry in X-Forwarded-For, so we read the rightmost value.  An attacker
+   * who forges an earlier entry (e.g. "X-Forwarded-For: <safaricom-ip>,")
+   * would still have their own IP appended by Render, and would be blocked.
+   *
+   * Leftmost IP is attacker-controlled and MUST NOT be used for allow-listing.
    */
   private resolveIp(req: Request): string {
     const forwarded = req.headers['x-forwarded-for'];
     if (forwarded) {
-      const first = Array.isArray(forwarded)
-        ? forwarded[0]
-        : forwarded.split(',')[0];
-      return first.trim();
+      const ips = Array.isArray(forwarded)
+        ? forwarded.flatMap((h) => h.split(','))
+        : forwarded.split(',');
+      return ips[ips.length - 1].trim();
     }
     return req.socket?.remoteAddress ?? req.ip ?? '';
   }

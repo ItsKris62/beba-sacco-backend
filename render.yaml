@@ -1,0 +1,170 @@
+# ============================================================
+# Beba SACCO – Render Blueprint
+#
+# Defines the production web service for Render.com.
+# https://render.com/docs/blueprint-spec
+#
+# Usage:
+#   1. Push this file to your GitHub repository.
+#   2. In Render dashboard → New → Blueprint → select the repo.
+#   3. Set all `sync: false` env vars in the Render dashboard
+#      (they are not stored here because they are secrets).
+#   4. Deploy.
+#
+# Region: frankfurt (eu-central) — lowest latency to Nairobi (EAT UTC+3).
+# ============================================================
+
+services:
+  - type: web
+    name: beba-sacco-api
+    env: node
+    region: frankfurt
+    plan: starter          # upgrade to standard for production SLA
+    numInstances: 1        # scale horizontally once load is confirmed
+
+    # ── Build ────────────────────────────────────────────────────────────────
+    buildCommand: npm ci && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+
+    # ── Pre-deploy (runs before each new version goes live) ──────────────────
+    # Uses DIRECT_URL (set on the service) so migrations bypass the Neon pooler.
+    preDeployCommand: npx prisma migrate deploy --schema=src/prisma/schema.prisma
+
+    # ── Start ────────────────────────────────────────────────────────────────
+    startCommand: node dist/main
+
+    # ── Health check ─────────────────────────────────────────────────────────
+    # Render will mark the deploy healthy only after this returns 200.
+    # Unhealthy instances are replaced automatically.
+    healthCheckPath: /api/health/ping
+
+    # ── Auto-deploy ───────────────────────────────────────────────────────────
+    # Triggers on every push to the connected branch (usually `main`).
+    autoDeploy: true
+
+    # ── Runtime environment variables ─────────────────────────────────────────
+    # Values marked `sync: false` must be entered in the Render dashboard.
+    # Never put real secrets here — this file is committed to git.
+    envVars:
+      # Application
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: API_PREFIX
+        value: api
+      - key: APP_URL
+        sync: false        # e.g. https://api.your-render-service.onrender.com
+
+      # Database (Neon)
+      # DATABASE_URL  = pooler URL  (ep-xxxx-pooler.region.aws.neon.tech)
+      # DIRECT_URL    = direct URL  (ep-xxxx.region.aws.neon.tech — no "-pooler")
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+
+      # JWT — generate with: openssl rand -base64 64 | tr -d '\n'
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ACCESS_EXPIRATION
+        value: 15m
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: JWT_REFRESH_EXPIRATION
+        value: 7d
+
+      # Redis (Upstash)
+      - key: REDIS_HOST
+        sync: false        # e.g. your-db.upstash.io
+      - key: REDIS_PORT
+        value: 6379
+      - key: REDIS_PASSWORD
+        sync: false
+      - key: REDIS_TLS
+        value: "true"      # Upstash requires TLS
+
+      # Cloudflare R2
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_PUBLIC_URL
+        sync: false        # e.g. https://pub-REPLACE.r2.dev
+
+      # Tinybird Analytics
+      - key: TINYBIRD_TOKEN
+        sync: false
+      - key: TINYBIRD_API_URL
+        value: https://api.europe-west2.gcp.tinybird.co
+
+      # Sentry Error Tracking
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+
+      # M-Pesa (Safaricom Daraja — production credentials)
+      - key: MPESA_CONSUMER_KEY
+        sync: false
+      - key: MPESA_CONSUMER_SECRET
+        sync: false
+      - key: MPESA_PASSKEY
+        sync: false
+      - key: MPESA_SHORTCODE
+        sync: false        # your registered production paybill number
+      - key: MPESA_B2C_SHORTCODE
+        sync: false
+      - key: MPESA_INITIATOR_NAME
+        sync: false
+      - key: MPESA_SECURITY_CREDENTIAL
+        sync: false        # RSA-encrypted initiator password (base64)
+      - key: MPESA_ENVIRONMENT
+        value: production
+      # Callback URLs — must match your Render service domain
+      - key: MPESA_CALLBACK_URL
+        sync: false        # https://beba-sacco-api.onrender.com/api
+      - key: MPESA_B2C_RESULT_URL
+        sync: false        # https://beba-sacco-api.onrender.com/api/mpesa/webhooks/b2c-result
+      - key: MPESA_B2C_QUEUE_TIMEOUT_URL
+        sync: false        # https://beba-sacco-api.onrender.com/api/mpesa/webhooks/b2c-timeout
+      # HMAC secret for validating Safaricom callback signatures
+      # Generate with: openssl rand -hex 32
+      - key: MPESA_WEBHOOK_SECRET
+        sync: false
+      # Safaricom production IP allowlist — comma-separated, no spaces
+      - key: MPESA_ALLOWED_IPS
+        value: "196.201.214.200,196.201.214.206,196.201.213.114,196.201.214.207,196.201.214.208,196.201.213.44,196.201.214.185,196.201.214.186"
+      - key: MPESA_STK_RATE_LIMIT_PER_DAY
+        value: 3
+
+      # Email (Plunk)
+      - key: PLUNK_API_KEY
+        sync: false
+      - key: PLUNK_SECRET_KEY
+        sync: false
+      - key: PLUNK_FROM_EMAIL
+        sync: false        # e.g. noreply@your-sacco.co.ke
+      - key: PLUNK_FROM_NAME
+        value: Beba SACCO
+
+      # CORS — set to your Netlify frontend domain
+      - key: CORS_ORIGIN
+        sync: false        # e.g. https://your-sacco.netlify.app
+
+      # Compliance
+      - key: DATA_RETENTION_YEARS
+        value: 7
+
+      # BullMQ concurrency (tune after load testing)
+      - key: BULLMQ_CONCURRENCY_ACCRUAL
+        value: 3
+      - key: BULLMQ_CONCURRENCY_RECON
+        value: 2
+      - key: BULLMQ_CONCURRENCY_LEDGER
+        value: 2
+      - key: BULLMQ_CONCURRENCY_WEBHOOK
+        value: 10

@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import * as Sentry from '@sentry/node';
 
 /**
  * Standardized error response shape.
@@ -78,7 +79,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         exception.stack,
       );
 
-      // TODO: Phase 1 – Sentry.captureException(exception) here
+      Sentry.captureException(exception);
     } else {
       status = HttpStatus.INTERNAL_SERVER_ERROR;
       message = 'An unexpected error occurred';

@@ -9,20 +9,44 @@ import { PrismaClient } from '@prisma/client';
 
 /**
  * Prisma Service - Database Connection Manager
- * 
- * Features:
- * - Automatic connection pooling
- * - Graceful shutdown handling
- * - Query logging in development
- * - Multi-tenant schema switching support
- * 
- * TODO: Phase 1 - Implement tenant schema switching via $executeRawUnsafe
- * TODO: Phase 1 - Add connection pool monitoring
- * TODO: Phase 2 - Implement read replicas for analytics queries
+ *
+ * Two connection modes (Neon specifics):
+ *
+ *   DATABASE_URL  — Neon pooler (PgBouncer, transaction mode).
+ *                   Used by PrismaService itself for all runtime queries.
+ *                   BullMQ also uses this connection.
+ *
+ *   DIRECT_URL    — Direct Neon connection (bypasses PgBouncer).
+ *                   Required for:
+ *                     • `prisma migrate deploy` (run in preDeployCommand)
+ *                     • `$transaction` with explicit isolationLevel
+ *                       (e.g. SERIALIZABLE for financial reconciliation)
+ *                     • SET search_path for per-tenant schema switching (Phase 3+)
+ *
+ * Use `prismaService.direct.$transaction(...)` for any Prisma transaction
+ * that sets an explicit isolationLevel. Plain `$transaction` (no isolationLevel)
+ * works fine through the pooler.
  */
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
+
+  /**
+   * Direct (non-pooled) Prisma client.
+   *
+   * Use this for $transaction calls that require an explicit isolationLevel,
+   * or for any operation that must bypass PgBouncer (e.g. LISTEN/NOTIFY,
+   * advisory locks, SET search_path). Falls back to the pooler client if
+   * DIRECT_URL is not configured — which will fail at the DB level if an
+   * unsupported PgBouncer command is issued.
+   *
+   * @example
+   * await this.prisma.direct.$transaction(
+   *   async (tx) => { ... },
+   *   { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+   * );
+   */
+  readonly direct: PrismaClient;
 
   constructor() {
     super({
@@ -32,12 +56,35 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
           : ['warn', 'error'],
       errorFormat: 'pretty',
     });
+
+    // If DIRECT_URL is set, the Prisma schema's `directUrl` field picks it up
+    // automatically for migrations. We create a second client here that explicitly
+    // uses DIRECT_URL so application code can access it via `prismaService.direct`.
+    const directUrl = process.env.DIRECT_URL;
+    if (directUrl) {
+      this.direct = new PrismaClient({
+        datasources: { db: { url: directUrl } },
+        log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['warn', 'error'],
+        errorFormat: 'pretty',
+      });
+    } else {
+      // Fallback: same pooler client — transactions without isolationLevel still work.
+      // Log a warning so operators know to set DIRECT_URL before using isolation levels.
+      this.logger.warn(
+        'DIRECT_URL not set — prismaService.direct falls back to pooler. ' +
+          '$transaction with isolationLevel will fail on Neon pooler.',
+      );
+      this.direct = this as unknown as PrismaClient;
+    }
   }
 
   async onModuleInit() {
     try {
       await this.$connect();
-      this.logger.log('✅ Database connection established');
+      if (this.direct !== (this as unknown as PrismaClient)) {
+        await this.direct.$connect();
+      }
+      this.logger.log('✅ Database connections established (pooler + direct)');
     } catch (error) {
       this.logger.error('❌ Failed to connect to database', error);
       throw error;
@@ -46,7 +93,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 
   async onModuleDestroy() {
     await this.$disconnect();
-    this.logger.log('Database connection closed');
+    if (this.direct !== (this as unknown as PrismaClient)) {
+      await this.direct.$disconnect();
+    }
+    this.logger.log('Database connections closed');
   }
 
   /**

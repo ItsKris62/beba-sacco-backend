@@ -169,12 +169,16 @@ export class MpesaCallbackProcessor extends WorkerHost {
     const rawPayload = body as unknown as Prisma.InputJsonValue;
     const reference = buildMpesaRef.c2b(TransID);
 
-    const account = await this.prisma.account.findFirst({
+    // Use findMany so we detect cross-tenant account number collisions.
+    // accountNumber is unique within a tenant (@@unique([tenantId, accountNumber]))
+    // but NOT globally — a findFirst without tenantId would non-deterministically
+    // credit whichever tenant's record the DB returns first.
+    const accounts = await this.prisma.account.findMany({
       where: { accountNumber: BillRefNumber },
       select: { id: true, balance: true, memberId: true, tenantId: true },
     });
 
-    if (!account) {
+    if (accounts.length === 0) {
       this.logger.warn(
         `C2B: account not found for BillRefNumber=${BillRefNumber} TransID=${TransID}`,
       );
@@ -197,6 +201,36 @@ export class MpesaCallbackProcessor extends WorkerHost {
       });
       return;
     }
+
+    if (accounts.length > 1) {
+      // Cross-tenant account number collision — cannot safely credit without
+      // a per-tenant shortcode mapping. Flag for manual reconciliation.
+      this.logger.error(
+        `C2B TENANT COLLISION: BillRefNumber=${BillRefNumber} matches ${accounts.length} ` +
+          `accounts across tenants [${accounts.map((a) => a.tenantId).join(', ')}] ` +
+          `TransID=${TransID} — requires manual reconciliation`,
+      );
+      await this.prisma.mpesaTransaction.create({
+        data: {
+          tenantId: 'UNRESOLVED',
+          type: MpesaTxType.C2B,
+          triggerSource: MpesaTriggerSource.MEMBER,
+          phoneNumber: MSISDN,
+          amount: amount.toDecimalPlaces(4).toString(),
+          accountReference: BillRefNumber,
+          mpesaReceiptNumber: TransID,
+          reference,
+          status: TransactionStatus.FAILED,
+          resultCode: 9998,
+          resultDesc: 'Cross-tenant account collision – requires manual reconciliation',
+          callbackPayload: rawPayload,
+          transactionDate: parseDarajaTimestamp(TransTime),
+        },
+      });
+      return;
+    }
+
+    const account = accounts[0];
 
     const mpesaTx = await this.prisma.mpesaTransaction.create({
       data: {

@@ -165,6 +165,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   /**
    * Atomic INCR + set TTL on first write (for velocity counters).
    * Returns the new counter value.  Returns 0 on Redis error (fail open).
+   *
+   * NOTE: The EXPIRE is NOT atomic with the INCR here. Use `incrWithExpireAt`
+   * for strict atomicity when expiry correctness is critical (e.g. rate limits).
    */
   async incr(key: string, ttlSeconds?: number): Promise<number> {
     try {
@@ -175,6 +178,35 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       return value;
     } catch (err) {
       this.logger.warn(`Redis INCR failed for key "${key}": ${(err as Error).message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Atomic INCR + EXPIREAT in a single pipeline round-trip.
+   *
+   * Unlike `incr()`, this method sets the TTL on EVERY call, not just when
+   * value === 1. This prevents a race where the process crashes between INCR
+   * and EXPIRE leaving a key with no TTL (leaked counter).
+   *
+   * @param key          Redis key to increment
+   * @param expiresAtMs  Unix timestamp in milliseconds when the key should expire
+   * @returns            New counter value, or 0 on error (fail open)
+   */
+  async incrWithExpireAt(key: string, expiresAtMs: number): Promise<number> {
+    try {
+      const pipeline = this.client.pipeline();
+      pipeline.incr(key);
+      pipeline.pexpireat(key, expiresAtMs);
+      const results = await pipeline.exec();
+      // results[0] = [error, incrValue]
+      const incrResult = results?.[0];
+      if (incrResult && !incrResult[0]) {
+        return incrResult[1] as number;
+      }
+      return 0;
+    } catch (err) {
+      this.logger.warn(`Redis INCR+EXPIREAT failed for key "${key}": ${(err as Error).message}`);
       return 0;
     }
   }

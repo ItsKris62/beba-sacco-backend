@@ -5,6 +5,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
+import * as express from 'express';
 import * as Sentry from '@sentry/node';
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
@@ -52,14 +53,38 @@ async function bootstrap() {
   const apiPrefix = configService.get<string>('app.apiPrefix', 'api');
   const nodeEnv = configService.get<string>('app.nodeEnv', 'development');
 
+  // ── Proxy trust ────────────────────────────────────────────────
+  // Render sits behind one layer of load balancers. Setting trust proxy to 1
+  // makes Express unwrap the last X-Forwarded-For entry into req.ip, so
+  // audit logs and rate-limit keys capture the real client IP, not the LB IP.
+  // MpesaIpGuard reads X-Forwarded-For manually and is not affected by this.
+  app.set('trust proxy', 1);
+
   // ── Security ───────────────────────────────────────────────────
   // Disable Express's default "X-Powered-By: Express" fingerprinting header
   app.disable('x-powered-by');
 
+  // Body size limit — reject oversized payloads before they reach route handlers.
+  // 1 MB covers the largest anticipated CSV import; M-Pesa callbacks are <4 KB.
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
   app.use(
     helmet({
-      // Relax CSP in dev so Swagger UI assets load; enforce in production
-      contentSecurityPolicy: nodeEnv === 'production' ? undefined : false,
+      // Explicit CSP that allows Swagger UI assets from unpkg.com.
+      // Helmet's default blocks unpkg.com, leaving Swagger blank in production.
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'", 'https://unpkg.com', "'unsafe-inline'"],
+          styleSrc: ["'self'", 'https://unpkg.com', "'unsafe-inline'"],
+          imgSrc: ["'self'", 'data:', 'https://unpkg.com'],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'", 'https://unpkg.com'],
+          objectSrc: ["'none'"],
+          upgradeInsecureRequests: nodeEnv === 'production' ? [] : null,
+        },
+      },
       // Prevent browsers from MIME-sniffing responses
       noSniff: true,
       // Deny framing on all pages

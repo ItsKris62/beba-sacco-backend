@@ -1,6 +1,7 @@
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import type { IncomingMessage } from 'http';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD, APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -75,6 +76,9 @@ import { AuditService } from './modules/audit/audit.service';
  */
 @Module({
   imports: [
+    // ── Cron Jobs ──────────────────────────────────────────────
+    ScheduleModule.forRoot(),
+
     // ── Configuration ──────────────────────────────────────────
     ConfigModule.forRoot({
       isGlobal: true,
