@@ -1,6 +1,5 @@
-
 === SEEDING DEMO ACCOUNTS ===
-Tenant ID: b2ae96e2-2ad4-491a-8808-42152e2462a6
+Tenant ID: dc2cf358-1847-43ab-a044-2ce8c095ed4f
 Admin user upserted: admin@beba-sacco.com (role: MANAGER)
 Member user upserted: member@beba-sacco.com (role: MEMBER)
 Member profile upserted: M-000001
@@ -8,9 +7,9 @@ Accounts upserted: ACC-FOSA-000001, ACC-BOSA-000001
 Loan products upserted
 
 === SUMMARY ===
-Tenant ID: b2ae96e2-2ad4-491a-8808-42152e2462a6
+Tenant ID: dc2cf358-1847-43ab-a044-2ce8c095ed4f
 Admin login:  admin@beba-sacco.com  / Admin@1234  (role: MANAGER)
 Member login: member@beba-sacco.com / Member@1234 (role: MEMBER)
-X-Tenant-ID header: b2ae96e2-2ad4-491a-8808-42152e2462a6
+X-Tenant-ID header: dc2cf358-1847-43ab-a044-2ce8c095ed4f
 
 === DONE ===
