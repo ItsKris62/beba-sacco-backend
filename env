@@ -58,7 +58,7 @@ PLUNK_FROM_EMAIL=noreply@beba-sacco.com
 PLUNK_FROM_NAME=Beba SACCO
 
 # CORS & Security
-CORS_ORIGIN=http://localhost:3001,https://beba-sacco.com
+CORS_ORIGIN=http://localhost:3001,https://beba-sacco.com,https://kolwa.netlify.app
 RATE_LIMIT_TTL=60
 RATE_LIMIT_MAX=100
 
