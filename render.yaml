@@ -23,7 +23,7 @@ services:
     numInstances: 1        # scale horizontally once load is confirmed
 
     # ── Build ────────────────────────────────────────────────────────────────
-    buildCommand: npm ci && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    buildCommand: npm ci --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
 
     # ── Pre-deploy (runs before each new version goes live) ──────────────────
     # Uses DIRECT_URL (set on the service) so migrations bypass the Neon pooler.
