@@ -31,10 +31,25 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
 
   constructor(private readonly config: ConfigService) {
-    const host = config.get<string>('app.redis.host', 'localhost');
+    const rawHost = config.get<string>('app.redis.host', 'localhost');
+    // Strip any accidental protocol prefix — ioredis expects a bare hostname.
+    // e.g. "https://foo.upstash.io" → "foo.upstash.io"
+    const host = rawHost.replace(/^https?:\/\//, '');
+    if (rawHost !== host) {
+      this.logger.warn(
+        `Redis: REDIS_HOST had a protocol prefix — stripped to "${host}". ` +
+        `Fix REDIS_HOST in your env vars to remove the "https://" prefix.`,
+      );
+    }
+
     const port = config.get<number>('app.redis.port', 6379);
     const password = config.get<string>('app.redis.password');
     const tls = config.get<boolean>('app.redis.tls', false);
+
+    this.logger.log(
+      `Redis: initialising connection → host="${host}" port=${port} tls=${tls} ` +
+      `password=${password ? '[SET]' : '[NOT SET]'}`,
+    );
 
     // Track whether we've already given up on Redis to suppress repeated logs
     let redisGaveUp = false;

@@ -41,11 +41,14 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
       useFactory: (configService: ConfigService) => {
         const password = configService.get<string>('app.redis.password');
         const tls = configService.get<boolean>('app.redis.tls');
+        // Strip any accidental protocol prefix (ioredis expects a bare hostname)
+        const rawHost = configService.get<string>('app.redis.host', 'localhost');
+        const host = rawHost.replace(/^https?:\/\//, '');
         let bullGaveUp = false;
 
         return {
           connection: {
-            host: configService.get<string>('app.redis.host'),
+            host,
             port: configService.get<number>('app.redis.port'),
             password: password || undefined,
             // Upstash requires TLS; local dev uses plain TCP
