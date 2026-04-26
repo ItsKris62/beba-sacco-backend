@@ -53,6 +53,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     // Track whether we've already given up on Redis to suppress repeated logs
     let redisGaveUp = false;
+    // Set to true on WRONGPASS — stops retryStrategy immediately so we don't
+    // burn Upstash command quota retrying a credential that will never work.
+    let redisAuthFailed = false;
 
     const redisOptions: RedisOptions = {
       host,
@@ -72,6 +75,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       commandTimeout: 3000,
       // Exponential back-off retry strategy (capped at 30 s, max 3 attempts for dev)
       retryStrategy: (times: number) => {
+        if (redisAuthFailed) return null; // credential is wrong — retrying wastes quota
         if (times > 3) {
           if (!redisGaveUp) {
             redisGaveUp = true;
@@ -95,6 +99,17 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     // Attach error handler IMMEDIATELY to prevent "Unhandled error event" crashes
     this.client.on('error', (err: Error) => {
+      if (err.message.includes('WRONGPASS') || err.message.includes('NOAUTH')) {
+        if (!redisAuthFailed) {
+          redisAuthFailed = true;
+          this.logger.error(
+            `Redis: authentication failed (WRONGPASS) — stopping all retries. ` +
+            `Fix REDIS_PASSWORD in your env vars (get it from console.upstash.com → database → Connect).`,
+          );
+          this.client.disconnect();
+        }
+        return;
+      }
       if (!redisGaveUp) {
         this.logger.warn(`Redis error (non-fatal): ${err.message}`);
       }

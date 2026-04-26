@@ -59,9 +59,10 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
             enableAutoPipelining: true,
             connectTimeout: 5000,
             keepAlive: 10000,
-            // Stop retrying after 3 attempts to avoid infinite ECONNREFUSED spam
+            // 1 retry max — keeps degraded-mode noise low and avoids burning
+            // Upstash command quota when the password is wrong or Redis is down.
             retryStrategy: (times: number) => {
-              if (times > 3) {
+              if (times > 1) {
                 if (!bullGaveUp) {
                   bullGaveUp = true;
                   console.warn('[BullMQ] Redis unavailable — queue workers disabled (degraded mode)');
