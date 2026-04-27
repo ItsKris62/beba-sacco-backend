@@ -21,6 +21,21 @@ export class CreateStageDto {
   wardId!: string;
 }
 
+export class UpdateStageDto {
+  @ApiPropertyOptional({ example: 'Westlands Stage', description: 'New name of the boda boda stage' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @Length(2, 100)
+  name?: string;
+
+  @ApiPropertyOptional({ description: 'New Ward ID (cuid) where this stage operates' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  wardId?: string;
+}
+
 export class AssignStagePositionDto {
   @ApiProperty({ description: 'User ID to assign to the stage' })
   @IsString()
