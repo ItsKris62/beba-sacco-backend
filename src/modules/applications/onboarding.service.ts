@@ -59,6 +59,29 @@ export class OnboardingService {
 
     if (!app) throw new NotFoundException('Application not found');
 
+    // Idempotency: if already APPROVED, return the existing member data
+    if (app.status === ApplicationStatus.APPROVED) {
+      const existingMember = await this.prisma.member.findFirst({
+        where: { tenantId, nationalId: app.idNumber },
+        include: {
+          user: { select: { id: true, email: true, firstName: true, lastName: true } },
+          accounts: { select: { id: true, accountNumber: true, accountType: true } },
+        },
+      });
+      if (existingMember) {
+        return {
+          success: true,
+          user: existingMember.user,
+          member: { id: existingMember.id, memberNumber: existingMember.memberNumber },
+          accounts: existingMember.accounts,
+          stage: { id: '', name: app.stageName },
+          stageAssignment: { id: '', position: app.position },
+          temporaryPassword: '(already set — member must use existing password)',
+          message: `Member ${existingMember.memberNumber} was already created from this application.`,
+        };
+      }
+    }
+
     if (
       app.status !== ApplicationStatus.SUBMITTED &&
       app.status !== ApplicationStatus.PENDING_REVIEW
