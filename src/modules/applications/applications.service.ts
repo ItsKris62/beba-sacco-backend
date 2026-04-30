@@ -68,9 +68,19 @@ export class ApplicationsService {
     actorId: string,
     ipAddress?: string,
   ) {
-    // Validate ward exists
-    const ward = await this.prisma.ward.findUnique({ where: { id: dto.wardId } });
-    if (!ward) throw new BadRequestException(`Ward '${dto.wardId}' not found`);
+    // Resolve stage → derive wardId and stageName so the caller only needs a stageId.
+    const stage = await this.prisma.stage.findFirst({
+      where: { id: dto.stageId, tenantId },
+      select: { id: true, name: true, wardId: true },
+    });
+    if (!stage) {
+      throw new BadRequestException(
+        `Stage '${dto.stageId}' not found. Ensure the stage is registered for this tenant.`,
+      );
+    }
+
+    const wardId = stage.wardId;
+    const stageName = stage.name;
 
     // Duplicate check: idNumber within tenant
     const dupId = await this.prisma.memberApplication.findFirst({
@@ -115,9 +125,9 @@ export class ApplicationsService {
         lastName: dto.lastName,
         idNumber: dto.idNumber,
         phoneNumber: dto.phoneNumber,
-        stageName: dto.stageName,
+        stageName,          // derived from stage lookup
         position: dto.position ?? 'MEMBER',
-        wardId: dto.wardId,
+        wardId,             // derived from stage lookup
         documentUrl: dto.documentUrl,
         tenantId,
         status: ApplicationStatus.SUBMITTED,
@@ -134,7 +144,8 @@ export class ApplicationsService {
       metadata: {
         idNumber: dto.idNumber,
         phoneNumber: dto.phoneNumber,
-        stageName: dto.stageName,
+        stageId: stage.id,
+        stageName,
       },
       ipAddress,
     });

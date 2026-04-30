@@ -4,7 +4,6 @@ import {
   IsOptional,
   IsEnum,
   Matches,
-  Length,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -18,13 +17,9 @@ export enum ApplicationPosition {
 /**
  * DTO for submitting a new member application form.
  *
- * Validation rules (enforced at DTO + DB levels):
- *  - idNumber: Kenyan National ID – exactly 7 or 8 digits
- *  - phoneNumber: Kenyan mobile – 07xxxxxxxx or 2547xxxxxxxx
- *  - wardId: must reference a valid Ward in the scoped location hierarchy
- *
- * NOTE: Self-registration is NOT allowed. This form is submitted by staff
- * on behalf of a prospective member (physical/digital form intake).
+ * The caller supplies a stageId (chosen from the registered stage list).
+ * The service resolves wardId and stageName from that record so the caller
+ * never has to send a redundant location cascade.
  */
 export class CreateApplicationDto {
   @ApiProperty({ example: 'John', description: 'First name of the applicant' })
@@ -59,11 +54,12 @@ export class CreateApplicationDto {
   })
   phoneNumber!: string;
 
-  @ApiProperty({ example: 'Westlands Stage', description: 'Name of the boda boda stage' })
+  @ApiProperty({
+    description: 'ID of the registered boda boda stage (cuid). wardId and stageName are derived server-side.',
+  })
   @IsString()
   @IsNotEmpty()
-  @Length(2, 100)
-  stageName!: string;
+  stageId!: string;
 
   @ApiPropertyOptional({
     enum: ApplicationPosition,
@@ -73,11 +69,6 @@ export class CreateApplicationDto {
   @IsOptional()
   @IsEnum(ApplicationPosition)
   position?: ApplicationPosition;
-
-  @ApiProperty({ description: 'Ward ID (cuid) from the location hierarchy' })
-  @IsString()
-  @IsNotEmpty()
-  wardId!: string;
 
   @ApiPropertyOptional({
     description: 'MinIO pre-signed URL for the uploaded KYC form scan',
