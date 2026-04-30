@@ -4,8 +4,10 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { ApplicationStatus, AccountType, KycStatus, UserRole } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -24,14 +26,16 @@ import { ApproveApplicationDto, RejectApplicationDto } from './dto/review-applic
  *  5. Create Member profile (kycStatus = APPROVED)
  *  6. Create FOSA account
  *  7. Create BOSA account
- *  8. Create or find Stage, then create StageAssignment
+ *  8. Find existing Stage by name+ward, then create StageAssignment
  *  9. Update MemberApplication.status = APPROVED
  * 10. Audit log
  *
  * Rollback: any failure in steps 1–9 rolls back the entire transaction.
  *
- * TODO: Sprint 2 – enqueue welcome SMS/email notification after approval
- * TODO: Sprint 2 – Excel/CSV bulk import (deferred)
+ * IMPORTANT – Neon DB: Interactive transactions ($transaction callback form) require
+ * a direct (non-pooler) connection. Set DIRECT_URL in your environment to the
+ * non-pooler Neon connection string. Prisma 5 automatically routes interactive
+ * transactions through directUrl when it is configured.
  */
 @Injectable()
 export class OnboardingService {
@@ -91,17 +95,17 @@ export class OnboardingService {
       );
     }
 
-    // Duplicate guard on User table (belt-and-suspenders)
+    // Duplicate guard on User table (belt-and-suspenders — also catches cross-tenant clashes
+    // since idNumber and phoneNumber carry a global @unique constraint on the User model)
     const dupUser = await this.prisma.user.findFirst({
       where: {
-        tenantId,
         OR: [{ idNumber: app.idNumber }, { phoneNumber: app.phoneNumber }],
       },
       select: { id: true },
     });
     if (dupUser) {
       throw new ConflictException(
-        'A user with this ID number or phone number already exists in this tenant',
+        'A user with this ID number or phone number already exists',
       );
     }
 
@@ -122,8 +126,7 @@ export class OnboardingService {
     }
 
     // Generate temporary password
-    const tempPassword =
-      dto.temporaryPassword ?? this.generateTempPassword();
+    const tempPassword = dto.temporaryPassword ?? this.generateTempPassword();
     const passwordHash = await argon2.hash(tempPassword, {
       type: argon2.argon2id,
       memoryCost: 65536,
@@ -132,126 +135,160 @@ export class OnboardingService {
     });
 
     // ── Atomic transaction ────────────────────────────────────────────────────
-    const result = await this.prisma.$transaction(async (tx) => {
-      // 1. Increment tenant member counter
-      const counter = await tx.tenantCounter.upsert({
-        where: { tenantId },
-        create: { tenantId, memberSeq: 1, accountSeq: 2 },
-        update: { memberSeq: { increment: 1 }, accountSeq: { increment: 2 } },
-      });
+    let result: {
+      user: { id: string; email: string; firstName: string; lastName: string };
+      member: { id: string; memberNumber: string };
+      accounts: { id: string; accountNumber: string; accountType: string }[];
+      stage: { id: string; name: string };
+      assignment: { id: string; position: string };
+      tempPassword: string;
+    };
 
-      const memberNumber = `M-${String(counter.memberSeq).padStart(6, '0')}`;
-      const fosaAccNum = `ACC-FOSA-${String(counter.accountSeq - 1).padStart(6, '0')}`;
-      const bosaAccNum = `ACC-BOSA-${String(counter.accountSeq).padStart(6, '0')}`;
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
+        // 1. Increment tenant member counter
+        const counter = await tx.tenantCounter.upsert({
+          where: { tenantId },
+          create: { tenantId, memberSeq: 1, accountSeq: 2 },
+          update: { memberSeq: { increment: 1 }, accountSeq: { increment: 2 } },
+        });
 
-      // 2. Create User
-      const user = await tx.user.create({
-        data: {
-          tenantId,
-          email,
-          passwordHash,
-          firstName: app.firstName,
-          lastName: app.lastName,
-          phone: app.phoneNumber,
-          phoneNumber: app.phoneNumber,
-          idNumber: app.idNumber,
-          wardId: app.wardId,
-          role: UserRole.MEMBER,
-          mustChangePassword: true,
-          userStatus: 'ACTIVE',
-        },
-        select: { id: true, email: true, firstName: true, lastName: true },
-      });
+        const memberNumber = `M-${String(counter.memberSeq).padStart(6, '0')}`;
+        const fosaAccNum = `ACC-FOSA-${String(counter.accountSeq - 1).padStart(6, '0')}`;
+        const bosaAccNum = `ACC-BOSA-${String(counter.accountSeq).padStart(6, '0')}`;
 
-      // 3. Create Member profile
-      const member = await tx.member.create({
-        data: {
-          tenantId,
-          userId: user.id,
-          memberNumber,
-          nationalId: app.idNumber,
-          kycStatus: KycStatus.APPROVED,
-          kycReviewedAt: new Date(),
-          kycReviewedByUserId: actorId,
-          isActive: true,
-        },
-        select: { id: true, memberNumber: true },
-      });
+        // 2. Create User
+        const user = await tx.user.create({
+          data: {
+            tenantId,
+            email,
+            passwordHash,
+            firstName: app.firstName,
+            lastName: app.lastName,
+            phone: app.phoneNumber,
+            phoneNumber: app.phoneNumber,
+            idNumber: app.idNumber,
+            wardId: app.wardId,
+            role: UserRole.MEMBER,
+            mustChangePassword: true,
+            userStatus: 'ACTIVE',
+          },
+          select: { id: true, email: true, firstName: true, lastName: true },
+        });
 
-      // 4. Create FOSA account
-      const fosaAccount = await tx.account.create({
-        data: {
-          tenantId,
-          memberId: member.id,
-          accountNumber: fosaAccNum,
-          accountType: AccountType.FOSA,
-          balance: 0,
-          isActive: true,
-        },
-        select: { id: true, accountNumber: true, accountType: true },
-      });
+        // 3. Create Member profile
+        const member = await tx.member.create({
+          data: {
+            tenantId,
+            userId: user.id,
+            memberNumber,
+            nationalId: app.idNumber,
+            kycStatus: KycStatus.APPROVED,
+            kycReviewedAt: new Date(),
+            kycReviewedByUserId: actorId,
+            isActive: true,
+          },
+          select: { id: true, memberNumber: true },
+        });
 
-      // 5. Create BOSA account
-      const bosaAccount = await tx.account.create({
-        data: {
-          tenantId,
-          memberId: member.id,
-          accountNumber: bosaAccNum,
-          accountType: AccountType.BOSA,
-          balance: 0,
-          isActive: true,
-        },
-        select: { id: true, accountNumber: true, accountType: true },
-      });
+        // 4. Create FOSA account
+        const fosaAccount = await tx.account.create({
+          data: {
+            tenantId,
+            memberId: member.id,
+            accountNumber: fosaAccNum,
+            accountType: AccountType.FOSA,
+            balance: 0,
+            isActive: true,
+          },
+          select: { id: true, accountNumber: true, accountType: true },
+        });
 
-      // 6. Find or create Stage
-      const stage = await tx.stage.upsert({
-        where: {
-          name_wardId_tenantId: {
+        // 5. Create BOSA account
+        const bosaAccount = await tx.account.create({
+          data: {
+            tenantId,
+            memberId: member.id,
+            accountNumber: bosaAccNum,
+            accountType: AccountType.BOSA,
+            balance: 0,
+            isActive: true,
+          },
+          select: { id: true, accountNumber: true, accountType: true },
+        });
+
+        // 6. Find or create Stage (upsert so the approval is self-healing)
+        const stage = await tx.stage.upsert({
+          where: {
+            name_wardId_tenantId: {
+              name: app.stageName,
+              wardId: app.wardId,
+              tenantId,
+            },
+          },
+          create: {
             name: app.stageName,
             wardId: app.wardId,
             tenantId,
           },
-        },
-        create: {
-          name: app.stageName,
-          wardId: app.wardId,
-          tenantId,
-        },
-        update: {},
-        select: { id: true, name: true },
-      });
+          update: {},
+          select: { id: true, name: true },
+        });
 
-      // 7. Create StageAssignment
-      const assignment = await tx.stageAssignment.create({
-        data: {
-          userId: user.id,
-          stageId: stage.id,
-          position: (app.position as 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER') ?? 'MEMBER',
-          isActive: true,
-        },
-        select: { id: true, position: true },
-      });
+        // 7. Create StageAssignment
+        const assignment = await tx.stageAssignment.create({
+          data: {
+            userId: user.id,
+            stageId: stage.id,
+            position: (app.position as 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER') ?? 'MEMBER',
+            isActive: true,
+          },
+          select: { id: true, position: true },
+        });
 
-      // 8. Update application status
-      await tx.memberApplication.update({
-        where: { id: applicationId },
-        data: {
-          status: ApplicationStatus.APPROVED,
-          reviewedBy: actorId,
-          reviewNotes: dto.reviewNotes ?? 'Approved',
-        },
-      });
+        // 8. Update application status
+        await tx.memberApplication.update({
+          where: { id: applicationId },
+          data: {
+            status: ApplicationStatus.APPROVED,
+            reviewedBy: actorId,
+            reviewNotes: dto.reviewNotes ?? 'Approved',
+          },
+        });
 
-      return {
-        user,
-        member,
-        accounts: [fosaAccount, bosaAccount],
-        stage,
-        assignment,
-        tempPassword,
-      };
-    });
+        return {
+          user,
+          member,
+          accounts: [fosaAccount, bosaAccount],
+          stage,
+          assignment,
+          tempPassword,
+        };
+      });
+    } catch (err) {
+      // Convert Prisma unique-constraint errors to 409 so the client gets a clear message
+      // instead of a generic 500.
+      if (err instanceof PrismaClientKnownRequestError) {
+        if (err.code === 'P2002') {
+          const fields = Array.isArray(err.meta?.target)
+            ? (err.meta.target as string[]).join(', ')
+            : 'ID number or phone number';
+          throw new ConflictException(
+            `A member with this ${fields} already exists.`,
+          );
+        }
+        // Any other known Prisma error — log it and surface a helpful message.
+        // Common cause: DIRECT_URL not set → pooler blocks interactive transactions.
+        this.logger.error(
+          `Prisma error ${err.code} during member approval for application ${applicationId}`,
+          err.message,
+        );
+        throw new InternalServerErrorException(
+          'Member creation failed. If this persists, ensure DIRECT_URL is set to the non-pooler Neon connection string.',
+        );
+      }
+      throw err;
+    }
     // ── End transaction ───────────────────────────────────────────────────────
 
     // Audit log (outside transaction – non-fatal)
