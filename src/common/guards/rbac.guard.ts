@@ -7,7 +7,7 @@ import type { AuthenticatedUser } from '../../modules/auth/strategies/jwt.strate
 
 /**
  * Role hierarchy (higher = more permissions):
- *   SUPER_ADMIN > TENANT_ADMIN > MANAGER > TELLER > CHAIRMAN > MEMBER > AUDITOR
+ *   SUPER_ADMIN > TENANT_ADMIN > MANAGER > LOAN_OFFICER > TELLER > CHAIRMAN > MEMBER > AUDITOR
  *
  * Hierarchical enforcement:
  *   - A role can always access endpoints requiring its own level OR lower levels.
@@ -20,7 +20,8 @@ import type { AuthenticatedUser } from '../../modules/auth/strategies/jwt.strate
  * Creation limits (enforced at service layer, not here):
  *   SUPER_ADMIN   → can create all roles including other super_admins
  *   TENANT_ADMIN  → can create all roles EXCEPT super_admin
- *   MANAGER       → can create TELLER, MEMBER, CHAIRMAN, AUDITOR
+ *   MANAGER       → can create LOAN_OFFICER, TELLER, MEMBER, CHAIRMAN, AUDITOR
+ *   LOAN_OFFICER  → none
  *   TELLER        → none
  *   MEMBER        → none (self-registration only)
  *   CHAIRMAN      → none (stage oversight + full member rights)
@@ -30,6 +31,7 @@ const ROLE_RANK: Record<UserRole, number> = {
   [UserRole.SUPER_ADMIN]: 100,
   [UserRole.TENANT_ADMIN]: 80,
   [UserRole.MANAGER]: 60,
+  [UserRole.LOAN_OFFICER]: 50,
   [UserRole.TELLER]: 40,
   [UserRole.CHAIRMAN]: 30,
   [UserRole.MEMBER]: 20,
@@ -106,7 +108,8 @@ export class RBACGuard implements CanActivate {
  * |----------------|--------------------------------------------|
  * | SUPER_ADMIN    | All roles, system config, tenants          |
  * | TENANT_ADMIN   | All roles EXCEPT SUPER_ADMIN               |
- * | MANAGER        | TELLER, MEMBER, CHAIRMAN, AUDITOR          |
+ * | MANAGER        | LOAN_OFFICER, TELLER, MEMBER, CHAIRMAN, AUDITOR |
+ * | LOAN_OFFICER   | None                                       |
  * | TELLER         | None                                       |
  * | MEMBER         | None (self-registration only if enabled)   |
  * | CHAIRMAN       | None (stage oversight + full member rights)|
@@ -117,13 +120,14 @@ export function canManageRole(actorRole: UserRole, targetRole: UserRole): boolea
   if (actorRole === UserRole.TENANT_ADMIN) return targetRole !== UserRole.SUPER_ADMIN;
   if (actorRole === UserRole.MANAGER) {
     return (
+      targetRole === UserRole.LOAN_OFFICER ||
       targetRole === UserRole.TELLER ||
       targetRole === UserRole.MEMBER ||
       targetRole === UserRole.CHAIRMAN ||
       targetRole === UserRole.AUDITOR
     );
   }
-  // TELLER, MEMBER, CHAIRMAN, AUDITOR have no creation rights
+  // LOAN_OFFICER, TELLER, MEMBER, CHAIRMAN, AUDITOR have no creation rights
   return false;
 }
 

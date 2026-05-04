@@ -28,6 +28,7 @@ enum UserRole {
   SUPER_ADMIN  // Platform admin (Beba staff) – full unrestricted access
   TENANT_ADMIN // SACCO administrator – tenant-scoped, cannot manage super_admin
   MANAGER      // Branch / department manager – can manage teller, member, chairman, auditor
+  LOAN_OFFICER // Loan officer – handles loan applications and member enquiries
   TELLER       // Front-office staff – cash / M-Pesa handling
   MEMBER       // Ordinary SACCO member – personal dashboard only
   CHAIRMAN     // Stage oversight – inherits MEMBER permissions + stage analytics
