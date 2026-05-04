@@ -92,6 +92,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     }
 
     this.attachTenantMiddleware();
+    this.attachAppendOnlyMiddleware();
   }
 
   /**
@@ -188,6 +189,28 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     });
 
     this.logger.log('🔒 Tenant isolation middleware attached');
+  }
+
+  /**
+   * Prisma middleware that blocks UPDATE and DELETE on AuditLog.
+   * Enforces append-only immutability at the ORM layer.
+   */
+  private attachAppendOnlyMiddleware(): void {
+    this.$use(async (params, next) => {
+      if (params.model === 'AuditLog') {
+        if (params.action.startsWith('update') || params.action.startsWith('delete')) {
+          this.logger.error(
+            `Blocked ${params.action} on AuditLog (append-only enforced)`,
+          );
+          throw new Error(
+            'AuditLog is append-only: updates and deletes are forbidden',
+          );
+        }
+      }
+      return next(params);
+    });
+
+    this.logger.log('🔒 AuditLog append-only middleware attached');
   }
 
   async onModuleDestroy() {

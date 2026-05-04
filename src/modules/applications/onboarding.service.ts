@@ -6,7 +6,7 @@ import {
   ConflictException,
   InternalServerErrorException,
 } from '@nestjs/common';
-import { ApplicationStatus, AccountType, KycStatus, UserRole } from '@prisma/client';
+import { ApplicationStatus, AccountType, KycStatus, UserRole, UserStatus } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -171,7 +171,7 @@ export class OnboardingService {
             wardId: app.wardId,
             role: UserRole.MEMBER,
             mustChangePassword: true,
-            userStatus: 'ACTIVE',
+            status: UserStatus.APPROVED,
           },
           select: { id: true, email: true, firstName: true, lastName: true },
         });

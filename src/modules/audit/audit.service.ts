@@ -4,10 +4,15 @@ import { PrismaService } from '../../prisma/prisma.service';
 
 export interface CreateAuditLogDto {
   tenantId: string;
-  userId?: string;
-  action: string;      // e.g. 'AUTH.LOGIN', 'LOAN.CREATE'
-  resource: string;    // e.g. 'User', 'Loan'
-  resourceId?: string;
+  actorId?: string;
+  userId?: string;     // deprecated alias for actorId (backward compat)
+  action: string;      // e.g. 'USER.CREATED', 'ROLE_CHANGED', 'STATUS_APPROVED'
+  entityType?: string; // e.g. 'User', 'Loan'
+  resource?: string;   // deprecated alias for entityType (backward compat)
+  entityId?: string;
+  resourceId?: string; // deprecated alias for entityId (backward compat)
+  oldValue?: Record<string, unknown>;
+  newValue?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   ipAddress?: string;
   userAgent?: string;
@@ -23,6 +28,7 @@ export interface CreateAuditLogDto {
  * Called from:
  * - AuthService (auth events)
  * - AuditInterceptor (HTTP request/response metadata)
+ * - UsersService (user lifecycle events)
  * - Future: domain services (loan events, transaction events)
  *
  * TODO: Phase 2 – async BullMQ queue for high-throughput scenarios (avoid blocking request)
@@ -41,13 +47,20 @@ export class AuditService {
    * This is synchronous — call via fire-and-forget (.catch) from hot paths.
    */
   async create(dto: CreateAuditLogDto): Promise<void> {
+    // Backward compat: resource/resourceId → entityType/entityId
+    const entityType = dto.entityType ?? dto.resource ?? 'Unknown';
+    const entityId = dto.entityId ?? dto.resourceId ?? null;
+    const actorId = dto.actorId ?? dto.userId ?? null;
+
     await this.prisma.auditLog.create({
       data: {
         tenantId: dto.tenantId,
-        userId: dto.userId ?? null,
+        actorId,
         action: dto.action,
-        resource: dto.resource,
-        resourceId: dto.resourceId ?? null,
+        entityType,
+        entityId,
+        oldValue: dto.oldValue ? (dto.oldValue as Prisma.InputJsonValue) : Prisma.JsonNull,
+        newValue: dto.newValue ? (dto.newValue as Prisma.InputJsonValue) : Prisma.JsonNull,
         metadata: (dto.metadata ?? {}) as Prisma.InputJsonValue,
         ipAddress: dto.ipAddress ?? null,
         userAgent: dto.userAgent ?? null,
@@ -57,24 +70,26 @@ export class AuditService {
   }
 
   /**
-   * Query audit logs with basic filters and pagination.
+   * Query audit logs with filters and pagination.
    */
   async findAll(filters: {
     tenantId: string;
-    userId?: string;
+    actorId?: string;
     action?: string;
+    entityType?: string;
     fromDate?: Date;
     toDate?: Date;
     limit?: number;
     offset?: number;
   }): Promise<{ data: unknown[]; total: number }> {
-    const safeLimit = filters.limit ?? 50;
-    const safeOffset = filters.offset ?? 0;
+    const safeLimit = Math.min(200, Math.max(1, filters.limit ?? 50));
+    const safeOffset = Math.max(0, filters.offset ?? 0);
 
     const where: Prisma.AuditLogWhereInput = {
       tenantId: filters.tenantId,
-      ...(filters.userId && { userId: filters.userId }),
+      ...(filters.actorId && { actorId: filters.actorId }),
       ...(filters.action && { action: { contains: filters.action, mode: 'insensitive' } }),
+      ...(filters.entityType && { entityType: { contains: filters.entityType, mode: 'insensitive' } }),
       ...((filters.fromDate || filters.toDate) && {
         timestamp: {
           ...(filters.fromDate && { gte: filters.fromDate }),
@@ -103,10 +118,16 @@ export class AuditService {
 
   /**
    * Get all audit events for a specific resource instance.
-   * TODO: Phase 3 – implement
    */
-  async findByResource(_resource: string, _resourceId: string) {
-    // TODO: Phase 3 – implement
-    throw new Error('Not implemented – Phase 3');
+  async findByResource(entityType: string, entityId: string, tenantId: string) {
+    return this.prisma.auditLog.findMany({
+      where: { entityType, entityId, tenantId },
+      orderBy: { timestamp: 'desc' },
+      include: {
+        user: {
+          select: { firstName: true, lastName: true, email: true },
+        },
+      },
+    });
   }
 }

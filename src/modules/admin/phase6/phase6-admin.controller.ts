@@ -12,8 +12,6 @@ import {
   Req,
 } from '@nestjs/common';
 import { Response, Request } from 'express';
-import { JwtAuthGuard } from '../../../common/guards/jwt.guard';
-import { RolesGuard } from '../../../common/guards/roles.guard';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { RealTimeAnalyticsService } from '../../analytics/sse/real-time-analytics.service';
 import { BehavioralRiskScorerService } from '../../fraud/risk-scorer/behavioral-risk-scorer.service';
@@ -37,7 +35,6 @@ import { CanaryService } from '../../deploy/canary/canary.service';
  *  POST /sandbox/reset                   – Sandbox reset
  */
 @Controller('admin')
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
 export class Phase6AdminController {
   constructor(

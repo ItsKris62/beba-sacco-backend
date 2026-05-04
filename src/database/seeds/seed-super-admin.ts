@@ -79,9 +79,10 @@ async function main() {
   await prisma.auditLog.create({
     data: {
       tenantId: tenant.id,
-      action: 'USER.CREATE',
-      resource: 'User',
-      resourceId: user.id,
+      actorId: user.id,
+      action: 'USER.CREATED',
+      entityType: 'User',
+      entityId: user.id,
       metadata: {
         source: 'seed-super-admin',
         role: UserRole.SUPER_ADMIN,

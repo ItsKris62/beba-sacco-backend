@@ -12,15 +12,12 @@ import { SasraValidatorService } from './sasra-validator.service';
 import { SasraAuditQueryDto, SasraAuditReport } from './dto/sasra-audit.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
-import { JwtAuthGuard } from '../../common/guards/jwt.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
 import type { Tenant } from '@prisma/client';
 
 @ApiTags('Audit')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
 @Controller('audit')
 export class AuditController {

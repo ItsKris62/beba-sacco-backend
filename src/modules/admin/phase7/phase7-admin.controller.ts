@@ -6,8 +6,6 @@ import {
   Controller, Get, Post, Body, Query, Param,
   UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
-import { JwtAuthGuard } from '../../../common/guards/jwt.guard';
-import { RolesGuard } from '../../../common/guards/roles.guard';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { DataErasureService } from '../../governance/erasure/data-erasure.service';
 import { LineageService } from '../../governance/lineage/lineage.service';
@@ -20,7 +18,6 @@ import { SloTrackerService } from '../../sre/slo-tracker.service';
 import { FinOpsService } from '../../sre/finops.service';
 
 @Controller('admin')
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class Phase7AdminController {
   constructor(
     private readonly erasure: DataErasureService,

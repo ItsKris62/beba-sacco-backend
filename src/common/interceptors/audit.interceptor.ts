@@ -74,9 +74,9 @@ export class AuditInterceptor implements NestInterceptor {
           this.auditService
             .create({
               tenantId,
-              userId,
+              actorId: userId,
               action,
-              resource,
+              entityType: resource,
               metadata: { url, method, durationMs: duration, status: 'success' },
               ipAddress: ip,
               userAgent,
@@ -94,9 +94,9 @@ export class AuditInterceptor implements NestInterceptor {
           this.auditService
             .create({
               tenantId,
-              userId,
+              actorId: userId,
               action: `${action}.ERROR`,
-              resource,
+              entityType: resource,
               metadata: {
                 url,
                 method,

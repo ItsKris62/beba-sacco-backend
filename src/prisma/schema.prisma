@@ -268,6 +268,16 @@ enum KycStatus {
   @@schema("public")
 }
 
+// ─── User Account Lifecycle Status ───────────────────────────────────────────
+enum UserStatus {
+  PENDING   // Awaiting staff approval (self-registered or admin-created)
+  APPROVED  // Active and approved
+  REJECTED  // Rejected by staff (terminal for this request; may re-apply)
+  SUSPENDED // Account frozen (terminal until explicitly reactivated)
+
+  @@schema("public")
+}
+
 // Sprint 2: Data import job status
 enum ImportJobStatus {
   QUEUED
@@ -328,23 +338,23 @@ model TenantCounter {
 }
 
 model User {
-  id                 String   @id @default(uuid())
+  id                 String     @id @default(uuid())
   tenantId           String
-  tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant             Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   email              String
   passwordHash       String
-  role               UserRole @default(MEMBER)
+  role               UserRole   @default(MEMBER)
 
   firstName          String
   lastName           String
   phone              String?
-  isActive           Boolean  @default(true)
-  emailVerified      Boolean  @default(false)
+  isActive           Boolean    @default(true)
+  emailVerified      Boolean    @default(false)
 
-  refreshToken       String?  @db.Text // argon2 hash of refresh JWT
+  refreshToken       String?    @db.Text // argon2 hash of refresh JWT
   lastLoginAt        DateTime?
-  mustChangePassword Boolean  @default(false)
+  mustChangePassword Boolean    @default(false)
 
   // Password reset (stateless JWT + nonce pattern)
   passwordResetToken  String?   @db.Text // argon2 hash of one-time nonce
@@ -354,7 +364,13 @@ model User {
   idNumber    String?  @unique // Kenyan National ID (7–8 digits) – set on member approval
   phoneNumber String?  @unique // Kenyan phone (2547xxxxxxxx) – set on member approval
   wardId      String?          // FK to Ward – set on member approval
-  userStatus  String   @default("ACTIVE") // ACTIVE | SUSPENDED | PENDING
+
+  // ─── User Lifecycle & Approval ────────────────────────────────────────────
+  status      UserStatus @default(PENDING) // PENDING | APPROVED | REJECTED | SUSPENDED
+  createdById String?    // userId of actor who created this account
+  approvedById String?   // userId of actor who approved/rejected
+  approvedAt  DateTime?  // when approval decision was made
+  approvalReason String? @db.Text // reason for rejection or contextual notes
 
   // Sprint 2 – Legacy import fields (additive, nullable)
   nextOfKinPhone String?       // Optional next-of-kin contact from CSV
@@ -372,6 +388,7 @@ model User {
   @@index([tenantId])
   @@index([email])
   @@index([role])
+  @@index([status])
   @@index([idNumber])
   @@index([importBatchId])
   @@schema("public")
@@ -382,28 +399,31 @@ model AuditLog {
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  userId String?
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  actorId String? // userId of the actor who performed the action
+  user    User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
-  action     String  // e.g., "AUTH.LOGIN", "LOAN.APPROVE"
-  resource   String  // e.g., "User", "Loan"
-  resourceId String?
+  action     String  // e.g., "USER.CREATED", "ROLE_CHANGED", "STATUS_APPROVED"
+  entityType String  // e.g., "User", "Loan"
+  entityId   String?
 
-  metadata  Json?   // Snapshot of request/response
+  oldValue  Json?   // Previous state (sanitized, no passwords)
+  newValue  Json?   // New state (sanitized, no passwords)
+  metadata  Json?   // Additional context (IP, userAgent, reason, etc.)
   ipAddress String?
   userAgent String?
   requestId String? @unique
 
   // Phase 4 – immutable audit chain: hash of this record's payload
   // prevHash links to the prior entry's hash, forming a tamper-evident chain
-  prevHash String? @db.Text
+  prevHash  String? @db.Text
   entryHash String? @db.Text
 
   timestamp DateTime @default(now())
 
   @@index([tenantId])
-  @@index([userId])
+  @@index([actorId])
   @@index([action])
+  @@index([entityType])
   @@index([timestamp])
   @@schema("public")
 }

@@ -20,8 +20,6 @@ import {
   ApiResponse,
 } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { RolesGuard } from '../../common/guards/roles.guard';
-import { JwtAuthGuard } from '../../common/guards/jwt.guard';
 import { FinancialImportService } from './financial-import.service';
 import {
   FinancialPreviewRequestDto,
@@ -33,7 +31,6 @@ import type { AuthenticatedRequest } from '../../common/types/request.types';
 
 @ApiTags('Financial Import')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('admin/data-import')
 export class FinancialImportController {
   constructor(private readonly financialImportService: FinancialImportService) {}

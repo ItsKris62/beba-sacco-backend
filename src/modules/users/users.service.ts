@@ -3,16 +3,19 @@ import {
   ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import * as argon2 from 'argon2';
-import { UserRole } from '@prisma/client';
+import { UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UpdateUserStatusDto } from './dto/update-user-status.dto';
+import { IdempotencyService } from '../../common/services/idempotency.service';
 
 /** Roles that can be created/managed within a tenant context. */
 const TENANT_MANAGEABLE_ROLES: UserRole[] = [
   UserRole.TENANT_ADMIN,
   UserRole.MANAGER,
+  UserRole.LOAN_OFFICER,
   UserRole.TELLER,
   UserRole.AUDITOR,
   UserRole.MEMBER,
@@ -23,8 +26,7 @@ const TENANT_MANAGEABLE_ROLES: UserRole[] = [
  * MANAGER cannot create or modify TENANT_ADMIN accounts — only TENANT_ADMIN can.
  */
 const MANAGER_MANAGEABLE_ROLES: UserRole[] = [
-  UserRole.TELLER,
-  UserRole.AUDITOR,
+  UserRole.LOAN_OFFICER,
   UserRole.MEMBER,
 ];
 
@@ -35,10 +37,14 @@ const USER_SELECT = {
   lastName: true,
   phone: true,
   role: true,
+  status: true,
   isActive: true,
   mustChangePassword: true,
   lastLoginAt: true,
   emailVerified: true,
+  createdById: true,
+  approvedById: true,
+  approvedAt: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -50,6 +56,7 @@ export class UsersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   // ─── CREATE (admin channel) ──────────────────────────────────
@@ -63,7 +70,7 @@ export class UsersService {
    *   - MANAGER cannot create TENANT_ADMIN accounts (role hierarchy)
    *   - TENANT_ADMIN can create any tenant-level role
    *
-   * Phase 3 hook: enqueue a welcome + set-password email to the new user.
+   * New users are created with status PENDING (explicit approval workflow).
    */
   async create(
     dto: CreateUserDto,
@@ -107,18 +114,21 @@ export class UsersService {
         lastName: dto.lastName,
         phone: dto.phone,
         role: dto.role,
+        status: UserStatus.PENDING,
         mustChangePassword: true,
+        createdById: actor.id,
       },
       select: USER_SELECT,
     });
 
     await this.auditSafe({
       tenantId,
-      userId: actor.id,
-      action: 'USER.CREATE',
-      resource: 'User',
-      resourceId: user.id,
-      metadata: { email: user.email, role: user.role, createdBy: actor.id },
+      actorId: actor.id,
+      action: 'USER.CREATED',
+      entityType: 'User',
+      entityId: user.id,
+      newValue: { email: user.email, role: user.role, status: user.status, createdById: actor.id },
+      metadata: { ipAddress },
       ipAddress,
     });
 
@@ -129,7 +139,7 @@ export class UsersService {
 
   async findAll(
     tenantId: string,
-    opts: { page?: number; limit?: number; search?: string; role?: UserRole } = {},
+    opts: { page?: number; limit?: number; search?: string; role?: UserRole; status?: UserStatus } = {},
   ) {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
@@ -138,6 +148,7 @@ export class UsersService {
     const where = {
       tenantId,
       ...(opts.role && { role: opts.role }),
+      ...(opts.status && { status: opts.status }),
       ...(opts.search && {
         OR: [
           { firstName: { contains: opts.search, mode: 'insensitive' as const } },
@@ -193,7 +204,7 @@ export class UsersService {
   ) {
     const target = await this.prisma.user.findFirst({
       where: { id, tenantId },
-      select: { id: true, role: true },
+      select: { id: true, role: true, status: true, email: true },
     });
     if (!target) throw new NotFoundException('User not found');
 
@@ -226,15 +237,107 @@ export class UsersService {
 
     await this.auditSafe({
       tenantId,
-      userId: actor.id,
-      action: 'USER.UPDATE',
-      resource: 'User',
-      resourceId: id,
-      metadata: { changes: dto, actorRole: actor.role },
+      actorId: actor.id,
+      action: dto.role !== undefined ? 'ROLE_CHANGED' : 'USER.UPDATED',
+      entityType: 'User',
+      entityId: id,
+      oldValue: { role: target.role, isActive: true /* approximate */ },
+      newValue: { role: updated.role, isActive: updated.isActive },
+      metadata: { changes: dto, actorRole: actor.role, ipAddress },
       ipAddress,
     });
 
     return updated;
+  }
+
+  // ─── UPDATE STATUS (Approval Workflow) ───────────────────────
+
+  /**
+   * Explicit approval state machine.
+   *
+   * Valid transitions:
+   *   PENDING   → APPROVED
+   *   PENDING   → REJECTED
+   *   APPROVED  → SUSPENDED
+   *   SUSPENDED → APPROVED
+   *
+   * Only MANAGER, TENANT_ADMIN, SUPER_ADMIN can change status.
+   */
+  async updateStatus(
+    id: string,
+    dto: UpdateUserStatusDto,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, status: true, email: true, role: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    const validTransitions: Record<UserStatus, UserStatus[]> = {
+      [UserStatus.PENDING]: [UserStatus.APPROVED, UserStatus.REJECTED],
+      [UserStatus.APPROVED]: [UserStatus.SUSPENDED],
+      [UserStatus.REJECTED]: [],
+      [UserStatus.SUSPENDED]: [UserStatus.APPROVED],
+    };
+
+    const allowed = validTransitions[target.status];
+    if (!allowed.includes(dto.status)) {
+      throw new BadRequestException(
+        `Invalid status transition: ${target.status} → ${dto.status}. Allowed: [${allowed.join(', ')}]`,
+      );
+    }
+
+    // Idempotency check
+    if (dto.idempotencyKey) {
+      const idem = await this.idempotency.checkAndReserve(
+        dto.idempotencyKey,
+        tenantId,
+        3600,
+      );
+      if (idem.status === 'COMPLETED') {
+        return idem.result;
+      }
+      if (idem.status === 'PROCESSING') {
+        throw new BadRequestException('Request is already being processed');
+      }
+    }
+
+    const oldStatus = target.status;
+    const updated = await this.prisma.user.update({
+      where: { id },
+      data: {
+        status: dto.status,
+        approvedById: actor.id,
+        approvedAt: new Date(),
+        approvalReason: dto.reason ?? null,
+        // Auto-activate on approval, deactivate on rejection/suspension
+        isActive: dto.status === UserStatus.APPROVED,
+      },
+      select: USER_SELECT,
+    });
+
+    await this.auditSafe({
+      tenantId,
+      actorId: actor.id,
+      action: 'STATUS_CHANGED',
+      entityType: 'User',
+      entityId: id,
+      oldValue: { status: oldStatus },
+      newValue: { status: updated.status, approvedById: actor.id, approvedAt: updated.approvedAt, reason: dto.reason },
+      metadata: { ipAddress, actorRole: actor.role },
+      ipAddress,
+    });
+
+    const result = { success: true, user: updated };
+
+    if (dto.idempotencyKey) {
+      await this.idempotency.complete(dto.idempotencyKey, tenantId, result, 3600);
+    }
+
+    return result;
   }
 
   // ─── DEACTIVATE ──────────────────────────────────────────────
@@ -247,7 +350,7 @@ export class UsersService {
   ) {
     const target = await this.prisma.user.findFirst({
       where: { id, tenantId },
-      select: { id: true, isActive: true, role: true },
+      select: { id: true, isActive: true, role: true, status: true },
     });
     if (!target) throw new NotFoundException('User not found');
     if (!target.isActive) throw new BadRequestException('User is already inactive');
@@ -269,11 +372,13 @@ export class UsersService {
 
     await this.auditSafe({
       tenantId,
-      userId: actor.id,
-      action: 'USER.DEACTIVATE',
-      resource: 'User',
-      resourceId: id,
-      metadata: { targetRole: target.role },
+      actorId: actor.id,
+      action: 'USER.DEACTIVATED',
+      entityType: 'User',
+      entityId: id,
+      oldValue: { isActive: true },
+      newValue: { isActive: false },
+      metadata: { targetRole: target.role, ipAddress },
       ipAddress,
     });
 
@@ -282,23 +387,6 @@ export class UsersService {
 
   // ─── FORCE PASSWORD RESET ────────────────────────────────────
 
-  /**
-   * Admin-initiated password reset.
-   *
-   * Effects:
-   *   - Sets mustChangePassword = true → JwtAuthGuard will block the user from all
-   *     routes except PATCH /auth/change-password until they set a new password.
-   *   - Clears refreshToken → invalidates all existing sessions immediately.
-   *
-   * Role hierarchy enforced:
-   *   - MANAGER cannot force-reset a TENANT_ADMIN's password.
-   *   - No user can force-reset their own password via this endpoint (use
-   *     PATCH /auth/change-password for self-service).
-   *
-   * Phase 2 hook: also add user's access token jti to Redis blocklist so the
-   *   current 15-min window is revoked immediately, not just after expiry.
-   * Phase 3 hook: enqueue a "your password was reset by an admin" notification email.
-   */
   async forcePasswordReset(
     id: string,
     tenantId: string,
@@ -311,14 +399,12 @@ export class UsersService {
     });
     if (!target) throw new NotFoundException('User not found');
 
-    // Prevent self-reset via this admin endpoint (use /auth/change-password instead)
     if (id === actor.id) {
       throw new ForbiddenException(
         'Cannot force-reset your own password via this endpoint — use PATCH /auth/change-password',
       );
     }
 
-    // MANAGER cannot force-reset a TENANT_ADMIN or another MANAGER
     if (
       actor.role === UserRole.MANAGER &&
       !MANAGER_MANAGEABLE_ROLES.includes(target.role)
@@ -332,27 +418,25 @@ export class UsersService {
       where: { id },
       data: {
         mustChangePassword: true,
-        refreshToken: null,  // Invalidate all active sessions immediately
+        refreshToken: null,
       },
     });
 
     await this.auditSafe({
       tenantId,
-      userId: actor.id,
+      actorId: actor.id,
       action: 'USER.FORCE_PASSWORD_RESET',
-      resource: 'User',
-      resourceId: id,
+      entityType: 'User',
+      entityId: id,
       metadata: {
         targetEmail: target.email,
         targetRole: target.role,
         requestedBy: actor.id,
         actorRole: actor.role,
+        ipAddress,
       },
       ipAddress,
     });
-
-    // Phase 2 hook: enqueue notification email to target.email informing them
-    // that an admin has reset their password and they must log in to set a new one.
 
     return {
       success: true,

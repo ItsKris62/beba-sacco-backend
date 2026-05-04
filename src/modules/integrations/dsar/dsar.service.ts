@@ -191,15 +191,15 @@ export class DsarService {
         where: {
           tenantId,
           OR: [
-            { resourceId: memberId },
-            { userId: memberId },
+            { entityId: memberId },
+            { actorId: memberId },
           ],
         },
         orderBy: { timestamp: 'desc' },
         take: 500,
         select: {
           action: true,
-          resource: true,
+          entityType: true,
           timestamp: true,
           ipAddress: true,
         },

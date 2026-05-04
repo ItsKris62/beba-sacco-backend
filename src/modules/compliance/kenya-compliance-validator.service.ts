@@ -602,10 +602,10 @@ export class KenyaComplianceValidatorService {
         select: {
           id: true,
           tenantId: true,
-          userId: true,
+          actorId: true,
           action: true,
-          resource: true,
-          resourceId: true,
+          entityType: true,
+          entityId: true,
           timestamp: true,
           prevHash: true,
           entryHash: true,
@@ -631,10 +631,10 @@ export class KenyaComplianceValidatorService {
         // Recompute expected hash
         const payload = [
           entry.tenantId,
-          entry.userId ?? '',
+          entry.actorId ?? '',
           entry.action,
-          entry.resource,
-          entry.resourceId ?? '',
+          entry.entityType,
+          entry.entityId ?? '',
           entry.timestamp.toISOString(),
           entry.prevHash ?? '',
         ].join('|');

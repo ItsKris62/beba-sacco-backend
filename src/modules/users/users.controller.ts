@@ -2,6 +2,7 @@ import {
   Controller, Get, Post, Patch, Param, Body,
   Query, HttpCode, HttpStatus, ParseUUIDPipe, Req,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader,
@@ -11,6 +12,7 @@ import { Request } from 'express';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
@@ -28,6 +30,7 @@ export class UsersController {
   // ─── CREATE STAFF ACCOUNT ────────────────────────────────────
 
   @Post()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -143,6 +146,32 @@ export class UsersController {
     @Req() req: Request,
   ) {
     return this.usersService.deactivate(id, tenant.id, actor, req.ip);
+  }
+
+  // ─── UPDATE STATUS (Approval Workflow) ───────────────────────
+
+  @Patch(':id/status')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.SUPER_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Update user approval status',
+    description:
+      'Explicit approval state machine. ' +
+      'Valid transitions: PENDING → APPROVED | REJECTED; APPROVED → SUSPENDED; SUSPENDED → APPROVED. ' +
+      'Only MANAGER, TENANT_ADMIN, and SUPER_ADMIN can approve/reject/suspend.',
+  })
+  @ApiResponse({ status: 200, description: 'Status updated successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid status transition' })
+  @ApiResponse({ status: 403, description: 'Insufficient role to change status' })
+  updateStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateUserStatusDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.usersService.updateStatus(id, dto, tenant.id, actor, req.ip);
   }
 
   // ─── FORCE PASSWORD RESET ────────────────────────────────────

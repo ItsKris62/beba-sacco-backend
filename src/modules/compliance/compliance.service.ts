@@ -266,14 +266,14 @@ export class ComplianceService {
 
   /**
    * Appends a hash-chained entry to the audit log.
-   * entryHash = SHA-256(prevHash + action + resourceId + userId + timestamp)
+   * entryHash = SHA-256(prevHash + action + entityId + actorId + timestamp)
    */
   async appendAuditEntry(params: {
     tenantId: string;
-    userId?: string;
+    actorId?: string;
     action: string;
-    resource: string;
-    resourceId?: string;
+    entityType: string;
+    entityId?: string;
     metadata?: Record<string, unknown>;
     ipAddress?: string;
     requestId?: string;
@@ -288,16 +288,16 @@ export class ComplianceService {
     const prevHash = last?.entryHash ?? '0';
     const timestamp = new Date().toISOString();
 
-    const hashInput = `${prevHash}|${params.action}|${params.resourceId ?? ''}|${params.userId ?? ''}|${timestamp}`;
+    const hashInput = `${prevHash}|${params.action}|${params.entityId ?? ''}|${params.actorId ?? ''}|${timestamp}`;
     const entryHash = createHash('sha256').update(hashInput).digest('hex');
 
     await this.prisma.auditLog.create({
       data: {
         tenantId: params.tenantId,
-        userId: params.userId,
+        actorId: params.actorId,
         action: params.action,
-        resource: params.resource,
-        resourceId: params.resourceId,
+        entityType: params.entityType,
+        entityId: params.entityId,
         metadata: params.metadata as Prisma.InputJsonValue | undefined,
         ipAddress: params.ipAddress,
         requestId: params.requestId,
@@ -316,14 +316,14 @@ export class ComplianceService {
     const entries = await this.prisma.auditLog.findMany({
       where: { tenantId, entryHash: { not: null } },
       orderBy: { timestamp: 'asc' },
-      select: { id: true, prevHash: true, entryHash: true, action: true, resourceId: true, userId: true, timestamp: true },
+      select: { id: true, prevHash: true, entryHash: true, action: true, entityId: true, actorId: true, timestamp: true },
     });
 
     let checkedEntries = 0;
     let lastHash = '0';
 
     for (const entry of entries) {
-      const hashInput = `${entry.prevHash ?? '0'}|${entry.action}|${entry.resourceId ?? ''}|${entry.userId ?? ''}|${entry.timestamp.toISOString()}`;
+      const hashInput = `${entry.prevHash ?? '0'}|${entry.action}|${entry.entityId ?? ''}|${entry.actorId ?? ''}|${entry.timestamp.toISOString()}`;
       const expectedHash = createHash('sha256').update(hashInput).digest('hex');
 
       if (entry.entryHash !== expectedHash || entry.prevHash !== lastHash) {
@@ -361,10 +361,10 @@ export class ComplianceService {
 
     await this.audit.create({
       tenantId,
-      userId: updatedBy,
+      actorId: updatedBy,
       action: 'MEMBER.PRIVACY_CONSENT_UPDATED',
-      resource: 'Member',
-      resourceId: memberId,
+      entityType: 'Member',
+      entityId: memberId,
       metadata: { before: member.consentDataSharing, after: consentDataSharing },
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));

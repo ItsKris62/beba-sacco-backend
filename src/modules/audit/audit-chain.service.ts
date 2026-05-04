@@ -25,7 +25,7 @@ export interface TamperEvidence {
  *
  * Implements cryptographic audit chain verification.
  * Each AuditLog entry stores:
- *  - entryHash: SHA-256(tenantId + userId + action + resource + resourceId + timestamp + prevHash)
+ *  - entryHash: SHA-256(tenantId + actorId + action + entityType + entityId + timestamp + prevHash)
  *  - prevHash:  entryHash of the previous entry in the chain
  *
  * GET /admin/audit/verify-chain walks the chain and returns tamper evidence.
@@ -41,19 +41,19 @@ export class AuditChainService {
    */
   computeEntryHash(entry: {
     tenantId: string;
-    userId?: string | null;
+    actorId?: string | null;
     action: string;
-    resource: string;
-    resourceId?: string | null;
+    entityType: string;
+    entityId?: string | null;
     timestamp: Date;
     prevHash?: string | null;
   }): string {
     const payload = [
       entry.tenantId,
-      entry.userId ?? '',
+      entry.actorId ?? '',
       entry.action,
-      entry.resource,
-      entry.resourceId ?? '',
+      entry.entityType,
+      entry.entityId ?? '',
       entry.timestamp.toISOString(),
       entry.prevHash ?? '',
     ].join('|');
@@ -74,10 +74,10 @@ export class AuditChainService {
       select: {
         id: true,
         tenantId: true,
-        userId: true,
+        actorId: true,
         action: true,
-        resource: true,
-        resourceId: true,
+        entityType: true,
+        entityId: true,
         timestamp: true,
         prevHash: true,
         entryHash: true,
@@ -115,10 +115,10 @@ export class AuditChainService {
       // Recompute hash and verify
       const expectedHash = this.computeEntryHash({
         tenantId: entry.tenantId,
-        userId: entry.userId,
+        actorId: entry.actorId,
         action: entry.action,
-        resource: entry.resource,
-        resourceId: entry.resourceId,
+        entityType: entry.entityType,
+        entityId: entry.entityId,
         timestamp: entry.timestamp,
         prevHash: entry.prevHash,
       });
@@ -164,10 +164,10 @@ export class AuditChainService {
       select: {
         id: true,
         tenantId: true,
-        userId: true,
+        actorId: true,
         action: true,
-        resource: true,
-        resourceId: true,
+        entityType: true,
+        entityId: true,
         timestamp: true,
       },
     });
@@ -189,10 +189,10 @@ export class AuditChainService {
 
     const entryHash = this.computeEntryHash({
       tenantId: entry.tenantId,
-      userId: entry.userId,
+      actorId: entry.actorId,
       action: entry.action,
-      resource: entry.resource,
-      resourceId: entry.resourceId,
+      entityType: entry.entityType,
+      entityId: entry.entityId,
       timestamp: entry.timestamp,
       prevHash,
     });

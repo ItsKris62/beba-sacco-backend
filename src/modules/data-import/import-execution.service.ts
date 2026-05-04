@@ -259,7 +259,7 @@ export class ImportExecutionService {
             legacyMemberNo: row.legacyNo ?? undefined,
             importBatchId: batchId,
             wardId,
-            userStatus: row.idNumber ? 'ACTIVE' : 'PENDING',
+            status: row.idNumber ? 'APPROVED' : 'PENDING',
             mustChangePassword: true,
           },
         });

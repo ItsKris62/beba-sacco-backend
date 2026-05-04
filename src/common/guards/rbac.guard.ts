@@ -78,8 +78,15 @@ export class RBACGuard implements CanActivate {
 }
 
 /**
- * Helper: checks if `actorRole` can create/manage `targetRole` according to
- * the strict creation limits in the MVP specification.
+ * Strict role hierarchy for creation/management.
+ *
+ * | Actor          | Can Create/Manage                          |
+ * |----------------|--------------------------------------------|
+ * | SUPER_ADMIN    | All roles, system config, tenants          |
+ * | TENANT_ADMIN   | All roles EXCEPT SUPER_ADMIN               |
+ * | MANAGER        | LOAN_OFFICER, MEMBER                       |
+ * | LOAN_OFFICER   | None (view/review members only)            |
+ * | MEMBER         | None (self-registration only if enabled)   |
  */
 export function canManageRole(actorRole: UserRole, targetRole: UserRole): boolean {
   if (actorRole === UserRole.SUPER_ADMIN) return true;
@@ -87,9 +94,7 @@ export function canManageRole(actorRole: UserRole, targetRole: UserRole): boolea
   if (actorRole === UserRole.MANAGER) {
     return targetRole === UserRole.LOAN_OFFICER || targetRole === UserRole.MEMBER;
   }
-  if (actorRole === UserRole.LOAN_OFFICER) {
-    return targetRole === UserRole.MEMBER; // view/review only, creation not allowed
-  }
+  // LOAN_OFFICER, TELLER, AUDITOR, MEMBER have no creation rights
   return false;
 }
 
