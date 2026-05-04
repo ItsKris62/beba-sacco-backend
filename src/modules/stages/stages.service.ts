@@ -1,10 +1,12 @@
 import {
   Injectable, Logger, NotFoundException,
-  ConflictException, BadRequestException,
+  ConflictException, BadRequestException, ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { CreateStageDto, UpdateStageDto, AssignStagePositionDto } from './dto/create-stage.dto';
+import { CreateStageDto, UpdateStageDto, AssignStagePositionDto, AssignStageMemberDto } from './dto/create-stage.dto';
+import { UserRole } from '@prisma/client';
+import { isMemberRole } from '../../common/guards/rbac.guard';
 
 const STAGE_SELECT = {
   id: true,
@@ -336,6 +338,221 @@ export class StagesService {
     }));
 
     return { data: flattened, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  }
+
+  // ─── CHAIRMAN: LIST STAGE MEMBERS ──────────────────────────────────────────
+
+  async findStageMembers(
+    stageId: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    opts: { page?: number; limit?: number } = {},
+  ) {
+    // Verify stage exists and belongs to tenant
+    const stage = await this.prisma.stage.findFirst({
+      where: { id: stageId, tenantId },
+      select: { id: true, name: true },
+    });
+    if (!stage) throw new NotFoundException('Stage not found');
+
+    // CHAIRMAN: must be assigned to this stage
+    if (actor.role === UserRole.CHAIRMAN) {
+      const assignment = await this.prisma.stageAssignment.findFirst({
+        where: { stageId, userId: actor.id, isActive: true },
+      });
+      if (!assignment) {
+        throw new ForbiddenException('CHAIRMAN is not assigned to this stage');
+      }
+    }
+
+    const page = Math.max(1, opts.page ?? 1);
+    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.memberStage.findMany({
+        where: { stageId, isActive: true },
+        select: {
+          id: true,
+          assignedAt: true,
+          member: {
+            select: {
+              id: true,
+              memberNumber: true,
+              user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+              _count: { select: { accounts: true, loans: true } },
+            },
+          },
+        },
+        skip,
+        take: limit,
+        orderBy: { assignedAt: 'desc' },
+      }),
+      this.prisma.memberStage.count({ where: { stageId, isActive: true } }),
+    ]);
+
+    return {
+      stage: { id: stage.id, name: stage.name },
+      data,
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  // ─── CHAIRMAN: STAGE ANALYTICS ─────────────────────────────────────────────
+
+  async getStageAnalytics(
+    stageId: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+  ) {
+    const stage = await this.prisma.stage.findFirst({
+      where: { id: stageId, tenantId },
+      select: { id: true, name: true },
+    });
+    if (!stage) throw new NotFoundException('Stage not found');
+
+    // CHAIRMAN: must be assigned to this stage
+    if (actor.role === UserRole.CHAIRMAN) {
+      const assignment = await this.prisma.stageAssignment.findFirst({
+        where: { stageId, userId: actor.id, isActive: true },
+      });
+      if (!assignment) {
+        throw new ForbiddenException('CHAIRMAN is not assigned to this stage');
+      }
+    }
+
+    const memberIds = await this.prisma.memberStage.findMany({
+      where: { stageId, isActive: true },
+      select: { memberId: true },
+    }).then((rows) => rows.map((r) => r.memberId));
+
+    const [depositAgg, loanAgg, repaymentAgg] = await this.prisma.$transaction([
+      this.prisma.transaction.aggregate({
+        where: {
+          tenantId,
+          account: { memberId: { in: memberIds } },
+          type: 'DEPOSIT',
+          status: 'COMPLETED',
+        },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      this.prisma.loan.aggregate({
+        where: {
+          tenantId,
+          memberId: { in: memberIds },
+          status: { in: ['ACTIVE', 'DISBURSED', 'APPROVED'] },
+        },
+        _sum: { principalAmount: true, outstandingBalance: true },
+        _count: { id: true },
+      }),
+      this.prisma.transaction.aggregate({
+        where: {
+          tenantId,
+          account: { memberId: { in: memberIds } },
+          type: 'LOAN_REPAYMENT',
+          status: 'COMPLETED',
+        },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+    ]);
+
+    return {
+      stage: { id: stage.id, name: stage.name },
+      memberCount: memberIds.length,
+      deposits: {
+        totalAmount: depositAgg._sum.amount?.toNumber() ?? 0,
+        transactionCount: depositAgg._count.id,
+      },
+      loans: {
+        activeCount: loanAgg._count.id,
+        totalPrincipal: loanAgg._sum.principalAmount?.toNumber() ?? 0,
+        totalOutstanding: loanAgg._sum.outstandingBalance?.toNumber() ?? 0,
+      },
+      repayments: {
+        totalAmount: repaymentAgg._sum.amount?.toNumber() ?? 0,
+        transactionCount: repaymentAgg._count.id,
+      },
+    };
+  }
+
+  // ─── MANAGER/TENANT_ADMIN: ASSIGN/REMOVE MEMBER FROM STAGE ─────────────────
+
+  async assignMember(
+    stageId: string,
+    dto: AssignStageMemberDto,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const stage = await this.prisma.stage.findFirst({
+      where: { id: stageId, tenantId },
+      select: { id: true, name: true },
+    });
+    if (!stage) throw new NotFoundException('Stage not found');
+
+    const user = await this.prisma.user.findFirst({
+      where: { id: dto.memberUserId, tenantId },
+      select: { id: true, role: true, firstName: true, lastName: true },
+    });
+    if (!user) throw new NotFoundException('User not found in this tenant');
+
+    // Only MEMBER or CHAIRMAN can be assigned as stage members
+    if (!isMemberRole(user.role)) {
+      throw new BadRequestException(
+        `Only MEMBER or CHAIRMAN users can be assigned to a stage. User role: ${user.role}`,
+      );
+    }
+
+    const member = await this.prisma.member.findFirst({
+      where: { userId: user.id, tenantId },
+      select: { id: true },
+    });
+    if (!member) throw new NotFoundException('Member profile not found for this user');
+
+    const shouldAssign = dto.assign !== 'false';
+
+    if (shouldAssign) {
+      await this.prisma.memberStage.upsert({
+        where: { memberId_stageId: { memberId: member.id, stageId } },
+        create: {
+          memberId: member.id,
+          stageId,
+          isActive: true,
+          assignedBy: actor.id,
+        },
+        update: { isActive: true, assignedBy: actor.id },
+      });
+    } else {
+      await this.prisma.memberStage.updateMany({
+        where: { memberId: member.id, stageId },
+        data: { isActive: false },
+      });
+    }
+
+    await this.auditSafe({
+      tenantId,
+      userId: actor.id,
+      action: shouldAssign ? 'STAGE.MEMBER_ASSIGNED' : 'STAGE.MEMBER_REMOVED',
+      resource: 'Stage',
+      resourceId: stageId,
+      metadata: {
+        stageId,
+        memberUserId: dto.memberUserId,
+        memberId: member.id,
+        assignedBy: actor.id,
+        actorRole: actor.role,
+      },
+      ipAddress,
+    });
+
+    return {
+      success: true,
+      message: shouldAssign
+        ? `Member ${user.firstName} ${user.lastName} assigned to stage ${stage.name}`
+        : `Member ${user.firstName} ${user.lastName} removed from stage ${stage.name}`,
+    };
   }
 
   private async auditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {

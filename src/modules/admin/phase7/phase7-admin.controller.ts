@@ -6,6 +6,7 @@ import {
   Controller, Get, Post, Body, Query, Param,
   UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
+import { UserRole } from '@prisma/client';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { DataErasureService } from '../../governance/erasure/data-erasure.service';
 import { LineageService } from '../../governance/lineage/lineage.service';
@@ -34,7 +35,7 @@ export class Phase7AdminController {
   // ─── Data Governance ──────────────────────────────────────────────────────
 
   @Post('governance/erasure')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @HttpCode(HttpStatus.ACCEPTED)
   async queueErasure(
     @Body() body: { memberId: string; reason: string },
@@ -49,7 +50,7 @@ export class Phase7AdminController {
   }
 
   @Get('governance/lineage')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN', 'AUDITOR')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN, UserRole.AUDITOR)
   async getLineage(
     @Query('tenantId') tenantId: string,
     @Query('entity') entity?: string,
@@ -61,7 +62,7 @@ export class Phase7AdminController {
   }
 
   @Get('governance/export/audit-chain')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN', 'AUDITOR')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN, UserRole.AUDITOR)
   async exportAuditChain(@Query('tenantId') tenantId: string) {
     const [lineage, consentTrail] = await Promise.all([
       this.lineage.query({ tenantId, limit: 10000 }),
@@ -80,7 +81,7 @@ export class Phase7AdminController {
   // ─── Partner Ecosystem ────────────────────────────────────────────────────
 
   @Post('partners/onboard')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @HttpCode(HttpStatus.CREATED)
   async onboardPartner(
     @Body() body: {
@@ -96,7 +97,7 @@ export class Phase7AdminController {
   }
 
   @Get('partners/:id/usage')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   async getPartnerUsage(
     @Param('id') partnerId: string,
     @Query('period') period: 'DAY' | 'WEEK' | 'MONTH' = 'MONTH',
@@ -105,7 +106,7 @@ export class Phase7AdminController {
   }
 
   @Post('partners/reconcile')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @HttpCode(HttpStatus.OK)
   async reconcilePartner(
     @Body() body: { partnerId: string; invoicePeriod: string },
@@ -125,7 +126,7 @@ export class Phase7AdminController {
   }
 
   @Get('partners/:id/sla')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   async getPartnerSla(@Param('id') partnerId: string) {
     return this.slaMonitor.checkCompliance(partnerId);
   }
@@ -133,7 +134,7 @@ export class Phase7AdminController {
   // ─── Executive Reports ────────────────────────────────────────────────────
 
   @Get('reports/executive')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   async getExecutiveReport(
     @Query('tenantId') tenantId: string,
     @Query('period') period: 'MONTHLY' | 'QUARTERLY' = 'MONTHLY',
@@ -149,7 +150,7 @@ export class Phase7AdminController {
   // ─── Compliance Filing ────────────────────────────────────────────────────
 
   @Post('compliance/filing/submit')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @HttpCode(HttpStatus.ACCEPTED)
   async submitFiling(
     @Body() body: { filingType: 'CBK' | 'SASRA'; period: string },
@@ -171,7 +172,7 @@ export class Phase7AdminController {
   // ─── Stress Testing ───────────────────────────────────────────────────────
 
   @Post('stress-test/run')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @HttpCode(HttpStatus.OK)
   async runStressTest(
     @Body() body: { scenario: 'RATE_HIKE' | 'NPL_SPIKE' | 'LIQUIDITY_CRUNCH' },
@@ -183,7 +184,7 @@ export class Phase7AdminController {
   // ─── SRE / SLO ───────────────────────────────────────────────────────────
 
   @Get('sre/slo')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   async getSloReport(@Query('tenantId') tenantId: string) {
     return this.sloTracker.getSloReport(tenantId);
   }
@@ -191,7 +192,7 @@ export class Phase7AdminController {
   // ─── FinOps ───────────────────────────────────────────────────────────────
 
   @Get('finops/report')
-  @Roles('MANAGER', 'TENANT_ADMIN', 'SUPER_ADMIN')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   async getFinOpsReport(@Query('tenantId') tenantId: string) {
     return this.finOps.generateReport(tenantId);
   }

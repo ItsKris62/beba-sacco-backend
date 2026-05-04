@@ -1,5 +1,6 @@
-import { Controller, Get, UseGuards, Req, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Req, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
+import { UserRole } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { DashboardService, DashboardStats, DashboardReports } from './dashboard.service';
 import type { AuthenticatedRequest } from '../../common/types/request.types';
@@ -12,7 +13,7 @@ export class DashboardController {
 
   @Get('stats')
   @HttpCode(HttpStatus.OK)
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MANAGER', 'AUDITOR')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
   @ApiOperation({
     summary: 'Get dashboard KPIs',
     description: 'Returns aggregated financial KPIs. Cached in Redis for 15 minutes. Cache invalidated on new loan/repayment/savings records.',
@@ -24,7 +25,7 @@ export class DashboardController {
 
   @Get('reports')
   @HttpCode(HttpStatus.OK)
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'MANAGER', 'AUDITOR')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
   @ApiOperation({
     summary: 'Get dashboard reports',
     description: 'Returns loans by status, savings by week, and top defaulters.',

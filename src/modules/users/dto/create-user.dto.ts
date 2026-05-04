@@ -12,6 +12,7 @@ const ASSIGNABLE_ROLES = [
   UserRole.TELLER,
   UserRole.AUDITOR,
   UserRole.MEMBER,
+  UserRole.CHAIRMAN,
 ] as const;
 
 export class CreateUserDto {

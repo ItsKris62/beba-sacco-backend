@@ -15,10 +15,10 @@ import { IdempotencyService } from '../../common/services/idempotency.service';
 const TENANT_MANAGEABLE_ROLES: UserRole[] = [
   UserRole.TENANT_ADMIN,
   UserRole.MANAGER,
-  UserRole.LOAN_OFFICER,
   UserRole.TELLER,
   UserRole.AUDITOR,
   UserRole.MEMBER,
+  UserRole.CHAIRMAN,
 ];
 
 /**
@@ -26,8 +26,10 @@ const TENANT_MANAGEABLE_ROLES: UserRole[] = [
  * MANAGER cannot create or modify TENANT_ADMIN accounts — only TENANT_ADMIN can.
  */
 const MANAGER_MANAGEABLE_ROLES: UserRole[] = [
-  UserRole.LOAN_OFFICER,
+  UserRole.TELLER,
   UserRole.MEMBER,
+  UserRole.CHAIRMAN,
+  UserRole.AUDITOR,
 ];
 
 const USER_SELECT = {

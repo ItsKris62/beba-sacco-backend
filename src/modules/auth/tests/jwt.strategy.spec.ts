@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
 import { JwtStrategy, JwtPayload } from '../strategies/jwt.strategy';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { JwtBlocklistService } from '../jwt-blocklist.service';
 
 const mockPrismaService = {
   user: {
@@ -13,6 +14,10 @@ const mockPrismaService = {
 
 const mockConfigService = {
   getOrThrow: jest.fn().mockReturnValue('test-secret-32-chars-or-more!!!!!!'),
+};
+
+const mockJwtBlocklistService = {
+  isBlocked: jest.fn().mockResolvedValue(false),
 };
 
 describe('JwtStrategy', () => {
@@ -32,6 +37,7 @@ describe('JwtStrategy', () => {
         JwtStrategy,
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: ConfigService, useValue: mockConfigService },
+        { provide: JwtBlocklistService, useValue: mockJwtBlocklistService },
       ],
     }).compile();
 

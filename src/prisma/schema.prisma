@@ -27,10 +27,10 @@ datasource db {
 enum UserRole {
   SUPER_ADMIN  // Platform admin (Beba staff) – full unrestricted access
   TENANT_ADMIN // SACCO administrator – tenant-scoped, cannot manage super_admin
-  MANAGER      // Branch / department manager – can manage loan_officer, member
-  LOAN_OFFICER // Loan processing officer – can view/review members, process loans
-  TELLER       // Front-office staff
+  MANAGER      // Branch / department manager – can manage teller, member, chairman, auditor
+  TELLER       // Front-office staff – cash / M-Pesa handling
   MEMBER       // Ordinary SACCO member – personal dashboard only
+  CHAIRMAN     // Stage oversight – inherits MEMBER permissions + stage analytics
   AUDITOR      // Read-only compliance auditor
 
   @@schema("public")
@@ -54,7 +54,7 @@ enum AccountType {
 enum LoanStatus {
   DRAFT
   PENDING_GUARANTORS  // Waiting for guarantors to accept
-  UNDER_REVIEW        // Guarantors confirmed; awaiting loan officer decision
+  UNDER_REVIEW        // Guarantors confirmed; awaiting manager review
   PENDING_APPROVAL    // Legacy / direct-approval path (no guarantors required)
   APPROVED
   REJECTED
@@ -723,7 +723,7 @@ model LoanApprovalChain {
   loan     Loan   @relation(fields: [loanId], references: [id], onDelete: Cascade)
 
   approverId String  // userId of approver
-  role       String  // role at time of approval (MANAGER / LOAN_OFFICER)
+  role       String  // role at time of approval (MANAGER / TELLER)
   status     ApprovalStatus @default(PENDING)
   notes      String? @db.Text
 

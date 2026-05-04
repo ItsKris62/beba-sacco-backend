@@ -34,7 +34,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Roles(UserRole.MEMBER)
+@Roles(UserRole.MEMBER, UserRole.CHAIRMAN)
 @Controller('members')
 export class MemberPortalController {
   constructor(

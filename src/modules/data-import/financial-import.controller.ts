@@ -19,6 +19,7 @@ import {
   ApiBearerAuth,
   ApiResponse,
 } from '@nestjs/swagger';
+import { UserRole } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { FinancialImportService } from './financial-import.service';
 import {
@@ -37,7 +38,7 @@ export class FinancialImportController {
 
   @Post('financial-preview')
   @HttpCode(HttpStatus.OK)
-  @Roles('TENANT_ADMIN', 'MANAGER')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({
     summary: 'Preview financial CSV import',
@@ -72,7 +73,7 @@ export class FinancialImportController {
 
   @Post('execute-financial')
   @HttpCode(HttpStatus.OK)
-  @Roles('TENANT_ADMIN', 'MANAGER')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({
     summary: 'Execute financial CSV import',

@@ -9,7 +9,7 @@ import {
 import { UserRole } from '@prisma/client';
 import { Request } from 'express';
 import { StagesService } from './stages.service';
-import { CreateStageDto, UpdateStageDto, AssignStagePositionDto } from './dto/create-stage.dto';
+import { CreateStageDto, UpdateStageDto, AssignStagePositionDto, AssignStageMemberDto } from './dto/create-stage.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
@@ -141,7 +141,7 @@ export class StagesController {
    * dropdown during member creation.
    */
   @Get('search')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER, UserRole.TELLER)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER)
   @ApiOperation({
     summary: 'Global stage search (debounced)',
     description:
@@ -160,5 +160,68 @@ export class StagesController {
     @Query('limit') limit?: number,
   ) {
     return this.stagesService.search(tenant.id, q, { page, limit });
+  }
+
+  // ─── CHAIRMAN STAGE ENDPOINTS ─────────────────────────────────────────────
+
+  @Get(':id/members')
+  @Roles(UserRole.CHAIRMAN, UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'List members assigned to a stage (CHAIRMAN oversight)',
+    description:
+      'CHAIRMAN can view paginated members of their assigned stage. ' +
+      'ADMIN/MANAGER can view any stage within their tenant.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'Paginated member list for this stage' })
+  @ApiResponse({ status: 403, description: 'CHAIRMAN not assigned to this stage' })
+  getStageMembers(
+    @Param('id') id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.stagesService.findStageMembers(id, tenant.id, actor, { page, limit });
+  }
+
+  @Get(':id/analytics')
+  @Roles(UserRole.CHAIRMAN, UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'Stage analytics (deposit/loan aggregates)',
+    description:
+      'Returns aggregated deposit totals, active loan counts, and repayment summaries ' +
+      'for members assigned to this stage. CHAIRMAN scope limited to assigned stages.',
+  })
+  @ApiResponse({ status: 200, description: 'Stage analytics data' })
+  @ApiResponse({ status: 403, description: 'CHAIRMAN not assigned to this stage' })
+  getStageAnalytics(
+    @Param('id') id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.stagesService.getStageAnalytics(id, tenant.id, actor);
+  }
+
+  @Patch(':id/assign')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Assign or remove a member from a stage',
+    description:
+      'Adds or removes a MEMBER/CHAIRMAN from a stage. ' +
+      'Requires MANAGER or TENANT_ADMIN approval. Audit logged.',
+  })
+  @ApiResponse({ status: 200, description: 'Assignment updated' })
+  @ApiResponse({ status: 403, description: 'Promotion hierarchy violation' })
+  assignMember(
+    @Param('id') id: string,
+    @Body() dto: AssignStageMemberDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.stagesService.assignMember(id, dto, tenant.id, actor, req.ip);
   }
 }

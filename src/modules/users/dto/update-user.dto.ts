@@ -12,6 +12,7 @@ const UPDATABLE_ROLES = [
   UserRole.TELLER,
   UserRole.AUDITOR,
   UserRole.MEMBER,
+  UserRole.CHAIRMAN,
 ] as const;
 
 export class UpdateUserDto {

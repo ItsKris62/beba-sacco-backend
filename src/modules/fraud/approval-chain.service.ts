@@ -15,7 +15,7 @@ const DUAL_APPROVAL_THRESHOLD = 500_000;
  *
  * For loan disbursements ≥ KES 500,000:
  *   1. On disbursement request: create two approval slots
- *      (MANAGER + LOAN_OFFICER).
+ *      (MANAGER + TELLER).
  *   2. Both approvers must independently call `signOff()`.
  *   3. Only after both slots are APPROVED does disbursement proceed.
  *
@@ -37,7 +37,7 @@ export class ApprovalChainService {
 
   /**
    * Initialise an approval chain for a loan (call on APPROVED → DISBURSED transition).
-   * Creates two pending approval slots: one for MANAGER, one for LOAN_OFFICER.
+   * Creates two pending approval slots: one for MANAGER, one for TELLER.
    */
   async initApprovalChain(
     loanId: string,
@@ -61,7 +61,7 @@ export class ApprovalChainService {
    * An approver signs off on a loan disbursement.
    * @param loanId   Loan being signed off
    * @param approverId  userId of the approver
-   * @param role     Role of the approver (must be MANAGER or TELLER/LOAN_OFFICER)
+   * @param role     Role of the approver (must be MANAGER or TELLER)
    * @param approve  true = approve, false = reject
    * @param notes    Optional notes
    */

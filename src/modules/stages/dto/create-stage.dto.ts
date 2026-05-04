@@ -51,3 +51,18 @@ export class AssignStagePositionDto {
   @IsEnum(StagePositionDto)
   position?: StagePositionDto;
 }
+
+export class AssignStageMemberDto {
+  @ApiProperty({ description: 'Member user ID to assign or remove from stage' })
+  @IsString()
+  @IsNotEmpty()
+  memberUserId!: string;
+
+  @ApiPropertyOptional({
+    description: 'Set false to remove member from stage. Default true (assign).',
+    default: true,
+  })
+  @IsOptional()
+  @IsEnum(['true', 'false'])
+  assign?: 'true' | 'false';
+}

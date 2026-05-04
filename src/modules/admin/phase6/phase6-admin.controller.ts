@@ -12,6 +12,7 @@ import {
   Req,
 } from '@nestjs/common';
 import { Response, Request } from 'express';
+import { UserRole } from '@prisma/client';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { RealTimeAnalyticsService } from '../../analytics/sse/real-time-analytics.service';
 import { BehavioralRiskScorerService } from '../../fraud/risk-scorer/behavioral-risk-scorer.service';
@@ -35,7 +36,7 @@ import { CanaryService } from '../../deploy/canary/canary.service';
  *  POST /sandbox/reset                   – Sandbox reset
  */
 @Controller('admin')
-@Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+@Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
 export class Phase6AdminController {
   constructor(
     private readonly analyticsService: RealTimeAnalyticsService,
