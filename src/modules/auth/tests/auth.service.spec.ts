@@ -2,10 +2,14 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UnauthorizedException, ConflictException } from '@nestjs/common';
+import { getQueueToken } from '@nestjs/bullmq';
 import { UserRole } from '@prisma/client';
 import { AuthService } from '../auth.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
+import { JwtBlocklistService } from '../jwt-blocklist.service';
+import { SessionService } from '../session.service';
+import { QUEUE_NAMES } from '../../queue/queue.constants';
 
 // ─────────────────────────── Mocks ───────────────────────────
 
@@ -16,11 +20,20 @@ const mockPrismaService = {
     create: jest.fn(),
     update: jest.fn(),
   },
+  // Required by V-02 bulk session revocation in refreshToken() reuse branch
+  refreshSession: {
+    updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    findFirst: jest.fn().mockResolvedValue(null),
+  },
+  tenant: {
+    findUnique: jest.fn().mockResolvedValue({ name: 'Test SACCO' }),
+  },
 };
 
 const mockJwtService = {
   sign: jest.fn().mockReturnValue('mock.jwt.token'),
   verify: jest.fn(),
+  decode: jest.fn(),
 };
 
 const mockConfigService = {
@@ -45,6 +58,25 @@ const mockConfigService = {
 
 const mockAuditService = {
   create: jest.fn().mockResolvedValue(undefined),
+};
+
+const mockJwtBlocklistService = {
+  add: jest.fn().mockResolvedValue(undefined),
+  isBlocked: jest.fn().mockResolvedValue(false),
+  addMany: jest.fn().mockResolvedValue(undefined),
+  cleanup: jest.fn().mockResolvedValue(undefined),
+};
+
+const mockSessionService = {
+  createSession: jest.fn().mockResolvedValue('mock-session-id'),
+  rotateSession: jest.fn().mockResolvedValue('mock-new-session-id'),
+  revokeSession: jest.fn().mockResolvedValue(undefined),
+  listSessions: jest.fn().mockResolvedValue([]),
+  generateDeviceId: jest.fn().mockReturnValue('mock-device-id'),
+};
+
+const mockEmailQueue = {
+  add: jest.fn().mockResolvedValue(undefined),
 };
 
 // ─────────────────────────── Test Suite ───────────────────────────
@@ -74,6 +106,9 @@ describe('AuthService', () => {
         { provide: JwtService, useValue: mockJwtService },
         { provide: ConfigService, useValue: mockConfigService },
         { provide: AuditService, useValue: mockAuditService },
+        { provide: JwtBlocklistService, useValue: mockJwtBlocklistService },
+        { provide: SessionService, useValue: mockSessionService },
+        { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
       ],
     }).compile();
 
@@ -149,7 +184,7 @@ describe('AuthService', () => {
 
   describe('register', () => {
     it('throws ConflictException when email is already taken', async () => {
-      mockPrismaService.user.findUnique.mockResolvedValue({ id: 'existing' });
+      mockPrismaService.user.findFirst.mockResolvedValue({ id: 'existing' });
 
       await expect(
         service.register(
@@ -188,11 +223,36 @@ describe('AuthService', () => {
       ).rejects.toThrow(UnauthorizedException);
     });
 
+    it('revokes all RefreshSessions when token reuse is detected', async () => {
+      mockJwtService.verify.mockReturnValue({ sub: baseUser.id, email: baseUser.email, tenantId: TENANT_ID });
+      mockPrismaService.user.findUnique.mockResolvedValue({
+        ...baseUser,
+        // Non-null refreshToken so the flow reaches argon2.verify
+        refreshToken: '$argon2id$stored-hash',
+      });
+      // argon2.verify returns false → reuse detected
+      jest.spyOn(require('argon2'), 'verify').mockResolvedValueOnce(false);
+
+      await expect(
+        service.refreshToken({ refreshToken: 'reused.token' }, TENANT_ID),
+      ).rejects.toThrow(UnauthorizedException);
+
+      // V-02: all RefreshSession records must be revoked
+      expect(mockPrismaService.refreshSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ userId: baseUser.id, isRevoked: false }),
+          data: { isRevoked: true },
+        }),
+      );
+
+      // Audit log must capture the reuse event
+      expect(mockAuditService.create).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'AUTH.TOKEN.REUSE_DETECTED' }),
+      );
+    });
+
     // TODO: mock argon2.verify → true and assert new token pair returned
     it.todo('returns new token pair and stores new refresh hash');
-
-    // TODO: mock argon2.verify → false and assert token reuse audit event fired
-    it.todo('detects token reuse and clears stored refresh token');
   });
 
   // ─── logout ──────────────────────────────────────────────────
@@ -201,7 +261,8 @@ describe('AuthService', () => {
     it('clears refresh token in DB', async () => {
       mockPrismaService.user.update.mockResolvedValue({});
 
-      await service.logout('user-id', TENANT_ID, '127.0.0.1');
+      // Pass undefined for accessTokenJti (no blocklist interaction needed for this test)
+      await service.logout('user-id', TENANT_ID, undefined, '127.0.0.1');
 
       expect(mockPrismaService.user.update).toHaveBeenCalledWith({
         where: { id: 'user-id' },
@@ -209,10 +270,18 @@ describe('AuthService', () => {
       });
     });
 
+    it('blocklists the access token JTI when provided', async () => {
+      mockPrismaService.user.update.mockResolvedValue({});
+
+      await service.logout('user-id', TENANT_ID, 'mock-jti-uuid', '127.0.0.1');
+
+      expect(mockJwtBlocklistService.add).toHaveBeenCalledWith('mock-jti-uuid');
+    });
+
     it('writes AUTH.LOGOUT audit log', async () => {
       mockPrismaService.user.update.mockResolvedValue({});
 
-      await service.logout('user-id', TENANT_ID, '127.0.0.1');
+      await service.logout('user-id', TENANT_ID, undefined, '127.0.0.1');
 
       expect(mockAuditService.create).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'AUTH.LOGOUT', userId: 'user-id' }),
