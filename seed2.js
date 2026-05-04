@@ -1,8 +1,8 @@
 ﻿process.env.DATABASE_URL = process.env.DATABASE_URL || require('fs').readFileSync('.env','utf8').match(/DATABASE_URL="([^"]+)"/)?.[1];
 const { PrismaClient } = require('@prisma/client');
+const argon2 = require('argon2');
 const p = new PrismaClient();
-let bcrypt; try { bcrypt = require('bcrypt'); } catch(e) { try { bcrypt = require('bcryptjs'); } catch(e2) { bcrypt = null; } }
-async function hp(pw) { if (bcrypt) return bcrypt.hash(pw, 10); const c = require('crypto'); return '$2b$10$devplaceholder' + c.createHash('sha256').update(pw).digest('hex').slice(0,36); }
+async function hp(pw) { return argon2.hash(pw, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 }); }
 async function run() {
   const t = await p.tenant.upsert({ where:{slug:'beba-sacco'}, update:{status:'ACTIVE'}, create:{name:'Beba SACCO',slug:'beba-sacco',schemaName:'tenant_beba_sacco',status:'ACTIVE',contactEmail:'admin@beba-sacco.com',contactPhone:'+254700000000',address:'Nairobi, Kenya',settings:{}} });
   console.log('Tenant ID:', t.id);

@@ -155,7 +155,13 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const passwordValid = await argon2.verify(user.passwordHash, loginDto.password);
+    let passwordValid: boolean;
+    try {
+      passwordValid = await argon2.verify(user.passwordHash, loginDto.password);
+    } catch {
+      // argon2.verify() throws on non-argon2 hashes (e.g. legacy bcrypt)
+      passwordValid = false;
+    }
     if (!passwordValid) {
       await this.writeAuditSafe({
         tenantId,
@@ -766,7 +772,12 @@ export class AuthService {
 
     if (!user || !user.isActive) return null;
 
-    const valid = await argon2.verify(user.passwordHash, password);
+    let valid: boolean;
+    try {
+      valid = await argon2.verify(user.passwordHash, password);
+    } catch {
+      valid = false;
+    }
     if (!valid) return null;
 
     return {
