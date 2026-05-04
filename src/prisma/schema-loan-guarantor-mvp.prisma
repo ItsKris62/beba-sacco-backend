@@ -1,0 +1,227 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// MVP: LOAN APPLICATION & GUARANTOR WORKFLOW – SCHEMA ADDITIONS
+// These models extend the existing Beba SACCO schema with:
+//   - GuarantorRequest (explicit consent workflow)
+//   - GuarantorConsentLog (tamper-resistant consent evidence)
+//   - LoanApplication (formal application record separate from Loan)
+//   - Enhanced AuditLog with correlationId & digitalAcknowledgment
+// ─────────────────────────────────────────────────────────────────────────────
+
+// New enums for the guarantor consent workflow
+enum GuarantorRequestStatus {
+  PENDING_CONSENT    // Initial state — awaiting guarantor action
+  CONSENT_ACCEPTED   // Guarantor explicitly accepted
+  CONSENT_DECLINED   // Guarantor explicitly declined
+  CONSENT_EXPIRED    // 72-hour window elapsed without response
+  REVOKED            // Guarantor withdrew consent (post-acceptance, if allowed)
+
+  @@schema("public")
+}
+
+enum LoanProductType {
+  DEVELOPMENT        // Standard development loan
+  JIPANGE            // Self-organized group loan (chama)
+
+  @@schema("public")
+}
+
+// ─── Guarantor Request ───────────────────────────────────────────────────────
+// Replaces the legacy Guarantor model for the consent workflow.
+// A GuarantorRequest is created per guarantor per loan application.
+model GuarantorRequest {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  loanId    String
+  loan      Loan     @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  memberId  String   // The member being asked to guarantee
+  member    Member   @relation(fields: [memberId], references: [id])
+
+  status            GuarantorRequestStatus @default(PENDING_CONSENT)
+  guaranteedAmount  Decimal                @db.Decimal(18, 4)
+
+  // Invitation metadata
+  invitedAt   DateTime  @default(now())
+  invitedBy   String    // userId of officer who sent the invite
+  expiresAt   DateTime  // Computed: invitedAt + 72 hours
+
+  // Response metadata (populated on accept/decline)
+  respondedAt DateTime?
+  responseIp  String?   // IP address at time of consent
+  userAgent   String?   // User agent at time of consent
+  deviceId    String?   // Optional device fingerprint
+  digitalAcknowledgment Boolean @default(false) // Explicit checkbox/API flag
+
+  notes       String?   @db.Text // Reason for decline, etc.
+
+  // Consent evidence link (immutable log)
+  consentLog  GuarantorConsentLog?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([loanId, memberId])
+  @@index([tenantId, memberId])
+  @@index([tenantId, status])
+  @@index([loanId, status])
+  @@index([expiresAt])
+  @@schema("public")
+}
+
+// ─── Guarantor Consent Log (Immutable) ───────────────────────────────────────
+// Tamper-resistant append-only record of every consent action.
+// Never updated, never deleted. Raw SQL / compliance exports only.
+model GuarantorConsentLog {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Link back to the request
+  guarantorRequestId String   @unique
+  guarantorRequest   GuarantorRequest @relation(fields: [guarantorRequestId], references: [id], onDelete: Cascade)
+
+  // Actor & context
+  memberId      String   // The guarantor member
+  action        String   // ACCEPT | DECLINE | EXPIRED | REVOKED
+
+  // Evidence bundle (SASRA/ODPC compliance)
+  timestamp           DateTime @default(now())
+  ipAddress           String?
+  userAgent           String?
+  deviceId            String?
+  digitalAcknowledgment Boolean @default(false)
+  correlationId       String   // X-Request-ID from the HTTP request
+
+  // Jurisdiction & retention
+  jurisdiction  String   @default("KE") // Kenya Data Protection Act
+  retentionYears Int     @default(7)    // 7-year retention for SACCO audits
+
+  // Immutable chain (optional tamper-evidence)
+  prevHash      String?  @db.Text
+  entryHash     String?  @db.Text
+
+  @@index([tenantId, memberId])
+  @@index([tenantId, timestamp])
+  @@index([correlationId])
+  @@schema("public")
+}
+
+// ─── Loan Application (Formal Record) ────────────────────────────────────────
+// Distinct from Loan (which tracks the disbursed facility).
+// Created at application time; linked Loan is created on approval.
+model LoanApplication {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  memberId      String
+  member        Member   @relation(fields: [memberId], references: [id])
+
+  loanProductId String
+  loanProduct   LoanProduct @relation(fields: [loanProductId], references: [id])
+
+  applicationNumber String   @unique // LA-2025-000001
+  status        LoanApplicationStatus @default(DRAFT)
+
+  // Requested terms
+  principalAmount   Decimal @db.Decimal(18, 4)
+  tenureMonths      Int
+  purpose           String? @db.Text
+
+  // Eligibility snapshot at application time
+  kycStatusAtApply  String  // APPROVED | PENDING_REVIEW | REJECTED
+  fosaBalanceAtApply Decimal @db.Decimal(18, 4)
+  bosaBalanceAtApply Decimal @db.Decimal(18, 4)
+  hasDefaultedLoan  Boolean @default(false)
+
+  // Guarantee coverage
+  requiredGuarantors Int     @default(2)
+  guarantorCoverage  Decimal @default(0) @db.Decimal(18, 4) // Sum of accepted guarantees
+
+  // Linked loan (created on approval)
+  loanId    String?  @unique
+  loan      Loan?    @relation(fields: [loanId], references: [id])
+
+  // Decision trail
+  submittedAt   DateTime?
+  reviewedAt    DateTime?
+  reviewedBy    String?   // userId
+  decisionReason String?  @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guarantorRequests GuarantorRequest[]
+
+  @@unique([tenantId, applicationNumber])
+  @@index([tenantId, memberId])
+  @@index([tenantId, status])
+  @@schema("public")
+}
+
+// ─── Enhanced Loan Status Enum ───────────────────────────────────────────────
+// Extended with PENDING_CONSENT for the guarantor workflow.
+enum LoanApplicationStatus {
+  DRAFT
+  SUBMITTED           // Member submitted; awaiting staff review
+  PENDING_GUARANTORS  // Staff approved for guarantor solicitation
+  PENDING_CONSENT     // Guarantors invited; awaiting responses
+  UNDER_REVIEW        // All guarantors responded; awaiting final approval
+  APPROVED
+  REJECTED
+  CONVERTED_TO_LOAN   // Linked Loan created and disbursed
+
+  @@schema("public")
+}
+
+// ─── Member Blacklist (SACCO-level) ──────────────────────────────────────────
+// Tracks members who are barred from guaranteeing or borrowing.
+model MemberBlacklist {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  memberId    String
+  member      Member   @relation(fields: [memberId], references: [id])
+
+  reason      String   @db.Text
+  blacklistedBy String // userId
+  blacklistedAt DateTime @default(now())
+
+  // Scope of blacklist
+  canBorrow     Boolean @default(false)
+  canGuarantee  Boolean @default(false)
+
+  // Review & appeal
+  reviewDate    DateTime?
+  liftedAt      DateTime?
+  liftedBy      String?
+  liftReason    String?  @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, memberId])
+  @@index([tenantId, memberId])
+  @@schema("public")
+}
+
+// ─── Tenant Guarantee Settings ───────────────────────────────────────────────
+// Configurable per-tenant: max concurrent guarantees, coverage ratio, etc.
+model TenantGuaranteeConfig {
+  id            String   @id @default(uuid())
+  tenantId      String   @unique
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  maxConcurrentGuarantees Int @default(3)  // Max loans a member can guarantee simultaneously
+  minCoverageRatio        Decimal @default("1.00") @db.Decimal(5, 4) // 100% of principal
+  consentExpiryHours      Int @default(72) // How long guarantors have to respond
+  requireDigitalAck       Boolean @default(true) // Require explicit digital acknowledgment
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@schema("public")
+}

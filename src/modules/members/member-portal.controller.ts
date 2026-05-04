@@ -1,6 +1,6 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query,
-  HttpCode, HttpStatus, Req, UseGuards,
+  Controller, Get, Post, Patch, Body, Param, Query, ParseUUIDPipe,
+  HttpCode, HttpStatus, Req, UseGuards, ForbiddenException,
 } from '@nestjs/common';
 import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
@@ -10,6 +10,7 @@ import { UserRole } from '@prisma/client';
 import { Request } from 'express';
 import { MembersService } from './members.service';
 import { LoansService } from '../loans/loans.service';
+import { LoanApplicationService } from '../loans/loan-application.service';
 import { MpesaService } from '../mpesa/mpesa.service';
 import { StatementService } from '../statements/statement.service';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -19,7 +20,7 @@ import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { MemberDepositDto } from '../mpesa/dto/deposit-request.dto';
 import { ApplyLoanDto } from '../loans/dto/apply-loan.dto';
-import { GuarantorResponseDto } from '../loans/dto/guarantor-response.dto';
+import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 
 /**
@@ -34,12 +35,13 @@ import { PrismaService } from '../../prisma/prisma.service';
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Roles(UserRole.MEMBER, UserRole.CHAIRMAN)
+@Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER)
 @Controller('members')
 export class MemberPortalController {
   constructor(
     private readonly members: MembersService,
     private readonly loans: LoansService,
+    private readonly loanApp: LoanApplicationService,
     private readonly mpesa: MpesaService,
     private readonly statements: StatementService,
     private readonly prisma: PrismaService,
@@ -156,27 +158,58 @@ export class MemberPortalController {
     return this.loans.apply(safeDto, tenant.id, user.id, req.ip);
   }
 
-  // ─── GUARANTOR RESPONSE ────────────────────────────────────────────────────
+  // ─── GUARANTOR STATUS ──────────────────────────────────────────────────────
+
+  @Get('loans/:id/guarantor-status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Get guarantor status for a loan',
+    description: 'Members can view the status of guarantors for their own loan applications.',
+  })
+  @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiResponse({ status: 200, description: 'Guarantor status list' })
+  async getGuarantorStatus(
+    @Param('id', ParseUUIDPipe) loanId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    const memberId = await this.resolveMemberId(user.id, tenant.id);
+    // Verify the loan belongs to this member
+    const loan = await this.prisma.loan.findFirst({
+      where: { id: loanId, tenantId: tenant.id, memberId },
+      select: { id: true },
+    });
+    if (!loan) throw new ForbiddenException('Loan not found or does not belong to you');
+    return this.loanApp.getGuarantorStatus(loanId, tenant.id);
+  }
+
+  // ─── GUARANTOR CONSENT RESPONSE ────────────────────────────────────────────
 
   @Post('loans/:id/guarantor-response')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Respond to a guarantor invitation',
-    description: 'Accept or reject a loan guarantor request. OTP/email verification stub (MVP: placeholder).',
+    summary: 'Respond to a guarantor invitation (explicit consent)',
+    description:
+      'Accept or decline a loan guarantor request with explicit digital acknowledgment. ' +
+      'Requires digitalAcknowledgment=true. 72h expiry window enforced. ' +
+      'Idempotent via Redis. Only the targeted guarantor can respond.',
   })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
-  @ApiResponse({ status: 200, description: 'Response recorded' })
+  @ApiResponse({ status: 200, description: 'Response recorded with consent evidence' })
+  @ApiResponse({ status: 400, description: 'Expired consent or missing acknowledgment' })
+  @ApiResponse({ status: 403, description: 'Not authorized to respond to this request' })
+  @ApiResponse({ status: 409, description: 'Already responded or processing' })
   async guarantorResponse(
-    @Param('id') loanId: string,
-    @Body() dto: GuarantorResponseDto,
+    @Param('id', ParseUUIDPipe) loanId: string,
+    @Body() dto: GuarantorConsentResponseDto,
     @CurrentUser() user: AuthenticatedUser,
     @CurrentTenant() tenant: Tenant,
     @Req() req: Request,
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
-    // MVP: OTP/email verification stub — always pass for now
-    // Phase 2+: integrate SMS/Email OTP verification here
-    return this.loans.respondAsGuarantor(loanId, memberId, dto, tenant.id, req.ip);
+    // Use the new LoanApplicationService for enhanced consent flow
+    // The service validates: JWT ownership, 72h expiry, digital ack, idempotency
+    return this.loanApp.guarantorResponse(loanId, memberId, dto, tenant.id, user.id, req);
   }
 
   // ─── M-PESA DEPOSIT ────────────────────────────────────────────────────────
