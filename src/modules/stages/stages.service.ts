@@ -268,6 +268,76 @@ export class StagesService {
     return assignment;
   }
 
+  // ─── GLOBAL SEARCH (MVP) ───────────────────────────────────────────────────
+
+  /**
+   * Search all stages across the location hierarchy for a given tenant.
+   * Returns a flat list with embedded county/sub-county/ward data so the
+   * frontend can display location context without additional API calls.
+   *
+   * Debounce is handled entirely on the frontend (300ms via useDebounce).
+   * The backend simply treats this as a regular paginated query.
+   */
+  async search(
+    tenantId: string,
+    query: string,
+    opts: { page?: number; limit?: number } = {},
+  ) {
+    const page = Math.max(1, opts.page ?? 1);
+    const limit = Math.min(50, Math.max(1, opts.limit ?? 20));
+    const skip = (page - 1) * limit;
+
+    const where = {
+      tenantId,
+      name: { contains: query, mode: 'insensitive' as const },
+    };
+
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.stage.findMany({
+        where,
+        select: {
+          id: true,
+          name: true,
+          tenantId: true,
+          createdAt: true,
+          ward: {
+            select: {
+              id: true,
+              name: true,
+              constituency: {
+                select: {
+                  id: true,
+                  name: true,
+                  county: { select: { id: true, name: true } },
+                },
+              },
+            },
+          },
+        },
+        skip,
+        take: limit,
+        orderBy: { name: 'asc' as const },
+      }),
+      this.prisma.stage.count({ where }),
+    ]);
+
+    // Flatten location hierarchy into each record for easy frontend consumption
+    const flattened = data.map((stage) => ({
+      id: stage.id,
+      name: stage.name,
+      tenantId: stage.tenantId,
+      createdAt: stage.createdAt,
+      wardId: stage.ward.id,
+      wardName: stage.ward.name,
+      constituencyId: stage.ward.constituency.id,
+      constituencyName: stage.ward.constituency.name,
+      countyId: stage.ward.constituency.county.id,
+      countyName: stage.ward.constituency.county.name,
+    }));
+
+    return { data: flattened, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  }
+
   private async auditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {
     await this.audit.create(params).catch((e: unknown) =>
       this.logger.error('Audit write failed', e instanceof Error ? e.stack : e),

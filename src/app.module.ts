@@ -15,7 +15,7 @@ import { validationSchema } from './common/config/validation.schema';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { JwtAuthGuard } from './common/guards/jwt.guard';
-import { RolesGuard } from './common/guards/roles.guard';
+import { RBACGuard } from './common/guards/rbac.guard';
 import { TenantInterceptor } from './common/interceptors/tenant.interceptor';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
@@ -168,7 +168,7 @@ import { AuditService } from './modules/audit/audit.service';
     // ── Global Guards (order matters) ──────────────────────────
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
-    { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: RBACGuard },
 
     // ── Global Interceptors (order matters) ───────────────────
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },

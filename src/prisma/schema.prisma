@@ -25,11 +25,12 @@ datasource db {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum UserRole {
-  SUPER_ADMIN  // Platform admin (Beba staff)
-  TENANT_ADMIN // SACCO administrator
-  MANAGER      // Branch / department manager
+  SUPER_ADMIN  // Platform admin (Beba staff) – full unrestricted access
+  TENANT_ADMIN // SACCO administrator – tenant-scoped, cannot manage super_admin
+  MANAGER      // Branch / department manager – can manage loan_officer, member
+  LOAN_OFFICER // Loan processing officer – can view/review members, process loans
   TELLER       // Front-office staff
-  MEMBER       // Ordinary SACCO member
+  MEMBER       // Ordinary SACCO member – personal dashboard only
   AUDITOR      // Read-only compliance auditor
 
   @@schema("public")
@@ -443,9 +444,10 @@ model Member {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  accounts    Account[]
-  loans       Loan[]
-  guarantors  Guarantor[]
+  accounts         Account[]
+  loans            Loan[]
+  guarantors       Guarantor[]
+  stageAssignments MemberStage[] // MVP: many-to-many with Stage
 
   @@unique([tenantId, memberNumber])
   @@index([tenantId])
@@ -1349,14 +1351,15 @@ enum StagePosition {
 }
 
 model Stage {
-  id          String          @id @default(cuid())
-  name        String
-  wardId      String
-  ward        Ward            @relation(fields: [wardId], references: [id])
-  tenantId    String
-  assignments StageAssignment[]
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  id           String          @id @default(cuid())
+  name         String
+  wardId       String
+  ward         Ward            @relation(fields: [wardId], references: [id])
+  tenantId     String
+  assignments  StageAssignment[]
+  memberStages MemberStage[]   // MVP: Member → Stage M2M
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
 
   @@unique([name, wardId, tenantId])
   @@index([tenantId])
@@ -1364,6 +1367,7 @@ model Stage {
   @@schema("public")
 }
 
+// ── User → Stage assignment (legacy, keep for backward compat) ───────────────
 model StageAssignment {
   id       String        @id @default(cuid())
   userId   String
@@ -1377,6 +1381,25 @@ model StageAssignment {
   @@unique([userId, stageId])
   @@index([stageId])
   @@index([userId])
+  @@schema("public")
+}
+
+// ── Member → Stage M2M (MVP requirement) ─────────────────────────────────────
+// Replaces location drilling. Selecting a stage auto-resolves county/sub-county/ward.
+model MemberStage {
+  id         String   @id @default(cuid())
+  memberId   String
+  member     Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  stageId    String
+  stage      Stage    @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  assignedAt DateTime @default(now())
+  isActive   Boolean  @default(true)
+  assignedBy String?  // userId of staff who assigned the stage
+
+  @@unique([memberId, stageId])
+  @@index([memberId])
+  @@index([stageId])
+  @@index([isActive])
   @@schema("public")
 }
 

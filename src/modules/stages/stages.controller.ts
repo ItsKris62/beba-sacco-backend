@@ -129,4 +129,36 @@ export class StagesController {
   ) {
     return this.stagesService.assignPosition(id, dto, tenant.id, actor.id, req.ip);
   }
+
+  // ─── GLOBAL STAGE SEARCH (MVP) ────────────────────────────────────────────
+
+  /**
+   * GET /api/v1/stages/search?q={query}
+   *
+   * Debounced global stage search across all counties/sub-counties/wards.
+   * Returns flat list of stages with embedded location data.
+   * Frontend uses this with a 300ms debounce for the single searchable
+   * dropdown during member creation.
+   */
+  @Get('search')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER, UserRole.TELLER)
+  @ApiOperation({
+    summary: 'Global stage search (debounced)',
+    description:
+      'Searches all stages across counties/sub-counties/wards by name. ' +
+      'Used by the member creation form for the single searchable stage dropdown. ' +
+      'Backend auto-resolves county, sub-county, ward from the selected Stage.',
+  })
+  @ApiQuery({ name: 'q', required: true, description: 'Search query (stage name)' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'Paginated stage search results with location hierarchy' })
+  searchStages(
+    @CurrentTenant() tenant: Tenant,
+    @Query('q') q: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.stagesService.search(tenant.id, q, { page, limit });
+  }
 }

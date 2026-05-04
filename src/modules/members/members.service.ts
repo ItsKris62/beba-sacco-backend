@@ -61,6 +61,17 @@ export class MembersService {
     const existing = await this.prisma.member.findUnique({ where: { userId: dto.userId } });
     if (existing) throw new ConflictException('User already has a member profile');
 
+    // Validate stageIds if provided — all must belong to this tenant
+    if (dto.stageIds && dto.stageIds.length > 0) {
+      const stages = await this.prisma.stage.findMany({
+        where: { id: { in: dto.stageIds }, tenantId },
+        select: { id: true },
+      });
+      if (stages.length !== dto.stageIds.length) {
+        throw new BadRequestException('One or more stage IDs are invalid or do not belong to this tenant');
+      }
+    }
+
     // Atomic member number generation
     const counter = await this.prisma.tenantCounter.upsert({
       where: { tenantId },
@@ -69,18 +80,36 @@ export class MembersService {
     });
     const memberNumber = `M-${String(counter.memberSeq).padStart(6, '0')}`;
 
-    const member = await this.prisma.member.create({
-      data: {
-        tenantId,
-        userId: dto.userId,
-        memberNumber,
-        nationalId: dto.nationalId,
-        kraPin: dto.kraPin,
-        employer: dto.employer,
-        occupation: dto.occupation,
-        dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
-      },
-      include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
+    const member = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.member.create({
+        data: {
+          tenantId,
+          userId: dto.userId,
+          memberNumber,
+          nationalId: dto.nationalId,
+          kraPin: dto.kraPin,
+          employer: dto.employer,
+          occupation: dto.occupation,
+          dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
+        },
+        include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
+      });
+
+      // Create MemberStage join records — backend auto-resolves location
+      if (dto.stageIds && dto.stageIds.length > 0) {
+        const uniqueStageIds = [...new Set(dto.stageIds)];
+        await tx.memberStage.createMany({
+          data: uniqueStageIds.map((stageId) => ({
+            memberId: created.id,
+            stageId,
+            assignedBy: createdBy,
+            isActive: true,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      return created;
     });
 
     await this.audit.create({
@@ -89,7 +118,7 @@ export class MembersService {
       action: 'MEMBER.CREATE',
       resource: 'Member',
       resourceId: member.id,
-      metadata: { memberNumber, linkedUserId: dto.userId },
+      metadata: { memberNumber, linkedUserId: dto.userId, stageIds: dto.stageIds },
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 

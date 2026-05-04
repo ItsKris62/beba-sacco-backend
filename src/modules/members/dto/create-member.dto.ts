@@ -5,11 +5,15 @@ import {
   IsDateString,
   Matches,
   IsUUID,
+  IsArray,
 } from 'class-validator';
 
 /**
  * Admin/Manager creates a Member profile for an existing User.
  * Tenant is derived from X-Tenant-ID header — never from the body.
+ *
+ * MVP: Stage assignment is streamlined — pass stageIds and the backend
+ * auto-resolves county/sub-county/ward from each Stage record.
  */
 export class CreateMemberDto {
   @ApiProperty({
@@ -43,4 +47,14 @@ export class CreateMemberDto {
   @IsOptional()
   @IsDateString()
   dateOfBirth?: string;
+
+  @ApiPropertyOptional({
+    description: 'Stage IDs to assign to this member. Backend auto-resolves county/sub-county/ward.',
+    example: ['stage-uuid-1', 'stage-uuid-2'],
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  stageIds?: string[];
 }
