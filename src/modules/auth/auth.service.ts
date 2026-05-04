@@ -16,6 +16,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { JwtBlocklistService } from './jwt-blocklist.service';
 import { tenantAsyncStorage } from '../../common/services/tenant-context.service';
+import { SessionService, DeviceInfo } from './session.service';
 import { LoginDto, LoginResponseDto, LoginUserDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
@@ -70,6 +71,7 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly auditService: AuditService,
     private readonly blocklist: JwtBlocklistService,
+    private readonly sessionService: SessionService,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
@@ -308,6 +310,7 @@ export class AuthService {
   async refreshToken(
     refreshDto: RefreshTokenDto,
     tenantId: string,
+    deviceInfo?: DeviceInfo,
     ipAddress?: string,
   ): Promise<RefreshTokenResponseDto> {
     let payload: JwtPayload;
@@ -342,7 +345,12 @@ export class AuthService {
 
     const isValid = await argon2.verify(user.refreshToken, refreshDto.refreshToken);
     if (!isValid) {
-      // Possible token reuse attack – clear stored token as a precaution
+      // Token reuse detected: revoke ALL active sessions and clear the stored hash.
+      // An attacker who obtained an old refresh token must not retain any foothold.
+      await this.prisma.refreshSession.updateMany({
+        where: { userId: user.id, isRevoked: false },
+        data: { isRevoked: true },
+      });
       await this.prisma.user.update({
         where: { id: user.id },
         data: { refreshToken: null },
@@ -353,10 +361,32 @@ export class AuthService {
         action: 'AUTH.TOKEN.REUSE_DETECTED',
         resource: 'User',
         resourceId: user.id,
-        metadata: { severity: 'HIGH' },
+        metadata: { severity: 'HIGH', sessionsRevoked: true },
         ipAddress,
       });
       throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    // V-03: If a RefreshSession record exists for this user, validate the device
+    // fingerprint and rotate the session. Sessions are created via SessionService
+    // (SessionController or future login flow). If none exists yet, skip silently
+    // so existing users without sessions aren't locked out during the rollout.
+    if (deviceInfo) {
+      const activeSession = await this.prisma.refreshSession.findFirst({
+        where: { userId: user.id, isRevoked: false, expiresAt: { gt: new Date() } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (activeSession) {
+        // rotateSession validates deviceId, marks old session revoked, creates new one.
+        // Throws ForbiddenException on device mismatch (propagates as 403 to client).
+        await this.sessionService.rotateSession(
+          activeSession.id,
+          user.id,
+          deviceInfo,
+          user.tenantId,
+          ipAddress,
+        );
+      }
     }
 
     const { accessToken, refreshToken } = this.generateTokens({

@@ -76,7 +76,7 @@ async function bootstrap() {
     origin: configService.get<string[]>('app.cors.origin', ['http://localhost:3001']),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type', 'X-Tenant-ID', 'X-Request-ID', 'X-Idempotency-Key'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Tenant-ID', 'X-Request-ID', 'X-Idempotency-Key', 'X-Timezone', 'X-Screen-Res'],
     exposedHeaders: ['X-Request-ID'],
   });
 

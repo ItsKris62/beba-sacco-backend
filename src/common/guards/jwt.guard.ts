@@ -24,7 +24,9 @@ import type { AuthenticatedUser } from '../../modules/auth/strategies/jwt.strate
  *     accessing any other protected resource. Routes decorated with
  *     @SkipPasswordCheck() are exempted (change-password, logout, refresh).
  *
- * Phase 2 hook: add jti Redis blocklist check in handleRequest after user validation.
+ * JTI blocklist check is performed in JwtStrategy.validate() using the raw JWT
+ * payload before the DB lookup. It does not need to be repeated here.
+ *
  * Phase 3 hook: add 2FA / TOTP verification step here or in a separate guard.
  */
 @Injectable()
@@ -77,10 +79,6 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
         );
       }
     }
-
-    // Phase 2 hook: check jti against Redis blocklist here for sub-15m revocation
-    // const jti = (user as any).jti;
-    // if (jti && await this.redisService.isBlocked(jti)) throw new UnauthorizedException(...)
 
     return user;
   }

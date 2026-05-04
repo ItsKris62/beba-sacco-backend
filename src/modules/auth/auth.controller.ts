@@ -19,6 +19,7 @@ import {
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { AuthService } from './auth.service';
+import type { DeviceInfo } from './session.service';
 import { LoginDto, LoginResponseDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
@@ -140,7 +141,12 @@ export class AuthController {
     @Body() refreshDto: RefreshTokenDto,
     @Req() req: TenantRequest,
   ): Promise<{ success: boolean; data: RefreshTokenResponseDto; error: null }> {
-    const data = await this.authService.refreshToken(refreshDto, req.tenant.id, req.ip);
+    const deviceInfo: DeviceInfo = {
+      userAgent: req.headers['user-agent'] ?? 'unknown',
+      timezone: req.headers['x-timezone'] as string | undefined,
+      screenRes: req.headers['x-screen-res'] as string | undefined,
+    };
+    const data = await this.authService.refreshToken(refreshDto, req.tenant.id, deviceInfo, req.ip);
     return { success: true, data, error: null };
   }
 

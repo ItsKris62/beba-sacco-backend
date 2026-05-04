@@ -16,7 +16,7 @@
  * SASRA compliance: token revocation must be effective within seconds.
  * Redis SET is sub-millisecond, so revocation is immediate.
  */
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { RedisService } from '../../common/services/redis.service';
 
 @Injectable()
@@ -43,9 +43,13 @@ export class JwtBlocklistService {
     const ok = await this.redis.set(key, '1', ttlSec);
     if (!ok) {
       this.logger.error(`Failed to blocklist token ${jti.slice(0, 8)}… — Redis unavailable`);
-    } else {
-      this.logger.log(`Token ${jti.slice(0, 8)}… added to blocklist (TTL ${ttlSec}s)`);
+      // Fail closed: a failed revocation write must not silently succeed.
+      // The caller (logout, password-change) should surface this to the client.
+      throw new ServiceUnavailableException(
+        'Token revocation temporarily unavailable — please try again',
+      );
     }
+    this.logger.log(`Token ${jti.slice(0, 8)}… added to blocklist (TTL ${ttlSec}s)`);
   }
 
   /**

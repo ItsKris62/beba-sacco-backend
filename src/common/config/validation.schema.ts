@@ -16,8 +16,19 @@ export const validationSchema = Joi.object({
     .default('development'),
   PORT: Joi.number().default(3000),
   API_PREFIX: Joi.string().default('api'),
-  // Frontend base URL — used in password-reset email links; must be a real URL in prod
-  APP_URL: Joi.string().uri().required(),
+  // Frontend base URL — used in password-reset email links.
+  // Must be HTTPS in production to prevent reset tokens being sent over plain HTTP.
+  APP_URL: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string()
+      .uri()
+      .pattern(/^https:\/\//)
+      .required()
+      .messages({
+        'string.pattern.base': 'APP_URL must use HTTPS in production (got HTTP or missing protocol)',
+      }),
+    otherwise: Joi.string().uri().required(),
+  }),
 
   // ── Database (Neon PostgreSQL) ─────────────────────────────────────────────
   // DATABASE_URL  = pooler URL  (PgBouncer, for runtime queries + BullMQ)
