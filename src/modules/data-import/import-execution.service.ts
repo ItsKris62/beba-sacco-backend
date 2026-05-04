@@ -240,7 +240,7 @@ export class ImportExecutionService {
         const email = generateImportEmail(row.firstName, row.lastName, phone);
 
         // Check if email already exists (edge case)
-        const emailExists = await tx.user.findUnique({ where: { email } });
+        const emailExists = await tx.user.findFirst({ where: { email } });
         const finalEmail = emailExists
           ? `${email.split('@')[0]}.${row.rowNumber}@import.local`
           : email;

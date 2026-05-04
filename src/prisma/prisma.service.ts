@@ -6,6 +6,7 @@ import {
   INestApplication,
 } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { tenantAsyncStorage } from '../common/services/tenant-context.service';
 
 /**
  * Prisma Service - Database Connection Manager
@@ -89,6 +90,104 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       this.logger.error('❌ Failed to connect to database', error);
       throw error;
     }
+
+    this.attachTenantMiddleware();
+  }
+
+  /**
+   * Prisma middleware that auto-injects tenantId into every query.
+   * This is the final defense against cross-tenant data leakage.
+   */
+  private attachTenantMiddleware(): void {
+    const tenantScopedModels = new Set([
+      'User', 'Member', 'Account', 'Loan', 'LoanProduct',
+      'Transaction', 'Guarantor', 'MpesaTransaction', 'AuditLog',
+      'LoanApprovalChain', 'LoginSession', 'WebhookSubscription',
+      'IntegrationOutbox', 'CrbReport', 'AmlScreening',
+      'ProvisioningEntry', 'DsarRequest', 'SasraRatioSnapshot',
+      'CbkReturn', 'ApiClient', 'NotificationLog', 'ComplianceAlert',
+      'DataImportLog', 'TenantCounter', 'LoanRepayment', 'SavingsRecord',
+      'GroupWelfare', 'GroupWelfareCollection', 'RefreshSession',
+      'DataConsent', 'MemberApplication', 'Stage', 'StageAssignment',
+      'Partner', 'PartnerUsageSnapshot', 'SlaIncident', 'ExecutiveReport',
+      'FeatureFlag', 'RiskScore', 'FeatureSnapshot', 'TenantRegionConfig',
+      'CanaryDeployment', 'DataAccessLog', 'ConsentRegistry', 'ErasureRequest',
+    ]);
+
+    this.$use(async (params, next) => {
+      if (!params.model || !tenantScopedModels.has(params.model)) {
+        return next(params);
+      }
+
+      // Skip raw queries
+      if (params.action === 'executeRaw' || params.action === 'queryRaw') {
+        return next(params);
+      }
+
+      const store = tenantAsyncStorage.getStore();
+      const tenantId = store?.tenantId;
+
+      if (!tenantId) {
+        // Allow unscoped queries only for specific actions (e.g., seeding, migrations)
+        // In production HTTP context, tenantId should always be present.
+        return next(params);
+      }
+
+      // Inject tenantId into WHERE clauses for reads
+      if (
+        params.action === 'findUnique' ||
+        params.action === 'findFirst' ||
+        params.action === 'findMany' ||
+        params.action === 'count' ||
+        params.action === 'aggregate' ||
+        params.action === 'groupBy'
+      ) {
+        params.args.where = {
+          ...params.args.where,
+          tenantId,
+        };
+      }
+
+      // Inject tenantId into CREATE data
+      if (params.action === 'create' || params.action === 'createMany') {
+        if (Array.isArray(params.args.data)) {
+          params.args.data = params.args.data.map((d: Record<string, unknown>) => ({
+            ...d,
+            tenantId,
+          }));
+        } else {
+          params.args.data = {
+            ...params.args.data,
+            tenantId,
+          };
+        }
+      }
+
+      // Inject tenantId into UPDATE where + data
+      if (params.action === 'update' || params.action === 'updateMany') {
+        if (params.args.where) {
+          params.args.where = { ...params.args.where, tenantId };
+        }
+      }
+
+      if (params.action === 'upsert') {
+        if (params.args.where) {
+          params.args.where = { ...params.args.where, tenantId };
+        }
+        params.args.create = { ...params.args.create, tenantId };
+      }
+
+      // Inject tenantId into DELETE where
+      if (params.action === 'delete' || params.action === 'deleteMany') {
+        if (params.args.where) {
+          params.args.where = { ...params.args.where, tenantId };
+        }
+      }
+
+      return next(params);
+    });
+
+    this.logger.log('🔒 Tenant isolation middleware attached');
   }
 
   async onModuleDestroy() {

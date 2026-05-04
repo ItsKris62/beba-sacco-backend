@@ -29,8 +29,9 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
-import type { AuthenticatedUser } from './strategies/jwt.strategy';
+import type { AuthenticatedUser, JwtPayload } from './strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
+import { JwtService } from '@nestjs/jwt';
 
 /** Typed request shape after TenantInterceptor + JwtStrategy run */
 interface TenantRequest extends Request {
@@ -58,7 +59,23 @@ interface TenantRequest extends Request {
 @ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier', required: true })
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly jwtService: JwtService,
+  ) {}
+
+  /** Extract JTI from the Authorization header for immediate token revocation */
+  private extractJti(req: TenantRequest): string | undefined {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) return undefined;
+    try {
+      const token = authHeader.slice(7);
+      const payload = this.jwtService.decode(token) as JwtPayload | null;
+      return payload?.jti;
+    } catch {
+      return undefined;
+    }
+  }
 
   // ─────────────────────────── LOGIN ───────────────────────────
 
@@ -147,7 +164,8 @@ export class AuthController {
     @CurrentUser() user: AuthenticatedUser,
     @Req() req: TenantRequest,
   ): Promise<{ success: boolean; data: null; error: null }> {
-    await this.authService.logout(user.id, req.tenant.id, req.ip);
+    const jti = this.extractJti(req);
+    await this.authService.logout(user.id, req.tenant.id, jti, req.ip);
     return { success: true, data: null, error: null };
   }
 
@@ -172,6 +190,10 @@ export class AuthController {
     @CurrentUser() user: AuthenticatedUser,
     @Req() req: TenantRequest,
   ): Promise<{ success: boolean; data: null; error: null }> {
+    // If frontend didn't send JTI, extract it from the Authorization header
+    if (!dto.accessTokenJti) {
+      dto.accessTokenJti = this.extractJti(req);
+    }
     await this.authService.changePassword(user.id, req.tenant.id, dto, req.ip);
     return { success: true, data: null, error: null };
   }
@@ -225,6 +247,10 @@ export class AuthController {
     @Body() dto: ResetPasswordDto,
     @Req() req: TenantRequest,
   ): Promise<{ success: boolean; message: string }> {
+    // If user is logged in while resetting, extract JTI for immediate revocation
+    if (!dto.accessTokenJti) {
+      dto.accessTokenJti = this.extractJti(req);
+    }
     await this.authService.resetPassword(dto, req.tenant.id, req.ip);
     return {
       success: true,

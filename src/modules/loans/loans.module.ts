@@ -3,6 +3,8 @@ import { BullModule } from '@nestjs/bullmq';
 import { LoansController } from './loans.controller';
 import { LoansService } from './loans.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../common/services/redis.service';
+import { IdempotencyService } from '../../common/services/idempotency.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 
@@ -15,7 +17,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     ),
   ],
   controllers: [LoansController],
-  providers: [LoansService, PrismaService],
+  providers: [LoansService, PrismaService, RedisService, IdempotencyService],
   exports: [LoansService],
 })
 export class LoansModule {}

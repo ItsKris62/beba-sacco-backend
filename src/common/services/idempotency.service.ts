@@ -1,63 +1,111 @@
-import { Injectable, ConflictException } from '@nestjs/common';
-import { RedisService } from './redis.service';
-
-const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
-const KEY_PREFIX = 'idempotency:';
-
-export interface IdempotencyResult<T = unknown> {
-  isDuplicate: boolean;
-  cachedResponse?: T;
-}
-
 /**
  * Idempotency Service
  *
- * Implements the X-Idempotency-Key pattern:
- *   1. Client sends X-Idempotency-Key: <uuid> on mutating requests.
- *   2. Before processing, call check() — returns cached response on replay.
- *   3. After successful processing, call store() with the response.
- *   4. Key expires after 24 h (configurable).
+ * Prevents duplicate processing of mutation endpoints using Redis SET NX.
+ * Key pattern: idempotency:{tenantId}:{key}
  *
- * Critical paths: loan applications, M-Pesa STK push, account deposits.
+ * Flow:
+ *   1. Client generates idempotency key (e.g. UUID) per user action
+ *   2. Client sends X-Idempotency-Key header
+ *   3. Backend calls checkAndReserve() — if NEW, proceeds; if PROCESSING/COMPLETED, returns cached
+ *   4. On success, backend calls complete() to store the response
+ *   5. On failure, backend calls release() to allow retry
  *
- * If Redis is unavailable the service degrades gracefully (no dedup) rather
- * than blocking the request — financial operations should still proceed.
+ * TTL strategy:
+ *   - loan:apply      → 24 hours (financial decision — long window)
+ *   - guarantor:respond → 1 hour (quick decision)
+ *   - deposit:stk     → 2 minutes (STK timeout)
+ *   - default         → 1 hour
+ *
+ * SASRA compliance: all financial mutations must be idempotent.
  */
+import { Injectable, Logger } from '@nestjs/common';
+import { RedisService } from './redis.service';
+
+export type IdempotencyStatus = 'NEW' | 'PROCESSING' | 'COMPLETED';
+
+export interface IdempotencyResult<T = unknown> {
+  status: IdempotencyStatus;
+  result?: T;
+}
+
 @Injectable()
 export class IdempotencyService {
+  private readonly logger = new Logger(IdempotencyService.name);
+  private readonly PREFIX = 'idempotency';
+
   constructor(private readonly redis: RedisService) {}
 
-  async check<T>(key: string): Promise<IdempotencyResult<T>> {
-    const raw = await this.redis.get(`${KEY_PREFIX}${key}`);
-    if (!raw) return { isDuplicate: false };
+  /**
+   * Atomically reserve an idempotency key.
+   *
+   * @returns
+   *   NEW       → caller should proceed with the operation
+   *   PROCESSING→ another request is in-flight; caller should wait and retry
+   *   COMPLETED → operation already finished; caller should return cached result
+   */
+  async checkAndReserve(
+    key: string,
+    tenantId: string,
+    ttlSeconds = 3600,
+  ): Promise<IdempotencyResult> {
+    const redisKey = this.buildKey(key, tenantId);
+
+    // Try to reserve with SET NX (only set if key does NOT exist)
+    const reserved = await this.redis.set(redisKey, JSON.stringify({ status: 'PROCESSING' }), ttlSeconds, true);
+
+    if (reserved) {
+      this.logger.debug(`Idempotency NEW: ${redisKey}`);
+      return { status: 'NEW' };
+    }
+
+    // Key exists — read current status
+    const raw = await this.redis.get(redisKey);
+    if (!raw) {
+      // Race: key expired between SET NX and GET — treat as NEW
+      return { status: 'NEW' };
+    }
 
     try {
-      return { isDuplicate: true, cachedResponse: JSON.parse(raw) as T };
+      const parsed = JSON.parse(raw) as { status: string; result?: unknown };
+      if (parsed.status === 'COMPLETED') {
+        this.logger.log(`Idempotency COMPLETED hit: ${redisKey}`);
+        return { status: 'COMPLETED', result: parsed.result };
+      }
+      this.logger.debug(`Idempotency PROCESSING hit: ${redisKey}`);
+      return { status: 'PROCESSING' };
     } catch {
-      return { isDuplicate: false };
+      // Corrupted data — overwrite and proceed
+      await this.redis.set(redisKey, JSON.stringify({ status: 'PROCESSING' }), ttlSeconds);
+      return { status: 'NEW' };
     }
-  }
-
-  async store(key: string, response: unknown): Promise<void> {
-    await this.redis.set(
-      `${KEY_PREFIX}${key}`,
-      JSON.stringify(response),
-      IDEMPOTENCY_TTL_SECONDS,
-    );
   }
 
   /**
-   * Guard helper — throws ConflictException if the key is already used.
-   * Returns the cached response so callers can return it directly.
+   * Store the final response for replay on duplicate requests.
    */
-  async guardOrThrow<T>(key: string): Promise<T | null> {
-    const { isDuplicate, cachedResponse } = await this.check<T>(key);
-    if (isDuplicate) {
-      throw new ConflictException({
-        message: 'Duplicate request — this operation was already processed.',
-        cachedResponse,
-      });
-    }
-    return null;
+  async complete<T>(key: string, tenantId: string, result: T, ttlSeconds = 3600): Promise<void> {
+    const redisKey = this.buildKey(key, tenantId);
+    await this.redis.set(
+      redisKey,
+      JSON.stringify({ status: 'COMPLETED', result }),
+      ttlSeconds,
+    );
+    this.logger.debug(`Idempotency COMPLETED: ${redisKey}`);
+  }
+
+  /**
+   * Release the lock on error so the client can retry.
+   * Use with caution — only release on deterministic failures (validation errors),
+   * NOT on transient errors (DB timeout) where retry might succeed.
+   */
+  async release(key: string, tenantId: string): Promise<void> {
+    const redisKey = this.buildKey(key, tenantId);
+    await this.redis.del(redisKey);
+    this.logger.debug(`Idempotency RELEASED: ${redisKey}`);
+  }
+
+  private buildKey(key: string, tenantId: string): string {
+    return `${this.PREFIX}:${tenantId}:${key}`;
   }
 }

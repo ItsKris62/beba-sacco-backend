@@ -331,7 +331,7 @@ model User {
   tenantId           String
   tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  email              String   @unique
+  email              String
   passwordHash       String
   role               UserRole @default(MEMBER)
 
@@ -367,6 +367,7 @@ model User {
   member           Member?
   stageAssignments StageAssignment[]
 
+  @@unique([tenantId, email])
   @@index([tenantId])
   @@index([email])
   @@index([role])
@@ -465,6 +466,9 @@ model Account {
   // Balance stored as Decimal(18,4) – always use Decimal class, never number
   balance       Decimal     @default(0) @db.Decimal(18, 4)
   isActive      Boolean     @default(true)
+
+  // Optimistic locking version for concurrent balance updates
+  version       Int         @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

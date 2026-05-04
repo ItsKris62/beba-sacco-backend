@@ -77,8 +77,8 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
           defaultJobOptions: {
             removeOnComplete: 1000,
             removeOnFail: false,
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 2000 },
+            attempts: 5,
+            backoff: { type: 'exponential', delay: 5000 },
           },
         };
       },

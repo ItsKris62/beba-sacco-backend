@@ -10,6 +10,7 @@ import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
+import { IdempotencyService } from '../../common/services/idempotency.service';
 import { CreateLoanProductDto } from './dto/create-loan-product.dto';
 import { ApplyLoanDto } from './dto/apply-loan.dto';
 import { InviteGuarantorsDto } from './dto/invite-guarantors.dto';
@@ -44,6 +45,7 @@ export class LoansService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly redis: RedisService,
+    private readonly idempotency: IdempotencyService,
     @InjectQueue(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER)
     private readonly guarantorReminderQueue: Queue<GuarantorReminderJobPayload>,
     @InjectQueue(QUEUE_NAMES.EMAIL)
@@ -135,12 +137,56 @@ export class LoansService {
 
   // ─── LOAN APPLICATION ────────────────────────────────────────
 
-  async apply(dto: ApplyLoanDto, tenantId: string, appliedBy: string, ipAddress?: string) {
+  async apply(
+    dto: ApplyLoanDto,
+    tenantId: string,
+    appliedBy: string,
+    ipAddress?: string,
+    idempotencyKey?: string,
+  ) {
+    // Phase 2: Idempotency guard — prevent duplicate loan applications
+    if (idempotencyKey) {
+      const idemKey = `loan:apply:${appliedBy}:${dto.memberId}:${dto.loanProductId}:${idempotencyKey}`;
+      const check = await this.idempotency.checkAndReserve(idemKey, tenantId, 24 * 60 * 60);
+      if (check.status === 'COMPLETED') {
+        this.logger.log(`Idempotency cache hit for loan apply: ${idemKey}`);
+        return check.result as Awaited<ReturnType<LoansService['_doApply']>>;
+      }
+      if (check.status === 'PROCESSING') {
+        throw new ConflictException('Loan application is already being processed. Please wait.');
+      }
+    }
+
+    try {
+      const result = await this._doApply(dto, tenantId, appliedBy, ipAddress);
+      if (idempotencyKey) {
+        const idemKey = `loan:apply:${appliedBy}:${dto.memberId}:${dto.loanProductId}:${idempotencyKey}`;
+        await this.idempotency.complete(idemKey, tenantId, result, 24 * 60 * 60);
+      }
+      return result;
+    } catch (err) {
+      // Only release on validation errors (deterministic). Don't release on transient DB errors.
+      if (idempotencyKey && (err instanceof BadRequestException || err instanceof ConflictException)) {
+        const idemKey = `loan:apply:${appliedBy}:${dto.memberId}:${dto.loanProductId}:${idempotencyKey}`;
+        await this.idempotency.release(idemKey, tenantId);
+      }
+      throw err;
+    }
+  }
+
+  private async _doApply(dto: ApplyLoanDto, tenantId: string, appliedBy: string, ipAddress?: string) {
     const member = await this.prisma.member.findFirst({
       where: { id: dto.memberId, tenantId, isActive: true },
-      select: { id: true, memberNumber: true },
+      select: { id: true, memberNumber: true, kycStatus: true },
     });
     if (!member) throw new NotFoundException('Active member not found in this tenant');
+
+    // KYC must be verified before loan application
+    if (member.kycStatus !== 'APPROVED') {
+      throw new BadRequestException(
+        'KYC verification is required before applying for a loan. Please complete your KYC.',
+      );
+    }
 
     const product = await this.prisma.loanProduct.findFirst({
       where: { id: dto.loanProductId, tenantId, isActive: true },
@@ -159,6 +205,23 @@ export class LoansService {
 
     if (dto.tenureMonths > product.maxTenureMonths) {
       throw new BadRequestException(`Maximum tenure is ${product.maxTenureMonths} months`);
+    }
+
+    // Max loan limit: 3× total BOSA + FOSA balance
+    const accounts = await this.prisma.account.findMany({
+      where: { memberId: dto.memberId, tenantId, isActive: true },
+      select: { balance: true, accountType: true },
+    });
+    const totalDeposits = accounts.reduce(
+      (sum, acc) => sum.plus(new Decimal(acc.balance.toString())),
+      new Decimal(0),
+    );
+    const maxLoanLimit = totalDeposits.times(3);
+    if (principal.greaterThan(maxLoanLimit)) {
+      throw new BadRequestException(
+        `Loan amount exceeds your maximum eligible limit of KES ${maxLoanLimit.toFixed(2)} ` +
+          `(3× your total deposits of KES ${totalDeposits.toFixed(2)})`,
+      );
     }
 
     // Calculate processing fee and instalment
@@ -378,10 +441,21 @@ export class LoansService {
       );
     }
 
+    // Verify member KYC is approved before disbursement
+    const member = await this.prisma.member.findFirst({
+      where: { id: loan.memberId, tenantId },
+      select: { kycStatus: true },
+    });
+    if (member?.kycStatus !== 'APPROVED') {
+      throw new BadRequestException(
+        'KYC must be approved before loan disbursement.',
+      );
+    }
+
     // Locate the member's FOSA account for disbursement
     const fosaAccount = await this.prisma.account.findFirst({
       where: { memberId: loan.memberId, tenantId, accountType: 'FOSA', isActive: true },
-      select: { id: true, balance: true },
+      select: { id: true, balance: true, version: true },
     });
     if (!fosaAccount) {
       throw new BadRequestException(
@@ -392,75 +466,97 @@ export class LoansService {
     const principal = new Decimal(loan.principalAmount.toString());
     const reference = `DISB-${uuidv4()}`;
 
-    const disbursalResult = await this.prisma.$transaction(async (tx) => {
-      const account = await tx.account.findFirst({
-        where: { id: fosaAccount.id, isActive: true },
-      });
-      if (!account) throw new NotFoundException('FOSA account not found or inactive');
+    // Use SERIALIZABLE isolation on the direct client to prevent race conditions
+    // (lost updates) when two disbursements or a disbursement + deposit run concurrently.
+    const txClient = this.prisma.direct ?? this.prisma;
+    const disbursalResult = await txClient.$transaction(
+      async (tx) => {
+        // Lock account row with FOR UPDATE via raw query to get current balance + version
+        const lockedRows = await tx.$queryRaw`
+          SELECT id, balance, version FROM "Account"
+          WHERE id = ${fosaAccount.id} AND "tenantId" = ${tenantId}
+          FOR UPDATE
+        `;
+        const account = Array.isArray(lockedRows)
+          ? (lockedRows[0] as { id: string; balance: string; version: number } | undefined)
+          : undefined;
+        if (!account) throw new NotFoundException('FOSA account not found or inactive');
 
-      // Duplicate reference guard
-      const dupRef = await tx.transaction.findUnique({ where: { reference } });
-      if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
+        // Optimistic locking: ensure version hasn't changed since we read it
+        if (account.version !== fosaAccount.version) {
+          throw new ConflictException('Account was modified by another transaction. Please retry.');
+        }
 
-      const balanceBefore = new Decimal(account.balance.toString());
-      const balanceAfter = balanceBefore.plus(principal);
+        // Duplicate reference guard
+        const dupRef = await tx.transaction.findUnique({ where: { reference } });
+        if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
 
-      const txn = await tx.transaction.create({
-        data: {
+        const balanceBefore = new Decimal(account.balance.toString());
+        const balanceAfter = balanceBefore.plus(principal);
+        const newVersion = account.version + 1;
+
+        const txn = await tx.transaction.create({
+          data: {
+            tenantId,
+            accountId: fosaAccount.id,
+            loanId: id,
+            type: TransactionType.LOAN_DISBURSEMENT,
+            status: TransactionStatus.COMPLETED,
+            amount: principal.toDecimalPlaces(4).toString(),
+            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+            reference,
+            description: `Loan disbursement – ${loan.loanNumber}`,
+            processedBy: disbursedBy,
+          },
+        });
+
+        // Update balance AND version atomically
+        await tx.account.update({
+          where: { id: fosaAccount.id, version: account.version },
+          data: {
+            balance: balanceAfter.toDecimalPlaces(4).toString(),
+            version: newVersion,
+          },
+        });
+
+        const disbursedAt = new Date();
+        // dueDate = disbursement + grace period + repayment tenure
+        const dueDate = new Date(disbursedAt);
+        dueDate.setMonth(dueDate.getMonth() + (loan.gracePeriodMonths ?? 0) + loan.tenureMonths);
+
+        const updatedLoan = await tx.loan.update({
+          where: { id },
+          data: {
+            status: LoanStatus.ACTIVE,
+            disbursedAt,
+            disbursedBy,
+            dueDate,
+          },
+        });
+
+        await this.audit.create({
           tenantId,
-          accountId: fosaAccount.id,
-          loanId: id,
-          type: TransactionType.LOAN_DISBURSEMENT,
-          status: TransactionStatus.COMPLETED,
-          amount: principal.toDecimalPlaces(4).toString(),
-          balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
-          reference,
-          description: `Loan disbursement – ${loan.loanNumber}`,
-          processedBy: disbursedBy,
-        },
-      });
+          userId: disbursedBy,
+          action: 'LOAN.DISBURSE',
+          resource: 'Loan',
+          resourceId: id,
+          metadata: {
+            loanNumber: loan.loanNumber,
+            principalAmount: principal.toNumber(),
+            fosaAccountId: fosaAccount.id,
+            reference,
+            gracePeriodMonths: loan.gracePeriodMonths ?? 0,
+            disbursedAt,
+            dueDate,
+          },
+          ipAddress,
+        }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-      await tx.account.update({
-        where: { id: fosaAccount.id },
-        data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
-      });
-
-      const disbursedAt = new Date();
-      // dueDate = disbursement + grace period + repayment tenure
-      const dueDate = new Date(disbursedAt);
-      dueDate.setMonth(dueDate.getMonth() + (loan.gracePeriodMonths ?? 0) + loan.tenureMonths);
-
-      const updatedLoan = await tx.loan.update({
-        where: { id },
-        data: {
-          status: LoanStatus.ACTIVE,
-          disbursedAt,
-          disbursedBy,
-          dueDate,
-        },
-      });
-
-      await this.audit.create({
-        tenantId,
-        userId: disbursedBy,
-        action: 'LOAN.DISBURSE',
-        resource: 'Loan',
-        resourceId: id,
-        metadata: {
-          loanNumber: loan.loanNumber,
-          principalAmount: principal.toNumber(),
-          fosaAccountId: fosaAccount.id,
-          reference,
-          gracePeriodMonths: loan.gracePeriodMonths ?? 0,
-          disbursedAt,
-          dueDate,
-        },
-        ipAddress,
-      }).catch((e: unknown) => this.logger.error('Audit write failed', e));
-
-      return { loan: updatedLoan, transaction: txn, newBalance: balanceAfter.toNumber(), dueDate };
-    });
+        return { loan: updatedLoan, transaction: txn, newBalance: balanceAfter.toNumber(), dueDate };
+      },
+      { isolationLevel: 'Serializable' as const },
+    );
 
     // Notify member of disbursement (after transaction commits)
     const memberUser = loan.member?.user;
@@ -569,7 +665,7 @@ export class LoansService {
     }
 
     const principal = new Decimal(loan.principalAmount.toString());
-    const MIN_COVERAGE_RATIO = new Decimal('0.30'); // 30%
+    const MIN_COVERAGE_RATIO = new Decimal('1.00'); // 100%
     const minCoverageRequired = principal.times(MIN_COVERAGE_RATIO);
 
     const results: Array<{
@@ -762,7 +858,7 @@ export class LoansService {
   }
 
   /**
-   * If accepted guarantors cover ≥ 30% of principal, advance loan to UNDER_REVIEW.
+   * If accepted guarantors cover 100% of principal, advance loan to UNDER_REVIEW.
    */
   private async checkAndAdvanceLoanStatus(loanId: string, tenantId: string) {
     const loan = await this.prisma.loan.findFirst({
@@ -782,7 +878,7 @@ export class LoansService {
     );
 
     const principal = new Decimal(loan.principalAmount.toString());
-    const minCoverage = principal.times('0.30');
+    const minCoverage = principal.times('1.00');
 
     if (totalAccepted.greaterThanOrEqualTo(minCoverage)) {
       await this.prisma.loan.update({

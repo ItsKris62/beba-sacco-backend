@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsString, Matches, MinLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, IsString, Matches, MinLength } from 'class-validator';
 
 export class ChangePasswordDto {
   @ApiProperty({ description: 'Current password' })
@@ -17,4 +17,11 @@ export class ChangePasswordDto {
     message: 'Password must contain at least one uppercase letter, one lowercase letter, and one digit',
   })
   newPassword!: string;
+
+  @ApiPropertyOptional({
+    description: 'Current access token JTI — sent by frontend to enable immediate revocation',
+  })
+  @IsString()
+  @IsOptional()
+  accessTokenJti?: string;
 }

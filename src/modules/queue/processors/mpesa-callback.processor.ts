@@ -371,17 +371,21 @@ export class MpesaCallbackProcessor extends WorkerHost {
     const isLoanRepayment = parsed.type === 'LOAN_REPAYMENT';
     const reference = `MPESA-${params.receipt}`;
 
-    await this.prisma.$transaction(async (tx) => {
-      // Layer 3 idempotency: Transaction.reference @unique
-      const dup = await tx.transaction.findUnique({ where: { reference } });
+    // Use SERIALIZABLE isolation to prevent lost updates on concurrent deposits
+    // to the same account. Falls back to pooler client if direct URL is unavailable.
+    const txClient = this.prisma.direct ?? this.prisma;
+    await txClient.$transaction(
+      async (tx) => {
+        // Layer 3 idempotency: Transaction.reference @unique
+        const dup = await tx.transaction.findUnique({ where: { reference } });
       if (dup) {
         this.logger.log(`Ledger: duplicate reference ${reference} – skipping`);
         return;
       }
 
-      if (isLoanRepayment) {
-        // ── Loan repayment path ──────────────────────────────────────────────
-        const loan = await tx.loan.findFirst({
+        if (isLoanRepayment) {
+          // ── Loan repayment path ──────────────────────────────────────────────
+          const loan = await tx.loan.findFirst({
           where: { loanNumber: parsed.target, tenantId: params.tenantId },
           select: {
             id: true,
@@ -462,24 +466,24 @@ export class MpesaCallbackProcessor extends WorkerHost {
           });
         }
 
-        if (params.mpesaTxId) {
-          await tx.mpesaTransaction.update({
-            where: { id: params.mpesaTxId },
-            data: {
-              transactionId: ledgerTx.id,
-              loanId: loan.id,
-              status: TransactionStatus.COMPLETED,
-              resultCode: params.resultCode,
-              resultDesc: params.resultDesc,
-              mpesaReceiptNumber: params.receipt,
-              transactionDate: params.transactionDate,
-              callbackPayload: params.rawPayload,
-            },
-          });
-        }
-      } else {
-        // ── Savings deposit path ──────────────────────────────────────────────
-        const accountNumber = parsed.isMemberIdDeposit
+          if (params.mpesaTxId) {
+            await tx.mpesaTransaction.update({
+              where: { id: params.mpesaTxId },
+              data: {
+                transactionId: ledgerTx.id,
+                loanId: loan.id,
+                status: TransactionStatus.COMPLETED,
+                resultCode: params.resultCode,
+                resultDesc: params.resultDesc,
+                mpesaReceiptNumber: params.receipt,
+                transactionDate: params.transactionDate,
+                callbackPayload: params.rawPayload,
+              },
+            });
+          }
+        } else {
+          // ── Savings deposit path ──────────────────────────────────────────────
+          const accountNumber = parsed.isMemberIdDeposit
           ? await this.resolveDefaultFosaByMember(parsed.target, params.tenantId)
           : parsed.target;
 
@@ -518,22 +522,24 @@ export class MpesaCallbackProcessor extends WorkerHost {
           data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
         });
 
-        if (params.mpesaTxId) {
-          await tx.mpesaTransaction.update({
-            where: { id: params.mpesaTxId },
-            data: {
-              transactionId: ledgerTx.id,
-              status: TransactionStatus.COMPLETED,
-              resultCode: params.resultCode,
-              resultDesc: params.resultDesc,
-              mpesaReceiptNumber: params.receipt,
-              transactionDate: params.transactionDate,
-              callbackPayload: params.rawPayload,
-            },
-          });
+          if (params.mpesaTxId) {
+            await tx.mpesaTransaction.update({
+              where: { id: params.mpesaTxId },
+              data: {
+                transactionId: ledgerTx.id,
+                status: TransactionStatus.COMPLETED,
+                resultCode: params.resultCode,
+                resultDesc: params.resultDesc,
+                mpesaReceiptNumber: params.receipt,
+                transactionDate: params.transactionDate,
+                callbackPayload: params.rawPayload,
+              },
+            });
+          }
         }
-      }
-    });
+      },
+      { isolationLevel: 'Serializable' as const },
+    );
   }
 
   private async postDisbursementLedger(params: {
@@ -550,8 +556,10 @@ export class MpesaCallbackProcessor extends WorkerHost {
   }): Promise<void> {
     const reference = `MPESA-B2C-${params.receipt}`;
 
-    await this.prisma.$transaction(async (tx) => {
-      const dup = await tx.transaction.findUnique({ where: { reference } });
+    const txClient = this.prisma.direct ?? this.prisma;
+    await txClient.$transaction(
+      async (tx) => {
+        const dup = await tx.transaction.findUnique({ where: { reference } });
       if (dup) return;
 
       const loan = await tx.loan.findUnique({
@@ -603,19 +611,21 @@ export class MpesaCallbackProcessor extends WorkerHost {
         });
       }
 
-      await tx.mpesaTransaction.update({
-        where: { id: params.mpesaTxId },
-        data: {
-          transactionId: ledgerTx.id,
-          status: TransactionStatus.COMPLETED,
-          resultCode: params.resultCode,
-          resultDesc: params.resultDesc,
-          mpesaReceiptNumber: params.receipt,
-          transactionDate: params.transactionDate,
-          callbackPayload: params.rawPayload,
-        },
-      });
-    });
+        await tx.mpesaTransaction.update({
+          where: { id: params.mpesaTxId },
+          data: {
+            transactionId: ledgerTx.id,
+            status: TransactionStatus.COMPLETED,
+            resultCode: params.resultCode,
+            resultDesc: params.resultDesc,
+            mpesaReceiptNumber: params.receipt,
+            transactionDate: params.transactionDate,
+            callbackPayload: params.rawPayload,
+          },
+        });
+      },
+      { isolationLevel: 'Serializable' as const },
+    );
   }
 
   // ─── DLQ handler ─────────────────────────────────────────────────────────

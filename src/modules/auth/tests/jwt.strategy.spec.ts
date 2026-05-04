@@ -23,6 +23,7 @@ describe('JwtStrategy', () => {
     email: 'user@kcboda.co.ke',
     role: UserRole.MEMBER,
     tenantId: 'tenant-uuid',
+    jti: 'test-jti-uuid',
   };
 
   beforeEach(async () => {

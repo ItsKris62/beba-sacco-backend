@@ -4,16 +4,19 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { JwtBlocklistService } from '../jwt-blocklist.service';
 
 /**
  * JWT payload shape embedded in every access token.
  * `sub` is always user.id (RFC 7519 convention).
+ * `jti` is a unique token ID used for immediate revocation via Redis blocklist.
  */
 export interface JwtPayload {
   sub: string;
   email: string;
   role: UserRole;
   tenantId: string;
+  jti: string;
   iat?: number;
   exp?: number;
 }
@@ -32,15 +35,16 @@ export interface AuthenticatedUser {
 }
 
 /**
+/**
  * Passport JWT Strategy
  *
  * Validates Bearer tokens on every protected request:
  * 1. Extracts JWT from Authorization: Bearer <token>
  * 2. Verifies signature with JWT_SECRET
- * 3. Confirms user still exists + is active in DB
- * 4. Attaches user to req.user
+ * 3. Checks Redis blocklist for revoked JTIs (immediate revocation)
+ * 4. Confirms user still exists + is active in DB
+ * 5. Attaches user to req.user
  *
- * TODO: Phase 2 – add jti (JWT ID) blocklist check in Redis on each request
  * TODO: Phase 3 – add device/session management
  */
 @Injectable()
@@ -48,6 +52,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly blocklist: JwtBlocklistService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -57,6 +62,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
+    // Phase 2: Check blocklist for revoked tokens (phone theft / password change)
+    const blocked = await this.blocklist.isBlocked(payload.jti);
+    if (blocked) {
+      throw new UnauthorizedException('Token has been revoked');
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
       select: {
@@ -77,7 +88,6 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('Account has been deactivated');
     }
 
-    // TODO: Phase 2 – if user.mustChangePassword && route !== /auth/change-password → 403
     return user;
   }
 }

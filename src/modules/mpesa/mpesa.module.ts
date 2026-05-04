@@ -6,6 +6,7 @@ import { MpesaService } from './mpesa.service';
 import { DarajaClientService } from './daraja-client.service';
 import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
+import { MpesaStkTimeoutService } from './mpesa-stk-timeout.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 
@@ -54,6 +55,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     // B2C disbursement processor lives here (not in QueueModule) because it
     // needs MpesaService and there is no circular dependency in this direction.
     MpesaDisbursementProcessor,
+    MpesaStkTimeoutService,
     // PrismaService is @Global via PrismaModule, but listed explicitly so
     // this module is self-documenting about its dependencies.
     PrismaService,

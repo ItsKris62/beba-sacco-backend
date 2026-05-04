@@ -6,7 +6,9 @@ import { BullModule } from '@nestjs/bullmq';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { JwtBlocklistService } from './jwt-blocklist.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../common/services/redis.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { SessionService } from './session.service';
@@ -45,7 +47,7 @@ import { SessionController } from './session.controller';
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
   controllers: [AuthController, SessionController],
-  providers: [AuthService, PrismaService, JwtStrategy, SessionService],
-  exports: [AuthService, JwtModule, PassportModule, SessionService],
+  providers: [AuthService, PrismaService, JwtStrategy, JwtBlocklistService, RedisService, SessionService],
+  exports: [AuthService, JwtModule, PassportModule, SessionService, JwtBlocklistService],
 })
 export class AuthModule {}

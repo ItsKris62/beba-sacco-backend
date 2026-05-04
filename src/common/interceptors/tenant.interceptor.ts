@@ -10,6 +10,7 @@ import {
 import { Observable } from 'rxjs';
 import { TenantStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { tenantAsyncStorage } from '../services/tenant-context.service';
 import type { AuthenticatedUser } from '../../modules/auth/strategies/jwt.strategy';
 
 /**
@@ -116,11 +117,11 @@ export class TenantInterceptor implements NestInterceptor {
     // Keep tenantId shorthand for legacy code still using req.tenantId
     request.tenantId = tenant.id;
 
-    // TODO: Phase 2 – uncomment after switching to direct (non-pooler) DATABASE_URL
-    // await this.prisma.setTenantContext(tenant.schemaName);
-
-    this.logger.debug(`Tenant resolved: ${tenant.slug} (${tenant.id})`);
-
-    return next.handle();
+    // Run the rest of the request pipeline inside AsyncLocalStorage
+    // so Prisma middleware can auto-inject tenantId into every query.
+    return tenantAsyncStorage.run(
+      { tenantId: tenant.id, tenantSlug: tenant.slug },
+      () => next.handle(),
+    );
   }
 }

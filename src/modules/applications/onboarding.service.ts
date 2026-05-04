@@ -115,7 +115,7 @@ export class OnboardingService {
       `member.${app.idNumber}@${tenantId.slice(0, 8)}.beba.local`;
 
     // Check email uniqueness
-    const dupEmail = await this.prisma.user.findUnique({
+    const dupEmail = await this.prisma.user.findFirst({
       where: { email },
       select: { id: true },
     });

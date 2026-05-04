@@ -44,7 +44,7 @@ async function main() {
   console.log(`✅  Platform tenant: "${tenant.name}" (${tenant.id})`);
 
   // Guard: skip if SUPER_ADMIN already exists
-  const existing = await prisma.user.findUnique({
+  const existing = await prisma.user.findFirst({
     where: { email: SUPER_ADMIN_EMAIL.toLowerCase() },
     select: { id: true, role: true },
   });

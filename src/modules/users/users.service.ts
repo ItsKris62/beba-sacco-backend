@@ -85,7 +85,7 @@ export class UsersService {
       );
     }
 
-    const existing = await this.prisma.user.findUnique({
+    const existing = await this.prisma.user.findFirst({
       where: { email: dto.email.toLowerCase() },
       select: { id: true },
     });

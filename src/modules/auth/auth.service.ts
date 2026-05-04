@@ -10,9 +10,12 @@ import { Queue } from 'bullmq';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
+import { v4 as uuidv4 } from 'uuid';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { JwtBlocklistService } from './jwt-blocklist.service';
+import { tenantAsyncStorage } from '../../common/services/tenant-context.service';
 import { LoginDto, LoginResponseDto, LoginUserDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
@@ -66,6 +69,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly auditService: AuditService,
+    private readonly blocklist: JwtBlocklistService,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
@@ -97,20 +101,24 @@ export class AuthService {
 
     // Find by credentials without tenant scope first so SUPER_ADMIN
     // (who belongs to the platform tenant) can log in from any tenant context.
-    const candidate = await this.prisma.user.findFirst({
-      where: whereClause,
-      select: {
-        id: true,
-        email: true,
-        passwordHash: true,
-        role: true,
-        isActive: true,
-        firstName: true,
-        lastName: true,
-        tenantId: true,
-        mustChangePassword: true,
-      },
-    });
+    // We bypass the tenant middleware here because login must be able to
+    // locate SUPER_ADMIN users regardless of which tenant's login page they use.
+    const candidate = await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.findFirst({
+        where: whereClause,
+        select: {
+          id: true,
+          email: true,
+          passwordHash: true,
+          role: true,
+          isActive: true,
+          firstName: true,
+          lastName: true,
+          tenantId: true,
+          mustChangePassword: true,
+        },
+      }),
+    );
 
     // Enforce tenant scope for all roles except SUPER_ADMIN
     const user =
@@ -207,7 +215,7 @@ export class AuthService {
   ): Promise<LoginResponseDto> {
     const normalizedEmail = registerDto.email.toLowerCase();
 
-    const existing = await this.prisma.user.findUnique({
+    const existing = await this.prisma.user.findFirst({
       where: { email: normalizedEmail },
     });
 
@@ -382,13 +390,23 @@ export class AuthService {
 
   /**
    * Invalidate the current session by clearing the stored refresh token hash.
-   * The access token remains valid until its 15-min TTL expires.
+   * Also blocklists the current access token so it dies immediately (not after 15 min).
    */
-  async logout(userId: string, tenantId: string, ipAddress?: string): Promise<void> {
+  async logout(
+    userId: string,
+    tenantId: string,
+    accessTokenJti?: string,
+    ipAddress?: string,
+  ): Promise<void> {
     await this.prisma.user.update({
       where: { id: userId },
       data: { refreshToken: null },
     });
+
+    // Phase 2: immediate revocation of access token
+    if (accessTokenJti) {
+      await this.blocklist.add(accessTokenJti);
+    }
 
     await this.writeAuditSafe({
       tenantId,
@@ -396,7 +414,7 @@ export class AuthService {
       action: 'AUTH.LOGOUT',
       resource: 'User',
       resourceId: userId,
-      metadata: {},
+      metadata: { accessTokenRevoked: !!accessTokenJti },
       ipAddress,
     });
   }
@@ -606,6 +624,11 @@ export class AuthService {
       },
     });
 
+    // Phase 2: blocklist the current access token (if provided) for immediate revocation
+    if (dto.accessTokenJti) {
+      await this.blocklist.add(dto.accessTokenJti);
+    }
+
     await this.writeAuditSafe({
       tenantId,
       userId: user.id,
@@ -670,6 +693,11 @@ export class AuthService {
       },
     });
 
+    // Phase 2: blocklist the current access token for immediate revocation
+    if (dto.accessTokenJti) {
+      await this.blocklist.add(dto.accessTokenJti);
+    }
+
     await this.writeAuditSafe({
       tenantId,
       userId,
@@ -728,12 +756,14 @@ export class AuthService {
     email: string;
     role: UserRole;
     tenantId: string;
-  }): { accessToken: string; refreshToken: string } {
+  }): { accessToken: string; refreshToken: string; jti: string } {
+    const jti = uuidv4();
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
       role: user.role,
       tenantId: user.tenantId,
+      jti,
     };
 
     const accessToken = this.jwtService.sign(payload, {
@@ -746,7 +776,7 @@ export class AuthService {
       expiresIn: this.configService.get<string>('app.jwt.refreshExpiration', '7d'),
     });
 
-    return { accessToken, refreshToken };
+    return { accessToken, refreshToken, jti };
   }
 
   private toUserDto(user: {
