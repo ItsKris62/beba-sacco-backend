@@ -185,7 +185,9 @@ async function bootstrap() {
   process.on('SIGINT',  () => shutdown('SIGINT'));
 
   // ── Start ─────────────────────────────────────────────────────
-  await app.listen(port);
+  // Explicit '0.0.0.0' required for Render.com (and most container platforms)
+  // so the container binds to all interfaces, not just localhost.
+  await app.listen(port, '0.0.0.0');
 
   const logger = app.get(Logger);
   logger.log(`🚀 Server: http://localhost:${port}/${apiPrefix}`, 'Bootstrap');

@@ -8,6 +8,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
 import { MpesaModule } from '../mpesa/mpesa.module';
 import { LoansModule } from '../loans/loans.module';
+import { LoanApplicationModule } from '../loans/loan-application.module';
 import { StatementsModule } from '../statements/statements.module';
 import { StorageModule } from '../storage/storage.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
@@ -17,6 +18,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     AuditModule,
     MpesaModule,
     LoansModule,
+    LoanApplicationModule, // ✅ Makes LoanApplicationService available to MemberPortalController
     StatementsModule,
     StorageModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),

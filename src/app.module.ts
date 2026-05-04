@@ -27,6 +27,7 @@ import { UsersModule } from './modules/users/users.module';
 import { MembersModule } from './modules/members/members.module';
 import { AccountsModule } from './modules/accounts/accounts.module';
 import { LoansModule } from './modules/loans/loans.module';
+import { LoanApplicationModule } from './modules/loans/loan-application.module';
 import { MpesaModule } from './modules/mpesa/mpesa.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { QueueModule } from './modules/queue/queue.module';
@@ -131,6 +132,7 @@ import { AuditService } from './modules/audit/audit.service';
     MembersModule,
     AccountsModule,
     LoansModule,
+    LoanApplicationModule, // ✅ Registers LoanAdminController + exports LoanApplicationService
     MpesaModule,
     AuditModule,     // Must be imported so AuditService is resolvable by AuditInterceptor
     QueueModule,
