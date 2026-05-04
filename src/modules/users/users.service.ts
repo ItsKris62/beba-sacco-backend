@@ -2,6 +2,9 @@ import {
   Injectable, Logger, NotFoundException, ConflictException,
   ForbiddenException, BadRequestException,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import * as argon2 from 'argon2';
 import { UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -10,6 +13,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { IdempotencyService } from '../../common/services/idempotency.service';
+import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 
 /** Roles that can be created/managed within a tenant context. */
 const TENANT_MANAGEABLE_ROLES: UserRole[] = [
@@ -59,7 +63,17 @@ export class UsersService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly idempotency: IdempotencyService,
+    @InjectQueue(QUEUE_NAMES.EMAIL)
+    private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
+
+  private enqueueEmail(payload: EmailJobPayload, ctx: string): void {
+    this.emailQueue
+      .add('send', payload, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } })
+      .catch((e: unknown) =>
+        this.logger.error(`[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`),
+      );
+  }
 
   // ─── CREATE (admin channel) ──────────────────────────────────
 
@@ -446,6 +460,88 @@ export class UsersService {
         'Password reset forced. All existing sessions have been invalidated. ' +
         'The user must log in and set a new password before accessing any resources.',
     };
+  }
+
+  // ─── STALE ACCOUNT CLEANUP ───────────────────────────────────
+
+  /**
+   * Cron job that runs daily at 2:00 AM (EAT).
+   * Finds and automatically deletes any PENDING accounts that were
+   * created more than 30 days ago and have not been approved.
+   */
+  @Cron('0 2 * * *', { timeZone: 'Africa/Nairobi' })
+  async cleanupStalePendingAccounts() {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const twentyThreeDaysAgo = new Date();
+    twentyThreeDaysAgo.setDate(twentyThreeDaysAgo.getDate() - 23);
+    const twentyFourDaysAgo = new Date();
+    twentyFourDaysAgo.setDate(twentyFourDaysAgo.getDate() - 24);
+
+    // 1. Send warning emails to accounts exactly 23 days old (7 days until deletion)
+    const warningUsers = await this.prisma.user.findMany({
+      where: {
+        status: UserStatus.PENDING,
+        createdAt: { gte: twentyFourDaysAgo, lt: twentyThreeDaysAgo },
+      },
+      select: { id: true, email: true, firstName: true },
+    });
+
+    for (const user of warningUsers) {
+      this.enqueueEmail({
+        type: 'ACCOUNT_DELETION_WARNING' as any, // Remember to add this to your EmailJobPayload type union
+        to: user.email,
+        firstName: user.firstName,
+        saccoName: 'Beba SACCO',
+      }, `users.deletion_warning:${user.id}`);
+    }
+
+    if (warningUsers.length > 0) {
+      this.logger.log(`Sent deletion warnings to ${warningUsers.length} PENDING accounts.`);
+    }
+
+    // 2. Delete accounts older than 30 days
+    const staleUsers = await this.prisma.user.findMany({
+      where: {
+        status: UserStatus.PENDING,
+        createdAt: { lt: thirtyDaysAgo },
+      },
+      select: { id: true, email: true, firstName: true, tenantId: true },
+    });
+
+    if (staleUsers.length === 0) return;
+
+    this.logger.log(`Found ${staleUsers.length} stale PENDING accounts to delete.`);
+
+    // Delete in bulk
+    const result = await this.prisma.user.deleteMany({
+      where: {
+        id: { in: staleUsers.map((u) => u.id) },
+      },
+    });
+
+    // Log audit events for each deleted user
+    for (const user of staleUsers) {
+      await this.auditSafe({
+        tenantId: user.tenantId,
+        actorId: 'SYSTEM',
+        action: 'USER.DELETED_STALE',
+        entityType: 'User',
+        entityId: user.id,
+        metadata: { email: user.email, reason: 'PENDING account older than 30 days automatically deleted' },
+      });
+
+      // Send final deletion notification
+      this.enqueueEmail({
+        type: 'ACCOUNT_DELETED' as any,
+        to: user.email,
+        firstName: user.firstName,
+        saccoName: 'Beba SACCO',
+      }, `users.deleted:${user.id}`);
+    }
+
+    this.logger.log(`Successfully deleted ${result.count} stale PENDING accounts.`);
   }
 
   // ─── PRIVATE HELPERS ─────────────────────────────────────────
