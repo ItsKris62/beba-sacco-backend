@@ -8,7 +8,7 @@
   "scripts": {
     "seed:locations": "node scripts/seed-locations.js",
     "sprint1:migrate": "node scripts/sprint1-migrate.js",
-    "build": "nest build && pnpm sentry:sourcemaps",
+    "build": "nest build && npm run sentry:sourcemaps",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
