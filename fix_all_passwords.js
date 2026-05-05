@@ -13,10 +13,14 @@
 const fs = require('fs');
 const path = require('path');
 
-// Load .env manually
-const envContent = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
-const dbUrl = envContent.match(/DATABASE_URL="([^"]+)"/)?.[1];
-if (dbUrl) process.env.DATABASE_URL = dbUrl;
+// Load .env using dotenv if available, otherwise fallback to manual regex
+try {
+  require('dotenv').config();
+} catch (e) {
+  const envContent = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+  const dbUrl = envContent.match(/^DATABASE_URL=[\s"']*(.+?)[\s"']*$/m)?.[1];
+  if (dbUrl) process.env.DATABASE_URL = dbUrl;
+}
 
 const { PrismaClient } = require('@prisma/client');
 const argon2 = require('argon2');
