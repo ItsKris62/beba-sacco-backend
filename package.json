@@ -8,7 +8,7 @@
   "scripts": {
     "seed:locations": "node scripts/seed-locations.js",
     "sprint1:migrate": "node scripts/sprint1-migrate.js",
-    "build": "nest build",
+    "build": "nest build && pnpm sentry:sourcemaps",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
@@ -24,7 +24,8 @@
     "prisma:migrate": "prisma migrate dev --schema=src/prisma/schema.prisma",
     "prisma:deploy": "prisma migrate deploy --schema=src/prisma/schema.prisma",
     "prisma:studio": "prisma studio --schema=src/prisma/schema.prisma",
-    "seed:super-admin": "ts-node -r tsconfig-paths/register src/database/seeds/seed-super-admin.ts"
+    "seed:super-admin": "ts-node -r tsconfig-paths/register src/database/seeds/seed-super-admin.ts",
+    "sentry:sourcemaps": "sentry-cli sourcemaps inject --org veriwoks --project kolwa-beba-app ./dist && sentry-cli sourcemaps upload --org veriwoks --project kolwa-beba-app ./dist"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.490.0",
