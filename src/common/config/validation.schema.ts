@@ -107,12 +107,12 @@ export const validationSchema = Joi.object({
     otherwise: Joi.optional(),
   }),
   MPESA_ENVIRONMENT: Joi.string().valid('sandbox', 'production').default('sandbox'),
-  // HMAC secret for validating Safaricom callback signatures (required in production)
-  MPESA_WEBHOOK_SECRET: Joi.string().min(32).when('NODE_ENV', {
-    is: 'production',
-    then: Joi.required(),
-    otherwise: Joi.optional(),
-  }),
+  // HMAC secret for validating Safaricom callback signatures.
+  // Optional at startup so the app can boot before the client supplies the secret.
+  // The webhook controllers enforce this at invocation time in production:
+  // - absent in production → 503 on any incoming Daraja webhook
+  // - absent in non-production → warning logged, validation skipped (sandbox safe)
+  MPESA_WEBHOOK_SECRET: Joi.string().min(32).optional(),
   // Comma-separated Safaricom IP allowlist (required in production for MpesaIpGuard)
   MPESA_ALLOWED_IPS: Joi.string().when('NODE_ENV', {
     is: 'production',

@@ -9,6 +9,8 @@ import {
   HttpStatus,
   UseGuards,
   Logger,
+  ServiceUnavailableException,
+  OnModuleInit,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -66,15 +68,33 @@ const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
 @Controller('mpesa')
-export class MpesaController {
+export class MpesaController implements OnModuleInit {
   private readonly logger = new Logger(MpesaController.name);
   private readonly webhookSecret: string | undefined;
+  private readonly isProduction: boolean;
 
   constructor(
     private readonly mpesaService: MpesaService,
     private readonly config: ConfigService,
   ) {
     this.webhookSecret = this.config.get<string>('app.mpesa.webhookSecret');
+    this.isProduction = this.config.get<string>('app.nodeEnv') === 'production';
+  }
+
+  onModuleInit(): void {
+    if (!this.webhookSecret) {
+      if (this.isProduction) {
+        this.logger.warn(
+          '⚠️  MPESA_WEBHOOK_SECRET is not set in production. ' +
+          'All incoming Daraja callbacks will be rejected until this is configured.',
+        );
+      } else {
+        this.logger.warn(
+          'MPESA_WEBHOOK_SECRET not configured — HMAC signature validation is DISABLED. ' +
+          'Safe for sandbox/staging only.',
+        );
+      }
+    }
   }
 
   // ─── Member deposit / repayment ──────────────────────────────────────────
@@ -221,11 +241,25 @@ export class MpesaController {
 
   /**
    * Validates HMAC-SHA256 signature using the raw request bytes.
-   * Permissive when MPESA_WEBHOOK_SECRET is not configured (dev/sandbox).
    * Uses constant-time comparison to prevent timing-oracle attacks.
+   *
+   * Behavior when MPESA_WEBHOOK_SECRET is absent:
+   *  - Non-production: logs a warning and skips validation (sandbox safe).
+   *  - Production: throws ServiceUnavailableException so Daraja retries and
+   *    operators are alerted immediately — no unvalidated webhooks go through.
    */
   private isSignatureValid(rawBody: Buffer | undefined, signature: string | undefined): boolean {
-    if (!this.webhookSecret) return true;
+    if (!this.webhookSecret) {
+      if (this.isProduction) {
+        throw new ServiceUnavailableException(
+          'MPESA_WEBHOOK_SECRET is not configured. ' +
+          'Set the environment variable and redeploy before processing live callbacks.',
+        );
+      }
+      // Non-production: permissive — sandbox callbacks have no secret
+      return true;
+    }
+
     if (!signature || !rawBody) return false;
 
     const expected = crypto

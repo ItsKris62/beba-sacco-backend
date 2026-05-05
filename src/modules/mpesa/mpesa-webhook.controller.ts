@@ -8,6 +8,8 @@ import {
   HttpCode,
   HttpStatus,
   UseGuards,
+  ServiceUnavailableException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
@@ -43,15 +45,33 @@ import {
 @ApiTags('M-Pesa Webhooks')
 @SkipThrottle()
 @Controller('mpesa/webhooks')
-export class MpesaWebhookController {
+export class MpesaWebhookController implements OnModuleInit {
   private readonly logger = new Logger(MpesaWebhookController.name);
   private readonly webhookSecret: string | undefined;
+  private readonly isProduction: boolean;
 
   constructor(
     private readonly mpesaService: MpesaService,
     private readonly config: ConfigService,
   ) {
     this.webhookSecret = this.config.get<string>('app.mpesa.webhookSecret');
+    this.isProduction = this.config.get<string>('app.nodeEnv') === 'production';
+  }
+
+  onModuleInit(): void {
+    if (!this.webhookSecret) {
+      if (this.isProduction) {
+        this.logger.warn(
+          '⚠️  MPESA_WEBHOOK_SECRET is not set in production. ' +
+          'All incoming Daraja callbacks on legacy routes will be rejected.',
+        );
+      } else {
+        this.logger.warn(
+          'MPESA_WEBHOOK_SECRET not configured — HMAC signature validation is DISABLED. ' +
+          'Safe for sandbox/staging only.',
+        );
+      }
+    }
   }
 
   // ─── STK Push callback ──────────────────────────────────────────────────
@@ -141,13 +161,24 @@ export class MpesaWebhookController {
    * Validates HMAC-SHA256 signature using the raw request bytes.
    * We use the raw body (not the re-serialised JSON) to avoid signature
    * mismatches from different key ordering across JSON libraries.
+   * Constant-time comparison prevents timing-oracle attacks.
    *
-   * Returns true (permissive) when:
-   *  - No MPESA_WEBHOOK_SECRET is configured (dev / sandbox mode)
-   *  - Signature header is present and valid
+   * Behavior when MPESA_WEBHOOK_SECRET is absent:
+   *  - Non-production: permissive (sandbox callbacks have no secret).
+   *  - Production: throws ServiceUnavailableException so Daraja retries and
+   *    operators receive an immediate alert — no unvalidated callbacks proceed.
    */
   private isSignatureValid(rawBody: Buffer | undefined, signature: string | undefined): boolean {
-    if (!this.webhookSecret) return true;
+    if (!this.webhookSecret) {
+      if (this.isProduction) {
+        throw new ServiceUnavailableException(
+          'MPESA_WEBHOOK_SECRET is not configured. ' +
+          'Set the environment variable and redeploy before processing live callbacks.',
+        );
+      }
+      return true;
+    }
+
     if (!signature || !rawBody) return false;
 
     const expected = crypto
@@ -155,7 +186,6 @@ export class MpesaWebhookController {
       .update(rawBody)
       .digest('hex');
 
-    // Constant-time comparison prevents timing-oracle attacks
     const expectedBuf = Buffer.from(expected, 'hex');
     let sigBuf: Buffer;
     try {

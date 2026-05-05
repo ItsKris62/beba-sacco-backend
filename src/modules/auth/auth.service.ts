@@ -184,13 +184,18 @@ export class AuthService {
 
     const refreshHash = await argon2.hash(refreshToken);
 
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        refreshToken: refreshHash,
-        lastLoginAt: new Date(),
-      },
-    });
+    // Bypass tenant middleware: SUPER_ADMIN's DB tenantId differs from the
+    // request X-Tenant-ID, so the injected WHERE ... AND tenantId=<header>
+    // would find 0 rows and throw P2025. Same bypass as the findFirst above.
+    await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          refreshToken: refreshHash,
+          lastLoginAt: new Date(),
+        },
+      }),
+    );
 
     await this.writeAuditSafe({
       tenantId,
@@ -225,6 +230,7 @@ export class AuthService {
 
     const existing = await this.prisma.user.findFirst({
       where: { email: normalizedEmail },
+      select: { id: true },
     });
 
     if (existing) {
@@ -329,17 +335,21 @@ export class AuthService {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
-    const user = await this.prisma.user.findUnique({
-      where: { id: payload.sub },
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        tenantId: true,
-        isActive: true,
-        refreshToken: true,
-      },
-    });
+    // Bypass tenant middleware: SUPER_ADMIN refresh tokens must be accepted
+    // regardless of which tenant's X-Tenant-ID header is in the request.
+    const user = await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.findUnique({
+        where: { id: payload.sub },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          tenantId: true,
+          isActive: true,
+          refreshToken: true,
+        },
+      }),
+    );
 
     if (!user || !user.isActive || !user.refreshToken) {
       throw new UnauthorizedException('Invalid refresh token');
@@ -353,13 +363,15 @@ export class AuthService {
     if (!isValid) {
       // Token reuse detected: revoke ALL active sessions and clear the stored hash.
       // An attacker who obtained an old refresh token must not retain any foothold.
-      await this.prisma.refreshSession.updateMany({
-        where: { userId: user.id, isRevoked: false },
-        data: { isRevoked: true },
-      });
-      await this.prisma.user.update({
-        where: { id: user.id },
-        data: { refreshToken: null },
+      await tenantAsyncStorage.run(undefined, async () => {
+        await this.prisma.refreshSession.updateMany({
+          where: { userId: user.id, isRevoked: false },
+          data: { isRevoked: true },
+        });
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: { refreshToken: null },
+        });
       });
       await this.writeAuditSafe({
         tenantId,
@@ -404,10 +416,12 @@ export class AuthService {
 
     const newHash = await argon2.hash(refreshToken);
 
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { refreshToken: newHash },
-    });
+    await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: { refreshToken: newHash },
+      }),
+    );
 
     await this.writeAuditSafe({
       tenantId,
@@ -434,10 +448,12 @@ export class AuthService {
     accessTokenJti?: string,
     ipAddress?: string,
   ): Promise<void> {
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { refreshToken: null },
-    });
+    await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { refreshToken: null },
+      }),
+    );
 
     // Phase 2: immediate revocation of access token
     if (accessTokenJti) {
@@ -690,10 +706,12 @@ export class AuthService {
     dto: ChangePasswordDto,
     ipAddress?: string,
   ): Promise<void> {
-    const user = await this.prisma.user.findFirst({
-      where: { id: userId },
-      select: { id: true, passwordHash: true, email: true, role: true, tenantId: true },
-    });
+    const user = await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.findFirst({
+        where: { id: userId },
+        select: { id: true, passwordHash: true, email: true, role: true, tenantId: true },
+      }),
+    );
 
     if (!user || (user.role !== UserRole.SUPER_ADMIN && user.tenantId !== tenantId)) {
       throw new UnauthorizedException('User not found');
@@ -720,14 +738,16 @@ export class AuthService {
       parallelism: 1,
     });
 
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        passwordHash: newHash,
-        mustChangePassword: false,
-        refreshToken: null, // Invalidate all existing sessions
-      },
-    });
+    await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          passwordHash: newHash,
+          mustChangePassword: false,
+          refreshToken: null,
+        },
+      }),
+    );
 
     // Phase 2: blocklist the current access token for immediate revocation
     if (dto.accessTokenJti) {

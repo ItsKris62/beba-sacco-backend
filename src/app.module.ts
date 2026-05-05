@@ -106,7 +106,16 @@ import { AuditService } from './modules/audit/audit.service';
         customProps: (req: IncomingMessage) => ({
           requestId: (req.headers['x-request-id'] as string | undefined) ?? '',
         }),
-        redact: ['req.headers.authorization', 'req.body.password', 'req.body.refreshToken'],
+        redact: [
+          'req.headers.authorization',
+          'req.body.password',
+          'req.body.currentPassword',
+          'req.body.newPassword',
+          'req.body.confirmPassword',
+          'req.body.refreshToken',
+          'req.body.token',        // password-reset JWT contains nonce
+          'req.body.accessTokenJti',
+        ],
       },
     }),
 
