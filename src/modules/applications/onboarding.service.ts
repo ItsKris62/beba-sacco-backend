@@ -95,6 +95,35 @@ export class OnboardingService {
       );
     }
 
+    // Extra idempotency: a previous attempt may have committed the member row but
+    // failed before updating the application status (e.g. Neon cold-start / pooler
+    // mid-transaction timeout). Detect this and heal rather than error.
+    const preExistingMember = await this.prisma.member.findFirst({
+      where: { tenantId, nationalId: app.idNumber },
+      include: {
+        user: { select: { id: true, email: true, firstName: true, lastName: true } },
+        accounts: { select: { id: true, accountNumber: true, accountType: true } },
+      },
+    });
+    if (preExistingMember) {
+      await this.prisma.memberApplication
+        .update({
+          where: { id: applicationId },
+          data: { status: ApplicationStatus.APPROVED, reviewedBy: actorId },
+        })
+        .catch(() => {});
+      return {
+        success: true,
+        user: preExistingMember.user,
+        member: { id: preExistingMember.id, memberNumber: preExistingMember.memberNumber },
+        accounts: preExistingMember.accounts,
+        stage: { id: '', name: app.stageName },
+        stageAssignment: { id: '', position: app.position },
+        temporaryPassword: '(already set — member must use existing password)',
+        message: `Member ${preExistingMember.memberNumber} was already created from this application.`,
+      };
+    }
+
     // Duplicate guard on User table (belt-and-suspenders — also catches cross-tenant clashes
     // since idNumber and phoneNumber carry a global @unique constraint on the User model)
     const dupUser = await this.prisma.user.findFirst({
@@ -272,9 +301,38 @@ export class OnboardingService {
         if (err.code === 'P2002') {
           const fields = Array.isArray(err.meta?.target)
             ? (err.meta.target as string[]).join(', ')
-            : 'ID number or phone number';
+            : '';
+          // memberNumber conflict: counter drifted from actual DB state (partial commit).
+          // Attempt self-healing by returning the member that already occupies this slot.
+          if (fields.includes('memberNumber')) {
+            const recovered = await this.prisma.member.findFirst({
+              where: { tenantId, nationalId: app.idNumber },
+              include: {
+                user: { select: { id: true, email: true, firstName: true, lastName: true } },
+                accounts: { select: { id: true, accountNumber: true, accountType: true } },
+              },
+            });
+            if (recovered) {
+              await this.prisma.memberApplication
+                .update({
+                  where: { id: applicationId },
+                  data: { status: ApplicationStatus.APPROVED, reviewedBy: actorId },
+                })
+                .catch(() => {});
+              return {
+                success: true,
+                user: recovered.user,
+                member: { id: recovered.id, memberNumber: recovered.memberNumber },
+                accounts: recovered.accounts,
+                stage: { id: '', name: app.stageName },
+                stageAssignment: { id: '', position: app.position },
+                temporaryPassword: '(already set — member must use existing password)',
+                message: `Member ${recovered.memberNumber} was already created from this application.`,
+              };
+            }
+          }
           throw new ConflictException(
-            `A member with this ${fields} already exists.`,
+            `A member with this ${fields || 'ID number or phone number'} already exists.`,
           );
         }
         // Any other known Prisma error — log it and surface a helpful message.
