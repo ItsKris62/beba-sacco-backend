@@ -1,3 +1,6 @@
+// IMPORTANT: Make sure to import `instrument.ts` at the top of your file.
+import './instrument';
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -6,7 +9,6 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
 import * as express from 'express';
-import * as Sentry from '@sentry/node';
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
 
@@ -33,49 +35,6 @@ async function bootstrap() {
     // Preserve raw body bytes so the M-Pesa webhook controller can compute HMAC
     rawBody: true,
   });
-
-  // ── Sentry ─────────────────────────────────────────────────────
-  // @sentry/node v7 auto-instruments HTTP/Express — no explicit integrations array needed.
-  const sentryDsn = process.env.SENTRY_DSN;
-  if (sentryDsn) {
-    Sentry.init({
-      dsn: sentryDsn,
-      environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV ?? 'production',
-      tracesSampleRate: 0.1,
-      // Scrub sensitive request fields before the event reaches the Sentry dashboard.
-      // @sentry/node auto-attaches req.body to every exception event, which would
-      // otherwise expose plaintext passwords on every 5xx error.
-      beforeSend(event) {
-        const data = event.request?.data;
-        if (data && typeof data === 'object' && !Array.isArray(data)) {
-          const SENSITIVE_FIELDS = [
-            'password',
-            'currentPassword',
-            'newPassword',
-            'confirmPassword',
-            'refreshToken',
-            'token',        // password-reset JWT
-            'accessTokenJti',
-          ];
-          const scrubbed = { ...(data as Record<string, unknown>) };
-          let changed = false;
-          for (const field of SENSITIVE_FIELDS) {
-            if (Object.prototype.hasOwnProperty.call(scrubbed, field)) {
-              scrubbed[field] = '[Filtered]';
-              changed = true;
-            }
-          }
-          if (changed) {
-            return {
-              ...event,
-              request: { ...event.request, data: scrubbed },
-            };
-          }
-        }
-        return event;
-      },
-    });
-  }
 
   // ── Structured Logging ─────────────────────────────────────────
   app.useLogger(app.get(Logger));

@@ -6,6 +6,7 @@ import { APP_GUARD, APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { CommonServicesModule } from './common/services/common-services.module';
+import { SentryModule, SentryGlobalFilter } from '@sentry/nestjs/setup';
 
 // Config
 import appConfig from './common/config/app.config';
@@ -77,6 +78,8 @@ import { AuditService } from './modules/audit/audit.service';
  */
 @Module({
   imports: [
+    SentryModule.forRoot(),
+
     // ── Cron Jobs ──────────────────────────────────────────────
     ScheduleModule.forRoot(),
 
@@ -188,6 +191,7 @@ import { AuditService } from './modules/audit/audit.service';
     { provide: APP_INTERCEPTOR, useClass: ApiVersionInterceptor },
 
     // ── Global Filters ────────────────────────────────────────
+    { provide: APP_FILTER, useClass: SentryGlobalFilter },
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
   ],
 })
