@@ -37,6 +37,14 @@ UPDATE "public"."User"
 
 CREATE INDEX "User_status_idx" ON "public"."User"("status");
 
+-- Add User approval/lifecycle columns that are in the schema but missing from the DB.
+-- These are all nullable so no default value is needed for existing rows.
+ALTER TABLE "public"."User"
+  ADD COLUMN "createdById"     TEXT,
+  ADD COLUMN "approvedById"    TEXT,
+  ADD COLUMN "approvedAt"      TIMESTAMP(3),
+  ADD COLUMN "approvalReason"  TEXT;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- PART 2: AuditLog column renames and new columns
 -- ─────────────────────────────────────────────────────────────────────────────
