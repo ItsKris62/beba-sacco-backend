@@ -63,8 +63,8 @@ export class StagesService {
   // ─── LIST ────────────────────────────────────────────────────────────────────
 
   async findAll(tenantId: string, opts: { page?: number; limit?: number } = {}) {
-    const page = Math.max(1, opts.page ?? 1);
-    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
+    const page = Math.max(1, opts.page || 1);
+    const limit = Math.min(100, Math.max(1, opts.limit || 20));
     const skip = (page - 1) * limit;
 
     const [data, total] = await this.prisma.$transaction([
@@ -182,8 +182,8 @@ export class StagesService {
     tenantId: string,
     opts: { page?: number; limit?: number; countyId?: string; constituencyId?: string; wardId?: string; search?: string } = {},
   ) {
-    const page = Math.max(1, opts.page ?? 1);
-    const limit = Math.min(100, Math.max(1, opts.limit ?? 50));
+    const page = Math.max(1, opts.page || 1);
+    const limit = Math.min(100, Math.max(1, opts.limit || 50));
     const skip = (page - 1) * limit;
 
     // Build ward filter based on location hierarchy
@@ -285,8 +285,8 @@ export class StagesService {
     query: string,
     opts: { page?: number; limit?: number } = {},
   ) {
-    const page = Math.max(1, opts.page ?? 1);
-    const limit = Math.min(50, Math.max(1, opts.limit ?? 20));
+    const page = Math.max(1, opts.page || 1);
+    const limit = Math.min(50, Math.max(1, opts.limit || 20));
     const skip = (page - 1) * limit;
 
     const where = {
@@ -365,8 +365,8 @@ export class StagesService {
       }
     }
 
-    const page = Math.max(1, opts.page ?? 1);
-    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
+    const page = Math.max(1, opts.page || 1);
+    const limit = Math.min(100, Math.max(1, opts.limit || 20));
     const skip = (page - 1) * limit;
 
     const [data, total] = await this.prisma.$transaction([
