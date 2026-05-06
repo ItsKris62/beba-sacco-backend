@@ -37,12 +37,31 @@ async function run() {
   log('Tenant ID: ' + tenant.id);
 
   // Hash passwords with argon2id (same as auth service)
+  const superAdminHash = await argon2.hash('SuperAdmin@1234', { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
   const adminHash = await argon2.hash('Admin@1234', { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
   const memberHash = await argon2.hash('Member@1234', { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
 
+  // Upsert super admin user
+  const superAdminUser = await p.user.upsert({
+    where: { tenantId_email: { tenantId: tenant.id, email: 'superadmin@beba-sacco.com' } },
+    update: { passwordHash: superAdminHash, isActive: true, role: 'SUPER_ADMIN' },
+    create: {
+      tenantId: tenant.id,
+      email: 'superadmin@beba-sacco.com',
+      passwordHash: superAdminHash,
+      firstName: 'Super',
+      lastName: 'Admin',
+      phone: '+254700000000',
+      role: 'SUPER_ADMIN',
+      isActive: true,
+      emailVerified: true
+    }
+  });
+  log('Super admin upserted: ' + superAdminUser.email + ' (role: ' + superAdminUser.role + ')');
+
   // Upsert admin user
   const adminUser = await p.user.upsert({
-    where: { email: 'admin@beba-sacco.com' },
+    where: { tenantId_email: { tenantId: tenant.id, email: 'admin@beba-sacco.com' } },
     update: { passwordHash: adminHash, isActive: true, tenantId: tenant.id },
     create: {
       tenantId: tenant.id,
@@ -60,7 +79,7 @@ async function run() {
 
   // Upsert member user
   const memberUser = await p.user.upsert({
-    where: { email: 'member@beba-sacco.com' },
+    where: { tenantId_email: { tenantId: tenant.id, email: 'member@beba-sacco.com' } },
     update: { passwordHash: memberHash, isActive: true, tenantId: tenant.id },
     create: {
       tenantId: tenant.id,
@@ -123,8 +142,9 @@ async function run() {
 
   log('\n=== SUMMARY ===');
   log('Tenant ID: ' + tenant.id);
-  log('Admin login:  admin@beba-sacco.com  / Admin@1234  (role: MANAGER)');
-  log('Member login: member@beba-sacco.com / Member@1234 (role: MEMBER)');
+  log('Super Admin:  superadmin@beba-sacco.com / SuperAdmin@1234  (role: SUPER_ADMIN)');
+  log('Admin login:  admin@beba-sacco.com      / Admin@1234        (role: MANAGER)');
+  log('Member login: member@beba-sacco.com     / Member@1234       (role: MEMBER)');
   log('X-Tenant-ID header: ' + tenant.id);
   log('\n=== DONE ===');
 
