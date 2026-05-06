@@ -1128,6 +1128,46 @@ model CanaryDeployment {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SECURITY MONITORING – Failed login attempts and blocked IPs
+// Populated by AuthService on failed logins; queried by AdminHealthModule.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Tracks failed login attempts per IP+username combination for brute-force detection
+model FailedLoginAttempt {
+  id            String    @id @default(uuid())
+  tenantId      String
+  username      String    // email or phone used in the attempt
+  ipAddress     String
+  attempts      Int       @default(1)
+  blocked       Boolean   @default(false)
+  lastAttemptAt DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime? // null = no expiry; typically set to 24 h after first attempt
+
+  @@unique([tenantId, ipAddress, username])
+  @@index([tenantId, ipAddress])
+  @@index([lastAttemptAt])
+  @@schema("public")
+}
+
+// Persistently blocked IPs – created automatically when attempts threshold is exceeded,
+// or manually by a SUPER_ADMIN via the security dashboard.
+model BlockedIP {
+  id        String    @id @default(uuid())
+  tenantId  String
+  ipAddress String
+  reason    String    // Brute Force | SQLi Attempt | Rate Limit Exceeded | Manual
+  blockedAt DateTime  @default(now())
+  expiresAt DateTime? // null = permanent block
+  isActive  Boolean   @default(true)
+
+  @@unique([tenantId, ipAddress])
+  @@index([tenantId, isActive])
+  @@index([ipAddress])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PHASE 7 – Enterprise Operational Maturity, Zero-Trust & Production Launch
 // ─────────────────────────────────────────────────────────────────────────────
 

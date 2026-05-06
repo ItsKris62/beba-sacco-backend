@@ -5,11 +5,13 @@ import { AdminService } from './admin.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { AdminHealthModule } from './health/admin-health.module';
 
 @Module({
   imports: [
     AuditModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
+    AdminHealthModule,
   ],
   controllers: [AdminController],
   providers: [AdminService, PrismaService],

@@ -88,6 +88,42 @@ export class AuthService {
 
   // ─────────────────────────── LOGIN ───────────────────────────
 
+  private readonly BLOCK_THRESHOLD = 5;   // auto-block after N failures
+  private readonly BLOCK_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+  /**
+   * Fire-and-forget: increment FailedLoginAttempt counter and auto-create
+   * BlockedIP when the threshold is exceeded.  Must never throw.
+   */
+  private trackFailedAttemptAsync(tenantId: string, username: string, ipAddress?: string): void {
+    if (!ipAddress) return;
+    const ip = ipAddress;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    tenantAsyncStorage
+      .run(undefined, async () => {
+        const updated = await this.prisma.failedLoginAttempt.upsert({
+          where: { tenantId_ipAddress_username: { tenantId, ipAddress: ip, username } },
+          create: { tenantId, username, ipAddress: ip, attempts: 1, expiresAt },
+          update: { attempts: { increment: 1 }, lastAttemptAt: new Date(), expiresAt },
+          select: { attempts: true },
+        });
+
+        if (updated.attempts >= this.BLOCK_THRESHOLD) {
+          const blockExpiry = new Date(Date.now() + this.BLOCK_DURATION_MS);
+          await this.prisma.blockedIP.upsert({
+            where: { tenantId_ipAddress: { tenantId, ipAddress: ip } },
+            create: { tenantId, ipAddress: ip, reason: 'Brute Force', expiresAt: blockExpiry, isActive: true },
+            update: { isActive: true, expiresAt: blockExpiry, blockedAt: new Date() },
+          });
+          this.logger.warn(`IP ${ip} auto-blocked after ${updated.attempts} failed login attempts`);
+        }
+      })
+      .catch((err: unknown) =>
+        this.logger.error(`trackFailedAttemptAsync: ${(err as Error).message}`),
+      );
+  }
+
   /**
    * Authenticate a user by email or phone within the given tenant.
    * Returns access + refresh token pair on success.
@@ -139,6 +175,7 @@ export class AuthService {
         metadata: { reason: 'user_not_found', identifier: loginDto.email ?? loginDto.phone },
         ipAddress,
       });
+      this.trackFailedAttemptAsync(tenantId, loginDto.email ?? loginDto.phone ?? 'unknown', ipAddress);
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -152,6 +189,7 @@ export class AuthService {
         metadata: { reason: 'account_deactivated' },
         ipAddress,
       });
+      this.trackFailedAttemptAsync(tenantId, user.email ?? 'unknown', ipAddress);
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -172,6 +210,7 @@ export class AuthService {
         metadata: { reason: 'invalid_password' },
         ipAddress,
       });
+      this.trackFailedAttemptAsync(tenantId, user.email ?? 'unknown', ipAddress);
       throw new UnauthorizedException('Invalid credentials');
     }
 
