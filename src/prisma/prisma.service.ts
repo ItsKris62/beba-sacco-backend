@@ -80,19 +80,13 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   }
 
   async onModuleInit() {
-    try {
-      await this.$connect();
-      if (this.direct !== (this as unknown as PrismaClient)) {
-        await this.direct.$connect();
-      }
-      this.logger.log('✅ Database connections established (pooler + direct)');
-    } catch (error) {
-      this.logger.error('❌ Failed to connect to database', error);
-      throw error;
-    }
-
+    // Prisma opens connections lazily on the first query — do NOT call $connect() here.
+    // Eager connect tries to open all `connection_limit` sockets simultaneously at startup;
+    // on Neon free tier the compute cold-starts in 10-15 s, which exceeds the default
+    // pool_timeout=10 and causes "Timed out fetching a new connection from the connection pool".
     this.attachTenantMiddleware();
     this.attachAppendOnlyMiddleware();
+    this.logger.log('✅ Prisma middleware attached (lazy-connect mode)');
   }
 
   /**

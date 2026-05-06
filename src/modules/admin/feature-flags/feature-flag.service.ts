@@ -35,8 +35,21 @@ export class FeatureFlagService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.warmCache();
-    this.subscribeToReload();
+    try {
+      await this.warmCache();
+    } catch (err) {
+      // Non-fatal: DB may be cold-starting. Flags load on first access from DB.
+      this.logger.warn(
+        `Feature flag cache warm-up skipped at startup: ${(err as Error).message}`,
+      );
+    }
+    try {
+      this.subscribeToReload();
+    } catch (err) {
+      this.logger.warn(
+        `Feature flag Redis subscription failed: ${(err as Error).message}`,
+      );
+    }
   }
 
   private async warmCache(): Promise<void> {
