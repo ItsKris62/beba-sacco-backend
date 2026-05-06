@@ -63,6 +63,7 @@ export class ApplicationsController {
   })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'search', required: false, type: String })
   @ApiQuery({
     name: 'status',
     required: false,
@@ -73,9 +74,10 @@ export class ApplicationsController {
     @CurrentTenant() tenant: Tenant,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
+    @Query('search') search?: string,
     @Query('status') status?: string,
   ) {
-    return this.applicationsService.findPending(tenant.id, { page, limit, status: status as never });
+    return this.applicationsService.findPending(tenant.id, { page, limit, search, status: status as never });
   }
 
   // ─── GET ONE ─────────────────────────────────────────────────────────────────

@@ -158,7 +158,7 @@ export class ApplicationsService {
 
   async findPending(
     tenantId: string,
-    opts: { page?: number; limit?: number; status?: ApplicationStatus } = {},
+    opts: { page?: number; limit?: number; status?: ApplicationStatus; search?: string } = {},
   ) {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
@@ -167,6 +167,14 @@ export class ApplicationsService {
     const where = {
       tenantId,
       status: opts.status ?? { in: [ApplicationStatus.SUBMITTED, ApplicationStatus.PENDING_REVIEW] },
+      ...(opts.search && {
+        OR: [
+          { firstName: { contains: opts.search, mode: 'insensitive' as const } },
+          { lastName: { contains: opts.search, mode: 'insensitive' as const } },
+          { idNumber: { contains: opts.search, mode: 'insensitive' as const } },
+          { phoneNumber: { contains: opts.search, mode: 'insensitive' as const } },
+        ],
+      }),
     };
 
     const [data, total] = await this.prisma.$transaction([
