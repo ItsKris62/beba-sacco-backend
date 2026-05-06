@@ -94,6 +94,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    * This is the final defense against cross-tenant data leakage.
    */
   private attachTenantMiddleware(): void {
+    // Only models that have a tenantId column belong here.
+    // StageAssignment, MemberStage, RefreshSession, DataConsent,
+    // FeatureFlag, CanaryDeployment, PartnerUsageSnapshot have no tenantId —
+    // do NOT include them or Prisma will throw PrismaClientValidationError
+    // ("Unknown argument: tenantId") on every create/update against those models.
     const tenantScopedModels = new Set([
       'User', 'Member', 'Account', 'Loan', 'LoanProduct',
       'Transaction', 'Guarantor', 'MpesaTransaction', 'AuditLog',
@@ -102,11 +107,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       'ProvisioningEntry', 'DsarRequest', 'SasraRatioSnapshot',
       'CbkReturn', 'ApiClient', 'NotificationLog', 'ComplianceAlert',
       'DataImportLog', 'TenantCounter', 'LoanRepayment', 'SavingsRecord',
-      'GroupWelfare', 'GroupWelfareCollection', 'RefreshSession',
-      'DataConsent', 'MemberApplication', 'Stage', 'StageAssignment',
-      'Partner', 'PartnerUsageSnapshot', 'SlaIncident', 'ExecutiveReport',
-      'FeatureFlag', 'RiskScore', 'FeatureSnapshot', 'TenantRegionConfig',
-      'CanaryDeployment', 'DataAccessLog', 'ConsentRegistry', 'ErasureRequest',
+      'GroupWelfare', 'GroupWelfareCollection',
+      'MemberApplication', 'Stage',
+      'Partner', 'SlaIncident', 'ExecutiveReport',
+      'RiskScore', 'FeatureSnapshot', 'TenantRegionConfig',
+      'DataAccessLog', 'ConsentRegistry', 'ErasureRequest',
     ]);
 
     this.$use(async (params, next) => {
