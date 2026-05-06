@@ -1,9 +1,22 @@
 const fs = require('fs');
 const path = require('path');
 
-const envContent = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
-const dbUrl = envContent.match(/DATABASE_URL="([^"]+)"/)?.[1];
-process.env.DATABASE_URL = dbUrl;
+// Use DATABASE_URL from environment if already set (allows targeting production).
+// Fall back to reading from .env for local dev.
+if (!process.env.DATABASE_URL) {
+  try {
+    const envContent = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+    const dbUrl = envContent.match(/DATABASE_URL="([^"]+)"/)?.[1];
+    if (dbUrl) process.env.DATABASE_URL = dbUrl;
+  } catch {
+    // .env not found — DATABASE_URL must be set in the environment
+  }
+}
+
+if (!process.env.DATABASE_URL) {
+  console.error('ERROR: DATABASE_URL is not set. Pass it as an env var or add it to .env');
+  process.exit(1);
+}
 
 const { PrismaClient } = require('@prisma/client');
 const argon2 = require('argon2');
