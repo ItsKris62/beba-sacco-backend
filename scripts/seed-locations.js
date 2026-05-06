@@ -403,7 +403,9 @@ async function ensureSuperAdmin() {
     console.log(`✅ Platform tenant created: ${tenant.id}`);
   }
 
-  const existing = await prisma.user.findUnique({ where: { email } });
+  const existing = await prisma.user.findUnique({
+    where: { tenantId_email: { tenantId: tenant.id, email } },
+  });
   if (existing) {
     console.log(`ℹ️  SUPER_ADMIN already exists: ${email}`);
     return;
@@ -426,7 +428,7 @@ async function ensureSuperAdmin() {
       role: 'SUPER_ADMIN',
       isActive: true,
       mustChangePassword: false,
-      userStatus: 'ACTIVE',
+      status: 'APPROVED',
     },
   });
 
