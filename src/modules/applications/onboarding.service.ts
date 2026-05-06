@@ -21,7 +21,7 @@ import { ApproveApplicationDto, RejectApplicationDto } from './dto/review-applic
  * Approval flow (atomic $transaction):
  *  1. Validate application is in SUBMITTED or PENDING_REVIEW state
  *  2. Check for duplicate idNumber / phoneNumber on User table
- *  3. Generate member number (tenant-scoped counter)
+ *  3. Generate role-prefixed random member number (retried on collision)
  *  4. Create User (mustChangePassword = true)
  *  5. Create Member profile (kycStatus = APPROVED)
  *  6. Create FOSA account
@@ -30,12 +30,15 @@ import { ApproveApplicationDto, RejectApplicationDto } from './dto/review-applic
  *  9. Update MemberApplication.status = APPROVED
  * 10. Audit log
  *
- * Rollback: any failure in steps 1–9 rolls back the entire transaction.
+ * Member number format: {ROLE_PREFIX}-{6-digit-random}
+ *   MEMBER    → MBR-XXXXXX
+ *   CHAIRMAN  → CHM-XXXXXX
+ *   SECRETARY → SEC-XXXXXX
+ *   TREASURER → TRS-XXXXXX
  *
  * IMPORTANT – Neon DB: Interactive transactions ($transaction callback form) require
  * a direct (non-pooler) connection. Set DIRECT_URL in your environment to the
- * non-pooler Neon connection string. Prisma 5 automatically routes interactive
- * transactions through directUrl when it is configured.
+ * non-pooler Neon connection string.
  */
 @Injectable()
 export class OnboardingService {
@@ -96,8 +99,7 @@ export class OnboardingService {
     }
 
     // Extra idempotency: a previous attempt may have committed the member row but
-    // failed before updating the application status (e.g. Neon cold-start / pooler
-    // mid-transaction timeout). Detect this and heal rather than error.
+    // failed before updating the application status.
     const preExistingMember = await this.prisma.member.findFirst({
       where: { tenantId, nationalId: app.idNumber },
       include: {
@@ -124,26 +126,23 @@ export class OnboardingService {
       };
     }
 
-    // Duplicate guard on User table (belt-and-suspenders — also catches cross-tenant clashes
-    // since idNumber and phoneNumber carry a global @unique constraint on the User model)
+    // Duplicate guard on User table
     const dupUser = await this.prisma.user.findFirst({
       where: {
         OR: [{ idNumber: app.idNumber }, { phoneNumber: app.phoneNumber }],
       },
-      select: { id: true },
+      select: { id: true, idNumber: true, phoneNumber: true },
     });
     if (dupUser) {
-      throw new ConflictException(
-        'A user with this ID number or phone number already exists',
-      );
+      const field = dupUser.idNumber === app.idNumber ? 'ID number' : 'phone number';
+      throw new ConflictException(`A user with this ${field} already exists.`);
     }
 
-    // Derive email: use provided or generate from idNumber
+    // Derive email
     const email =
       dto.email?.toLowerCase() ??
       `member.${app.idNumber}@${tenantId.slice(0, 8)}.beba.local`;
 
-    // Check email uniqueness
     const dupEmail = await this.prisma.user.findFirst({
       where: { email },
       select: { id: true },
@@ -154,7 +153,6 @@ export class OnboardingService {
       );
     }
 
-    // Generate temporary password
     const tempPassword = dto.temporaryPassword ?? this.generateTempPassword();
     const passwordHash = await argon2.hash(tempPassword, {
       type: argon2.argon2id,
@@ -163,7 +161,8 @@ export class OnboardingService {
       parallelism: 1,
     });
 
-    // ── Atomic transaction ────────────────────────────────────────────────────
+    // ── Atomic transaction with retry on number collision ─────────────────────
+    const MAX_ATTEMPTS = 3;
     let result: {
       user: { id: string; email: string; firstName: string; lastName: string };
       member: { id: string; memberNumber: string };
@@ -171,181 +170,185 @@ export class OnboardingService {
       stage: { id: string; name: string };
       assignment: { id: string; position: string };
       tempPassword: string;
-    };
+    } | undefined;
 
-    try {
-      result = await this.prisma.$transaction(async (tx) => {
-        // 1. Increment tenant member counter
-        const counter = await tx.tenantCounter.upsert({
-          where: { tenantId },
-          create: { tenantId, memberSeq: 1, accountSeq: 2 },
-          update: { memberSeq: { increment: 1 }, accountSeq: { increment: 2 } },
-        });
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const memberNumber = this.generateMemberNumber(app.position);
+      const fosaAccNum = this.generateAccountNumber('FOSA');
+      const bosaAccNum = this.generateAccountNumber('BOSA');
 
-        const memberNumber = `M-${String(counter.memberSeq).padStart(6, '0')}`;
-        const fosaAccNum = `ACC-FOSA-${String(counter.accountSeq - 1).padStart(6, '0')}`;
-        const bosaAccNum = `ACC-BOSA-${String(counter.accountSeq).padStart(6, '0')}`;
+      try {
+        result = await this.prisma.$transaction(async (tx) => {
+          // 1. Create User
+          const user = await tx.user.create({
+            data: {
+              tenantId,
+              email,
+              passwordHash,
+              firstName: app.firstName,
+              lastName: app.lastName,
+              phone: app.phoneNumber,
+              phoneNumber: app.phoneNumber,
+              idNumber: app.idNumber,
+              wardId: app.wardId,
+              role: UserRole.MEMBER,
+              mustChangePassword: true,
+              status: UserStatus.APPROVED,
+            },
+            select: { id: true, email: true, firstName: true, lastName: true },
+          });
 
-        // 2. Create User
-        const user = await tx.user.create({
-          data: {
-            tenantId,
-            email,
-            passwordHash,
-            firstName: app.firstName,
-            lastName: app.lastName,
-            phone: app.phoneNumber,
-            phoneNumber: app.phoneNumber,
-            idNumber: app.idNumber,
-            wardId: app.wardId,
-            role: UserRole.MEMBER,
-            mustChangePassword: true,
-            status: UserStatus.APPROVED,
-          },
-          select: { id: true, email: true, firstName: true, lastName: true },
-        });
+          // 2. Create Member profile
+          const member = await tx.member.create({
+            data: {
+              tenantId,
+              userId: user.id,
+              memberNumber,
+              nationalId: app.idNumber,
+              kycStatus: KycStatus.APPROVED,
+              kycReviewedAt: new Date(),
+              kycReviewedByUserId: actorId,
+              isActive: true,
+            },
+            select: { id: true, memberNumber: true },
+          });
 
-        // 3. Create Member profile
-        const member = await tx.member.create({
-          data: {
-            tenantId,
-            userId: user.id,
-            memberNumber,
-            nationalId: app.idNumber,
-            kycStatus: KycStatus.APPROVED,
-            kycReviewedAt: new Date(),
-            kycReviewedByUserId: actorId,
-            isActive: true,
-          },
-          select: { id: true, memberNumber: true },
-        });
+          // 3. Create FOSA account
+          const fosaAccount = await tx.account.create({
+            data: {
+              tenantId,
+              memberId: member.id,
+              accountNumber: fosaAccNum,
+              accountType: AccountType.FOSA,
+              balance: 0,
+              isActive: true,
+            },
+            select: { id: true, accountNumber: true, accountType: true },
+          });
 
-        // 4. Create FOSA account
-        const fosaAccount = await tx.account.create({
-          data: {
-            tenantId,
-            memberId: member.id,
-            accountNumber: fosaAccNum,
-            accountType: AccountType.FOSA,
-            balance: 0,
-            isActive: true,
-          },
-          select: { id: true, accountNumber: true, accountType: true },
-        });
+          // 4. Create BOSA account
+          const bosaAccount = await tx.account.create({
+            data: {
+              tenantId,
+              memberId: member.id,
+              accountNumber: bosaAccNum,
+              accountType: AccountType.BOSA,
+              balance: 0,
+              isActive: true,
+            },
+            select: { id: true, accountNumber: true, accountType: true },
+          });
 
-        // 5. Create BOSA account
-        const bosaAccount = await tx.account.create({
-          data: {
-            tenantId,
-            memberId: member.id,
-            accountNumber: bosaAccNum,
-            accountType: AccountType.BOSA,
-            balance: 0,
-            isActive: true,
-          },
-          select: { id: true, accountNumber: true, accountType: true },
-        });
-
-        // 6. Find or create Stage (upsert so the approval is self-healing)
-        const stage = await tx.stage.upsert({
-          where: {
-            name_wardId_tenantId: {
+          // 5. Find or create Stage (upsert so the approval is self-healing)
+          const stage = await tx.stage.upsert({
+            where: {
+              name_wardId_tenantId: {
+                name: app.stageName,
+                wardId: app.wardId,
+                tenantId,
+              },
+            },
+            create: {
               name: app.stageName,
               wardId: app.wardId,
               tenantId,
             },
-          },
-          create: {
-            name: app.stageName,
-            wardId: app.wardId,
-            tenantId,
-          },
-          update: {},
-          select: { id: true, name: true },
+            update: {},
+            select: { id: true, name: true },
+          });
+
+          // 6. Create StageAssignment
+          const assignment = await tx.stageAssignment.create({
+            data: {
+              userId: user.id,
+              stageId: stage.id,
+              position: (app.position as 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER') ?? 'MEMBER',
+              isActive: true,
+            },
+            select: { id: true, position: true },
+          });
+
+          // 7. Update application status
+          await tx.memberApplication.update({
+            where: { id: applicationId },
+            data: {
+              status: ApplicationStatus.APPROVED,
+              reviewedBy: actorId,
+              reviewNotes: dto.reviewNotes ?? 'Approved',
+            },
+          });
+
+          return {
+            user,
+            member,
+            accounts: [fosaAccount, bosaAccount],
+            stage,
+            assignment,
+            tempPassword,
+          };
         });
 
-        // 7. Create StageAssignment
-        const assignment = await tx.stageAssignment.create({
-          data: {
-            userId: user.id,
-            stageId: stage.id,
-            position: (app.position as 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER') ?? 'MEMBER',
-            isActive: true,
-          },
-          select: { id: true, position: true },
-        });
-
-        // 8. Update application status
-        await tx.memberApplication.update({
-          where: { id: applicationId },
-          data: {
-            status: ApplicationStatus.APPROVED,
-            reviewedBy: actorId,
-            reviewNotes: dto.reviewNotes ?? 'Approved',
-          },
-        });
-
-        return {
-          user,
-          member,
-          accounts: [fosaAccount, bosaAccount],
-          stage,
-          assignment,
-          tempPassword,
-        };
-      });
-    } catch (err) {
-      // Convert Prisma unique-constraint errors to 409 so the client gets a clear message
-      // instead of a generic 500.
-      if (err instanceof PrismaClientKnownRequestError) {
-        if (err.code === 'P2002') {
+        break; // transaction succeeded — exit retry loop
+      } catch (err) {
+        if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
           const fields = Array.isArray(err.meta?.target)
             ? (err.meta.target as string[]).join(', ')
-            : '';
-          // memberNumber conflict: counter drifted from actual DB state (partial commit).
-          // Attempt self-healing by returning the member that already occupies this slot.
-          if (fields.includes('memberNumber')) {
-            const recovered = await this.prisma.member.findFirst({
-              where: { tenantId, nationalId: app.idNumber },
-              include: {
-                user: { select: { id: true, email: true, firstName: true, lastName: true } },
-                accounts: { select: { id: true, accountNumber: true, accountType: true } },
-              },
-            });
-            if (recovered) {
-              await this.prisma.memberApplication
-                .update({
-                  where: { id: applicationId },
-                  data: { status: ApplicationStatus.APPROVED, reviewedBy: actorId },
-                })
-                .catch(() => {});
-              return {
-                success: true,
-                user: recovered.user,
-                member: { id: recovered.id, memberNumber: recovered.memberNumber },
-                accounts: recovered.accounts,
-                stage: { id: '', name: app.stageName },
-                stageAssignment: { id: '', position: app.position },
-                temporaryPassword: '(already set — member must use existing password)',
-                message: `Member ${recovered.memberNumber} was already created from this application.`,
-              };
-            }
+            : String(err.meta?.target ?? '');
+
+          // Number collision — retry with freshly generated numbers
+          if (
+            attempt < MAX_ATTEMPTS - 1 &&
+            (fields.includes('memberNumber') || fields.includes('accountNumber'))
+          ) {
+            this.logger.warn(
+              `Number collision on attempt ${attempt + 1} for application ${applicationId} (fields: ${fields}), retrying…`,
+            );
+            continue;
           }
+
+          // Phone or ID already exists on User table
+          if (fields.includes('phoneNumber')) {
+            throw new ConflictException('A user with this phone number already exists.');
+          }
+          if (fields.includes('idNumber')) {
+            throw new ConflictException('A user with this ID number already exists.');
+          }
+          if (fields.includes('email')) {
+            throw new ConflictException(
+              `Email ${email} is already registered. Provide a different email.`,
+            );
+          }
+
+          this.logger.error(
+            `Prisma P2002 on fields "${fields}" for application ${applicationId}`,
+            err.message,
+          );
           throw new ConflictException(
             `A member with this ${fields || 'ID number or phone number'} already exists.`,
           );
         }
-        // Any other known Prisma error — log it and surface a helpful message.
-        // Common cause: DIRECT_URL not set → pooler blocks interactive transactions.
-        this.logger.error(
-          `Prisma error ${err.code} during member approval for application ${applicationId}`,
-          err.message,
-        );
-        throw new InternalServerErrorException(
-          'Member creation failed. If this persists, ensure DIRECT_URL is set to the non-pooler Neon connection string.',
-        );
+
+        if (err instanceof PrismaClientKnownRequestError) {
+          this.logger.error(
+            `Prisma error ${err.code} during member approval for application ${applicationId}`,
+            err.message,
+          );
+          throw new InternalServerErrorException(
+            'Member creation failed. If this persists, ensure DIRECT_URL is set to the non-pooler Neon connection string.',
+          );
+        }
+
+        throw err;
       }
-      throw err;
+    }
+
+    if (!result) {
+      this.logger.error(
+        `Failed to generate unique numbers after ${MAX_ATTEMPTS} attempts for application ${applicationId}`,
+      );
+      throw new InternalServerErrorException(
+        'Could not generate unique member number after multiple attempts. Please try again.',
+      );
     }
     // ── End transaction ───────────────────────────────────────────────────────
 
@@ -448,6 +451,32 @@ export class OnboardingService {
   }
 
   // ─── PRIVATE HELPERS ──────────────────────────────────────────────────────────
+
+  /**
+   * Generates a role-prefixed random member number.
+   * Format: {PREFIX}-{6-digit-random}
+   *   MEMBER    → MBR-XXXXXX
+   *   CHAIRMAN  → CHM-XXXXXX
+   *   SECRETARY → SEC-XXXXXX
+   *   TREASURER → TRS-XXXXXX
+   */
+  private generateMemberNumber(position: string): string {
+    const prefixes: Record<string, string> = {
+      CHAIRMAN: 'CHM',
+      SECRETARY: 'SEC',
+      TREASURER: 'TRS',
+      MEMBER: 'MBR',
+    };
+    const prefix = prefixes[position?.toUpperCase()] ?? 'MBR';
+    const num = Math.floor(100000 + Math.random() * 900000);
+    return `${prefix}-${num}`;
+  }
+
+  /** Generates a random account number. Format: {TYPE}-XXXXXX */
+  private generateAccountNumber(type: 'FOSA' | 'BOSA'): string {
+    const num = Math.floor(100000 + Math.random() * 900000);
+    return `${type}-${num}`;
+  }
 
   private generateTempPassword(): string {
     const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789@#$!';

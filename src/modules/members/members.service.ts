@@ -4,9 +4,11 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateMemberDto } from './dto/create-member.dto';
@@ -17,11 +19,8 @@ import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 /**
  * Members Service
  *
- * All operations are scoped to a tenant via tenantId.
- * memberNumber is auto-incremented per-tenant using TenantCounter.
- *
- * TODO: Phase 3 – KYC verification integration (Smile Identity / Jumio)
- * TODO: Phase 4 – member contribution/dividend tracking
+ * memberNumber uses a role-prefixed random format (MBR-XXXXXX) with
+ * automatic retry on the rare collision, replacing the fragile TenantCounter.
  */
 @Injectable()
 export class MembersService {
@@ -50,18 +49,15 @@ export class MembersService {
     createdBy: string,
     ipAddress?: string,
   ): Promise<Member> {
-    // Verify the user belongs to this tenant
     const user = await this.prisma.user.findFirst({
       where: { id: dto.userId, tenantId },
       select: { id: true, email: true, firstName: true, lastName: true },
     });
     if (!user) throw new NotFoundException('User not found in this tenant');
 
-    // Prevent duplicate member profiles
     const existing = await this.prisma.member.findUnique({ where: { userId: dto.userId } });
     if (existing) throw new ConflictException('User already has a member profile');
 
-    // Validate stageIds if provided — all must belong to this tenant
     if (dto.stageIds && dto.stageIds.length > 0) {
       const stages = await this.prisma.stage.findMany({
         where: { id: { in: dto.stageIds }, tenantId },
@@ -72,45 +68,66 @@ export class MembersService {
       }
     }
 
-    // Atomic member number generation
-    const counter = await this.prisma.tenantCounter.upsert({
-      where: { tenantId },
-      create: { tenantId, memberSeq: 1 },
-      update: { memberSeq: { increment: 1 } },
-    });
-    const memberNumber = `M-${String(counter.memberSeq).padStart(6, '0')}`;
+    // Retry up to 3 times on the rare memberNumber collision
+    const MAX_ATTEMPTS = 3;
+    let member: Awaited<ReturnType<typeof this.prisma.member.create>> | undefined;
 
-    const member = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.member.create({
-        data: {
-          tenantId,
-          userId: dto.userId,
-          memberNumber,
-          nationalId: dto.nationalId,
-          kraPin: dto.kraPin,
-          employer: dto.employer,
-          occupation: dto.occupation,
-          dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
-        },
-        include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
-      });
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const memberNumber = this.generateMemberNumber();
 
-      // Create MemberStage join records — backend auto-resolves location
-      if (dto.stageIds && dto.stageIds.length > 0) {
-        const uniqueStageIds = [...new Set(dto.stageIds)];
-        await tx.memberStage.createMany({
-          data: uniqueStageIds.map((stageId) => ({
-            memberId: created.id,
-            stageId,
-            assignedBy: createdBy,
-            isActive: true,
-          })),
-          skipDuplicates: true,
+      try {
+        member = await this.prisma.$transaction(async (tx) => {
+          const created = await tx.member.create({
+            data: {
+              tenantId,
+              userId: dto.userId,
+              memberNumber,
+              nationalId: dto.nationalId,
+              kraPin: dto.kraPin,
+              employer: dto.employer,
+              occupation: dto.occupation,
+              dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
+            },
+            include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
+          });
+
+          if (dto.stageIds && dto.stageIds.length > 0) {
+            const uniqueStageIds = [...new Set(dto.stageIds)];
+            await tx.memberStage.createMany({
+              data: uniqueStageIds.map((stageId) => ({
+                memberId: created.id,
+                stageId,
+                assignedBy: createdBy,
+                isActive: true,
+              })),
+              skipDuplicates: true,
+            });
+          }
+
+          return created;
         });
-      }
 
-      return created;
-    });
+        break; // success
+      } catch (err) {
+        if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
+          const fields = Array.isArray(err.meta?.target)
+            ? (err.meta.target as string[]).join(', ')
+            : String(err.meta?.target ?? '');
+
+          if (fields.includes('memberNumber') && attempt < MAX_ATTEMPTS - 1) {
+            this.logger.warn(`memberNumber collision on attempt ${attempt + 1}, retrying…`);
+            continue;
+          }
+        }
+        throw err;
+      }
+    }
+
+    if (!member) {
+      throw new InternalServerErrorException(
+        'Could not generate a unique member number. Please try again.',
+      );
+    }
 
     await this.audit.create({
       tenantId,
@@ -118,11 +135,10 @@ export class MembersService {
       action: 'MEMBER.CREATE',
       resource: 'Member',
       resourceId: member.id,
-      metadata: { memberNumber, linkedUserId: dto.userId, stageIds: dto.stageIds },
+      metadata: { memberNumber: member.memberNumber, linkedUserId: dto.userId, stageIds: dto.stageIds },
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-    // Send welcome email to the new member
     if (user.email) {
       const tenant = await this.prisma.tenant.findUnique({
         where: { id: tenantId },
@@ -236,6 +252,12 @@ export class MembersService {
   }
 
   // ─── HELPERS ─────────────────────────────────────────────────
+
+  /** Generates MBR-XXXXXX (random 6-digit suffix, always 6 digits) */
+  private generateMemberNumber(): string {
+    const num = Math.floor(100000 + Math.random() * 900000);
+    return `MBR-${num}`;
+  }
 
   private async assertExists(id: string, tenantId: string): Promise<void> {
     const exists = await this.prisma.member.findFirst({ where: { id, tenantId }, select: { id: true } });
