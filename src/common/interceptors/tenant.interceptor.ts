@@ -61,6 +61,14 @@ export class TenantInterceptor implements NestInterceptor {
       return next.handle();
     }
 
+    if (request.tenant && request.tenantId) {
+      const existingTenant = request.tenant as { id: string; slug?: string };
+      return tenantAsyncStorage.run(
+        { tenantId: existingTenant.id, tenantSlug: existingTenant.slug },
+        () => next.handle(),
+      );
+    }
+
     const rawHeader = request.headers['x-tenant-id'];
     const tenantId = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
 

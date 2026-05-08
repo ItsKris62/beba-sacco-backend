@@ -81,6 +81,26 @@ export class IdempotencyService {
     }
   }
 
+  async acquire(key: string, tenantId: string, ttlSeconds = 3600): Promise<boolean> {
+    const redisKey = this.buildKey(key, tenantId);
+    return this.redis.set(redisKey, JSON.stringify({ status: 'PROCESSING' }), ttlSeconds, true);
+  }
+
+  async getResult<T>(key: string, tenantId: string): Promise<T | null> {
+    const raw = await this.redis.get(this.buildKey(key, tenantId));
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as { status: string; result?: T };
+      return parsed.status === 'COMPLETED' && parsed.result !== undefined ? parsed.result : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async storeResult<T>(key: string, tenantId: string, result: T, ttlSeconds = 3600): Promise<void> {
+    await this.complete(key, tenantId, result, ttlSeconds);
+  }
+
   /**
    * Store the final response for replay on duplicate requests.
    */

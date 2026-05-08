@@ -5,6 +5,13 @@
   "testRegex": ".e2e-spec.ts$",
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"
-  }
+  },
+  "moduleNameMapper": {
+    "^@common/(.*)$": "<rootDir>/../src/common/$1",
+    "^@modules/(.*)$": "<rootDir>/../src/modules/$1",
+    "^@prisma/(.*)$": "<rootDir>/../src/prisma/$1"
+  },
+  "setupFilesAfterEnv": ["<rootDir>/helpers/test-setup.ts"],
+  "testTimeout": 60000
 }
 

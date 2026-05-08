@@ -11,6 +11,7 @@ import { LoansModule } from '../loans/loans.module';
 import { LoanApplicationModule } from '../loans/loan-application.module';
 import { StatementsModule } from '../statements/statements.module';
 import { StorageModule } from '../storage/storage.module';
+import { DashboardModule } from '../dashboard/dashboard.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 
 @Module({
@@ -21,6 +22,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     LoanApplicationModule, // ✅ Makes LoanApplicationService available to MemberPortalController
     StatementsModule,
     StorageModule,
+    DashboardModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
   controllers: [MembersController, MemberPortalController],

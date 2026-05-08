@@ -44,6 +44,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      # Heap tuning for Node 20 in constrained containers
+      NODE_OPTIONS: "--max-old-space-size=384"
     expose:
       - "3000"
     healthcheck:
@@ -59,6 +61,37 @@ services:
         limits:
           cpus: '1.0'
           memory: 512M
+
+  # ── BullMQ Worker ──────────────────────────────────────────────────────────
+  worker:
+    image: ghcr.io/${GITHUB_REPOSITORY:-beba/backend}:${IMAGE_TAG:-latest}
+    container_name: beba_worker_prod
+    <<: [*restart-policy, *logging]
+    command: ["node", "dist/main-worker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      WORKER_MODE: "true"
+      NODE_OPTIONS: "--max-old-space-size=384"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - beba_prod_net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 384M
 
   # ── PostgreSQL 15 ──────────────────────────────────────────────────────────
   postgres:

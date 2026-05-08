@@ -14,6 +14,7 @@ import { CommonServicesModule } from '../../common/services/common-services.modu
       { name: QUEUE_NAMES.REPAYMENT_SCHEDULE },
       { name: QUEUE_NAMES.MPESA_RECONCILIATION },
       { name: QUEUE_NAMES.LEDGER_INTEGRITY },
+      { name: QUEUE_NAMES.AUDIT_LOG },
     ),
   ],
   providers: [PrismaService, FinancialService, ReconciliationService],

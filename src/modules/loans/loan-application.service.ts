@@ -29,6 +29,7 @@ import { AdminLoanStatus } from './dto/update-loan-status.dto';
 import {
   QUEUE_NAMES,
   GuarantorReminderJobPayload,
+  GuarantorValidationJobPayload,
   EmailJobPayload,
   AuditLogJobPayload,
 } from '../queue/queue.constants';
@@ -109,6 +110,8 @@ export class LoanApplicationService {
     private readonly idempotency: IdempotencyService,
     @InjectQueue(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER)
     private readonly guarantorReminderQueue: Queue<GuarantorReminderJobPayload>,
+    @InjectQueue(QUEUE_NAMES.GUARANTOR_VALIDATION)
+    private readonly guarantorValidationQueue: Queue<GuarantorValidationJobPayload>,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
     @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
@@ -702,8 +705,21 @@ export class LoanApplicationService {
     tenantId: string,
     userId: string,
     req: Request,
+    idempotencyHeader?: string,
   ) {
     const correlationId = (req.headers['x-request-id'] as string) ?? uuidv4();
+    const headerKey = idempotencyHeader?.trim();
+    if (!headerKey) {
+      throw new BadRequestException('Idempotency-Key header is required');
+    }
+    const idemKey = `guarantor:response:${loanId}:${guarantorMemberId}:${headerKey}`;
+    const idemCheck = await this.idempotency.checkAndReserve(idemKey, tenantId, 72 * 60 * 60);
+    if (idemCheck.status === 'COMPLETED') {
+      return idemCheck.result as { loanId: string; memberId: string; status: string };
+    }
+    if (idemCheck.status === 'PROCESSING') {
+      throw new ConflictException('Your consent response is already being processed. Please wait.');
+    }
 
     // 1. Consent spoofing prevention: only the targeted guarantor can respond
     const member = await this.prisma.member.findFirst({
@@ -714,97 +730,141 @@ export class LoanApplicationService {
       throw new ForbiddenException('You are not authorized to respond to this guarantor request');
     }
 
-    // 2. Find the guarantor record
-    const guarantor = await this.prisma.guarantor.findFirst({
-      where: { loanId, memberId: guarantorMemberId, tenantId },
-    });
-    if (!guarantor) throw new NotFoundException('Guarantor request not found for this loan');
-
-    if (guarantor.status !== GuarantorStatus.PENDING) {
-      throw new ConflictException(`You have already ${guarantor.status.toLowerCase()} this guarantee request`);
-    }
-
-    // 3. Check expiry (72h window)
-    const invitedAt = guarantor.invitedAt;
-    const expiryHours = 72;
-    const expiresAt = new Date(invitedAt);
-    expiresAt.setHours(expiresAt.getHours() + expiryHours);
-
-    if (new Date() > expiresAt) {
-      // Auto-expire and log
-      await this.prisma.guarantor.update({
-        where: { id: guarantor.id },
-        data: { status: GuarantorStatus.DECLINED, respondedAt: new Date(), notes: 'Consent window expired (72h)' },
-      });
-      await this.createConsentLog(guarantor.id, tenantId, guarantorMemberId, 'EXPIRED', req, correlationId, false);
-      throw new BadRequestException('Consent window has expired. Please request a new guarantor invitation.');
-    }
-
-    // 4. Idempotency via Redis
-    const idemKey = `guarantor:consent:${loanId}:${guarantorMemberId}`;
-    const idemCheck = await this.idempotency.checkAndReserve(idemKey, tenantId, 72 * 60 * 60);
-    if (idemCheck.status === 'COMPLETED') {
-      return idemCheck.result as { loanId: string; memberId: string; status: string };
-    }
-    if (idemCheck.status === 'PROCESSING') {
-      throw new ConflictException('Your consent response is already being processed. Please wait.');
-    }
-
-    // 5. Digital acknowledgment validation
     if (!dto.digitalAcknowledgment) {
       await this.idempotency.release(idemKey, tenantId);
       throw new BadRequestException('Digital acknowledgment is required to proceed. Please confirm explicitly.');
     }
 
     try {
-      const newStatus =
-        dto.action === GuarantorConsentAction.ACCEPT ? GuarantorStatus.ACCEPTED : GuarantorStatus.DECLINED;
+      const txResult = await this.prisma.$transaction(async (tx) => {
+        const [locked] = await tx.$queryRaw<
+          Array<{
+            id: string;
+            status: GuarantorStatus;
+            invitedAt: Date;
+            guaranteedAmount: string;
+          }>
+        >`
+          SELECT id, status, "invitedAt", "guaranteedAmount"
+          FROM "Guarantor"
+          WHERE "loanId" = ${loanId}
+            AND "memberId" = ${guarantorMemberId}
+            AND "tenantId" = ${tenantId}
+          FOR UPDATE
+        `;
+        if (!locked) throw new NotFoundException('Guarantor request not found for this loan');
+        if (locked.status !== GuarantorStatus.PENDING) {
+          throw new ConflictException(`You have already ${locked.status.toLowerCase()} this guarantee request`);
+        }
 
-      // Update guarantor status
-      await this.prisma.guarantor.update({
-        where: { id: guarantor.id },
-        data: {
+        const expiresAt = new Date(locked.invitedAt);
+        expiresAt.setHours(expiresAt.getHours() + 72);
+        const newStatus =
+          new Date() > expiresAt
+            ? GuarantorStatus.EXPIRED
+            : dto.action === GuarantorConsentAction.ACCEPT
+              ? GuarantorStatus.ACCEPTED
+              : GuarantorStatus.REJECTED;
+
+        const auditMetadata = {
+          ipAddress: req.ip ?? null,
+          userAgent: req.headers['user-agent'] ?? null,
+          deviceId: (req.headers['x-device-id'] as string) ?? null,
+          digitalAcknowledgment: dto.digitalAcknowledgment,
+          correlationId,
+          jurisdiction: 'KE',
+          retentionYears: 7,
+        };
+
+        const updatedGuarantor = await tx.guarantor.update({
+          where: { id: locked.id },
+          data: {
+            status: newStatus,
+            respondedAt: new Date(),
+            notes: newStatus === GuarantorStatus.EXPIRED ? 'Consent window expired (72h)' : dto.notes,
+            auditMetadata,
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            tenantId,
+            actorId: userId,
+            action: 'GUARANTOR.RESPOND',
+            entityType: 'Guarantor',
+            entityId: locked.id,
+            oldValue: { status: locked.status },
+            newValue: { status: newStatus },
+            metadata: { loanId, notes: dto.notes, auditMetadata },
+            ipAddress: req.ip ?? null,
+            userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+          },
+        });
+
+        if (newStatus === GuarantorStatus.ACCEPTED) {
+          const loan = await tx.loan.findFirst({
+            where: { id: loanId, tenantId, status: LoanStatus.PENDING_GUARANTORS },
+            select: { id: true, principalAmount: true, status: true },
+          });
+          if (loan) {
+            const accepted = await tx.guarantor.findMany({
+              where: { loanId, tenantId, status: GuarantorStatus.ACCEPTED },
+              select: { guaranteedAmount: true },
+            });
+            const totalAccepted = accepted.reduce(
+              (sum, g) => sum.plus(new Decimal(g.guaranteedAmount.toString())),
+              new Decimal(0),
+            );
+            const principal = new Decimal(loan.principalAmount.toString());
+            if (totalAccepted.greaterThanOrEqualTo(principal)) {
+              await tx.loan.update({
+                where: { id: loanId },
+                data: { status: LoanStatus.UNDER_REVIEW },
+              });
+              await tx.auditLog.create({
+                data: {
+                  tenantId,
+                  actorId: userId,
+                  action: 'LOAN.AUTO_ADVANCE_UNDER_REVIEW',
+                  entityType: 'Loan',
+                  entityId: loanId,
+                  oldValue: { status: loan.status },
+                  newValue: { status: LoanStatus.UNDER_REVIEW },
+                  metadata: {
+                    totalAccepted: totalAccepted.toNumber(),
+                    requiredCoverage: principal.toNumber(),
+                    correlationId,
+                  },
+                  ipAddress: req.ip ?? null,
+                  userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+                },
+              });
+            }
+          }
+        }
+
+        return {
+          loanId,
+          memberId: guarantorMemberId,
           status: newStatus,
-          respondedAt: new Date(),
-          notes: dto.notes,
-        },
+          guarantorId: updatedGuarantor.id,
+          guaranteedAmount: new Decimal(updatedGuarantor.guaranteedAmount.toString()).toNumber(),
+        };
       });
 
-      // Create immutable consent log
-      await this.createConsentLog(
-        guarantor.id,
-        tenantId,
-        guarantorMemberId,
-        dto.action,
-        req,
-        correlationId,
-        dto.digitalAcknowledgment,
-      );
+      if (txResult.status === GuarantorStatus.EXPIRED) {
+        await this.idempotency.complete(idemKey, tenantId, txResult, 72 * 60 * 60);
+        throw new BadRequestException('Consent window has expired. Please request a new guarantor invitation.');
+      }
 
-      // Audit trail
-      await this.audit
-        .create({
-          tenantId,
-          actorId: userId,
-          action: `LOAN.GUARANTOR_${newStatus}`,
-          entityType: 'Guarantor',
-          entityId: guarantor.id,
-          metadata: { loanId, notes: dto.notes, correlationId },
-          ipAddress: req.ip ?? undefined,
-          userAgent: req.headers['user-agent'] ?? undefined,
-          requestId: correlationId,
-        })
-        .catch((e: unknown) => this.logger.error('Audit write failed', e));
-
-      // Publish domain event
-      if (dto.action === GuarantorConsentAction.ACCEPT) {
+      if (txResult.status === GuarantorStatus.ACCEPTED) {
         await this.publishEvent({
           type: 'GuarantorConsented',
           payload: {
             loanId,
             tenantId,
             guarantorMemberId,
-            guaranteedAmount: new Decimal(guarantor.guaranteedAmount.toString()).toNumber(),
+            guaranteedAmount: txResult.guaranteedAmount,
             ipAddress: req.ip ?? undefined,
             userAgent: req.headers['user-agent'] ?? undefined,
             deviceId: (req.headers['x-device-id'] as string) ?? undefined,
@@ -825,10 +885,24 @@ export class LoanApplicationService {
         });
       }
 
-      // Check coverage and auto-advance
-      await this.checkAndAdvanceLoanStatus(loanId, tenantId);
+      await this.guarantorValidationQueue.add(
+        'validate',
+        {
+          guarantorId: txResult.guarantorId,
+          loanId,
+          tenantId,
+          memberId: guarantorMemberId,
+          status: txResult.status,
+        },
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: 1000,
+          removeOnFail: false,
+        },
+      );
 
-      const result = { loanId, memberId: guarantorMemberId, status: newStatus };
+      const result = { loanId, memberId: guarantorMemberId, status: txResult.status };
       await this.idempotency.complete(idemKey, tenantId, result, 72 * 60 * 60);
       return result;
     } catch (err) {
@@ -993,16 +1067,27 @@ export class LoanApplicationService {
     const oldStatus = loan.status;
     const correlationId = (req.headers['x-request-id'] as string) ?? uuidv4();
 
-    // Validate state transitions
+    // DISBURSED must go through LoansService.disburse() (real FOSA credit).
+    // The admin controller routes DISBURSED before calling this method; reaching
+    // here with DISBURSED means a misconfigured direct service call — reject it.
+    const targetStatus = dto.status as unknown as LoanStatus;
+    if (targetStatus === LoanStatus.DISBURSED) {
+      throw new BadRequestException(
+        'DISBURSED transitions must go through PATCH /admin/loans/:id/status which routes ' +
+        'to LoansService.disburse() for financial processing. ' +
+        'Direct calls to updateStatus() with DISBURSED are not permitted.',
+      );
+    }
+
+    // Validate state transitions (workflow-only — no financial operations)
     const validTransitions: Record<string, string[]> = {
       [LoanStatus.DRAFT]: [LoanStatus.PENDING_GUARANTORS, LoanStatus.REJECTED],
       [LoanStatus.PENDING_GUARANTORS]: [LoanStatus.UNDER_REVIEW, LoanStatus.REJECTED],
       [LoanStatus.UNDER_REVIEW]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
       [LoanStatus.PENDING_APPROVAL]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
-      [LoanStatus.APPROVED]: [LoanStatus.DISBURSED],
+      // APPROVED → DISBURSED is intentionally absent: handled by LoansService.disburse()
     };
 
-    const targetStatus = dto.status as unknown as LoanStatus;
     const allowedNext = validTransitions[oldStatus] ?? [];
     if (!allowedNext.includes(targetStatus)) {
       throw new BadRequestException(

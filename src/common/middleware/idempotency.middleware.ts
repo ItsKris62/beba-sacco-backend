@@ -3,7 +3,7 @@ import { Request, Response, NextFunction } from 'express';
 import { RedisService } from '../services/redis.service';
 
 const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 h
-const IDEMPOTENCY_KEY_HEADER = 'x-idempotency-key';
+const IDEMPOTENCY_KEY_HEADERS = ['idempotency-key', 'x-idempotency-key'];
 const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT']);
 
 /**
@@ -30,7 +30,9 @@ export class IdempotencyMiddleware implements NestMiddleware {
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!MUTATING_METHODS.has(req.method)) return next();
 
-    const idempotencyKey = req.headers[IDEMPOTENCY_KEY_HEADER] as string | undefined;
+    const idempotencyKey = IDEMPOTENCY_KEY_HEADERS
+      .map((header) => req.headers[header])
+      .find((value): value is string => typeof value === 'string' && value.trim() !== '');
     if (!idempotencyKey) return next();
 
     // Skip health / metrics

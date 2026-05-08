@@ -25,14 +25,14 @@ datasource db {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum UserRole {
-  SUPER_ADMIN  // Platform admin (Beba staff) – full unrestricted access
+  SUPER_ADMIN // Platform admin (Beba staff) – full unrestricted access
   TENANT_ADMIN // SACCO administrator – tenant-scoped, cannot manage super_admin
-  MANAGER      // Branch / department manager – can manage teller, member, chairman, auditor
+  MANAGER // Branch / department manager – can manage teller, member, chairman, auditor
   LOAN_OFFICER // Loan officer – handles loan applications and member enquiries
-  TELLER       // Front-office staff – cash / M-Pesa handling
-  MEMBER       // Ordinary SACCO member – personal dashboard only
-  CHAIRMAN     // Stage oversight – inherits MEMBER permissions + stage analytics
-  AUDITOR      // Read-only compliance auditor
+  TELLER // Front-office staff – cash / M-Pesa handling
+  MEMBER // Ordinary SACCO member – personal dashboard only
+  CHAIRMAN // Stage oversight – inherits MEMBER permissions + stage analytics
+  AUDITOR // Read-only compliance auditor
 
   @@schema("public")
 }
@@ -54,9 +54,9 @@ enum AccountType {
 
 enum LoanStatus {
   DRAFT
-  PENDING_GUARANTORS  // Waiting for guarantors to accept
-  UNDER_REVIEW        // Guarantors confirmed; awaiting manager review
-  PENDING_APPROVAL    // Legacy / direct-approval path (no guarantors required)
+  PENDING_GUARANTORS // Waiting for guarantors to accept
+  UNDER_REVIEW // Guarantors confirmed; awaiting manager review
+  PENDING_APPROVAL // Legacy / direct-approval path (no guarantors required)
   APPROVED
   REJECTED
   DISBURSED
@@ -71,7 +71,34 @@ enum LoanStatus {
 enum GuarantorStatus {
   PENDING
   ACCEPTED
-  DECLINED
+  REJECTED
+  EXPIRED
+
+  @@schema("public")
+}
+
+enum ReportType {
+  LOAN_BOOK
+  MEMBER_BALANCES
+  AUDIT_TRAIL
+  EXECUTIVE
+
+  @@schema("public")
+}
+
+enum ReportFormat {
+  CSV
+  PDF
+
+  @@schema("public")
+}
+
+enum ReportStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  EXPIRED
 
   @@schema("public")
 }
@@ -82,8 +109,8 @@ enum TransactionType {
   LOAN_DISBURSEMENT
   LOAN_REPAYMENT
   INTEREST_EARNED
-  INTEREST_ACCRUAL   // Phase 4: daily interest accrual
-  PENALTY            // Phase 4: penalty charge on overdue loan
+  INTEREST_ACCRUAL // Phase 4: daily interest accrual
+  PENALTY // Phase 4: penalty charge on overdue loan
   DIVIDEND_PAYOUT
   FEE_CHARGE
   TRANSFER
@@ -106,16 +133,16 @@ enum TransactionStatus {
 // Channel that originated the M-Pesa transaction
 enum MpesaTxType {
   STK_PUSH // Lipa Na M-Pesa (customer-initiated, STK prompt on phone)
-  C2B      // Direct paybill/buy-goods payment (no STK prompt)
-  B2C      // Business to Customer – used for loan disbursements
+  C2B // Direct paybill/buy-goods payment (no STK prompt)
+  B2C // Business to Customer – used for loan disbursements
 
   @@schema("public")
 }
 
 // Who triggered the M-Pesa transaction (SASRA audit requirement)
 enum MpesaTriggerSource {
-  MEMBER  // Self-service deposit or scheduled repayment by member
-  SYSTEM  // Automated cron job (e.g. repayment schedule)
+  MEMBER // Self-service deposit or scheduled repayment by member
+  SYSTEM // Automated cron job (e.g. repayment schedule)
   OFFICER // Teller or admin manual trigger (e.g. disbursement approval)
 
   @@schema("public")
@@ -123,9 +150,9 @@ enum MpesaTriggerSource {
 
 // Phase 4: loan classification for provisioning & SASRA reporting
 enum LoanStaging {
-  PERFORMING  // < 30 days in arrears
-  WATCHLIST   // 30–89 days in arrears
-  NPL         // ≥ 90 days in arrears (Non-Performing Loan)
+  PERFORMING // < 30 days in arrears
+  WATCHLIST // 30–89 days in arrears
+  NPL // ≥ 90 days in arrears (Non-Performing Loan)
 
   @@schema("public")
 }
@@ -255,25 +282,25 @@ enum FeatureFlagStatus {
 }
 
 enum InterestType {
-  FLAT              // Interest on original principal
-  REDUCING_BALANCE  // Interest on outstanding balance
+  FLAT // Interest on original principal
+  REDUCING_BALANCE // Interest on outstanding balance
 
   @@schema("public")
 }
 
 enum KycStatus {
   PENDING_REVIEW // Submitted, awaiting staff review
-  APPROVED       // KYC cleared; FOSA + BOSA accounts created
-  REJECTED       // KYC rejected; reason stored on member record
+  APPROVED // KYC cleared; FOSA + BOSA accounts created
+  REJECTED // KYC rejected; reason stored on member record
 
   @@schema("public")
 }
 
 // ─── User Account Lifecycle Status ───────────────────────────────────────────
 enum UserStatus {
-  PENDING   // Awaiting staff approval (self-registered or admin-created)
-  APPROVED  // Active and approved
-  REJECTED  // Rejected by staff (terminal for this request; may re-apply)
+  PENDING // Awaiting staff approval (self-registered or admin-created)
+  APPROVED // Active and approved
+  REJECTED // Rejected by staff (terminal for this request; may re-apply)
   SUSPENDED // Account frozen (terminal until explicitly reactivated)
 
   @@schema("public")
@@ -300,7 +327,7 @@ model Tenant {
   slug         String       @unique // e.g., "kc-boda-sacco"
   schemaName   String       @unique // reserved for Phase 3 schema routing
   status       TenantStatus @default(ACTIVE)
-  settings     Json?        // SACCO config: interest rates, fee structures, etc.
+  settings     Json? // SACCO config: interest rates, fee structures, etc.
   contactEmail String
   contactPhone String
   address      String?
@@ -320,6 +347,7 @@ model Tenant {
   counter              TenantCounter?
   webhookSubscriptions WebhookSubscription[]
   dataImportLogs       DataImportLog[]
+  reportJobs           ReportJob[]
 
   @@index([slug])
   @@index([status])
@@ -327,9 +355,9 @@ model Tenant {
 }
 
 model TenantCounter {
-  id         String @id @default(uuid())
-  tenantId   String @unique
-  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(uuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   memberSeq  Int @default(0)
   accountSeq Int @default(0)
@@ -339,44 +367,44 @@ model TenantCounter {
 }
 
 model User {
-  id                 String     @id @default(uuid())
-  tenantId           String
-  tenant             Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  email              String
-  passwordHash       String
-  role               UserRole   @default(MEMBER)
+  email        String
+  passwordHash String
+  role         UserRole @default(MEMBER)
 
-  firstName          String
-  lastName           String
-  phone              String?
-  isActive           Boolean    @default(true)
-  emailVerified      Boolean    @default(false)
+  firstName     String
+  lastName      String
+  phone         String?
+  isActive      Boolean @default(true)
+  emailVerified Boolean @default(false)
 
-  refreshToken       String?    @db.Text // argon2 hash of refresh JWT
+  refreshToken       String?   @db.Text // argon2 hash of refresh JWT
   lastLoginAt        DateTime?
-  mustChangePassword Boolean    @default(false)
+  mustChangePassword Boolean   @default(false)
 
   // Password reset (stateless JWT + nonce pattern)
   passwordResetToken  String?   @db.Text // argon2 hash of one-time nonce
-  passwordResetExpiry DateTime?           // expiry enforced at DB level too
+  passwordResetExpiry DateTime? // expiry enforced at DB level too
 
   // Sprint 1 – Onboarding & Location fields (additive, nullable for backward compat)
-  idNumber    String?  @unique // Kenyan National ID (7–8 digits) – set on member approval
-  phoneNumber String?  @unique // Kenyan phone (2547xxxxxxxx) – set on member approval
-  wardId      String?          // FK to Ward – set on member approval
+  idNumber    String? @unique // Kenyan National ID (7–8 digits) – set on member approval
+  phoneNumber String? @unique // Kenyan phone (2547xxxxxxxx) – set on member approval
+  wardId      String? // FK to Ward – set on member approval
 
   // ─── User Lifecycle & Approval ────────────────────────────────────────────
-  status      UserStatus @default(PENDING) // PENDING | APPROVED | REJECTED | SUSPENDED
-  createdById String?    // userId of actor who created this account
-  approvedById String?   // userId of actor who approved/rejected
-  approvedAt  DateTime?  // when approval decision was made
-  approvalReason String? @db.Text // reason for rejection or contextual notes
+  status         UserStatus @default(PENDING) // PENDING | APPROVED | REJECTED | SUSPENDED
+  createdById    String? // userId of actor who created this account
+  approvedById   String? // userId of actor who approved/rejected
+  approvedAt     DateTime? // when approval decision was made
+  approvalReason String?    @db.Text // reason for rejection or contextual notes
 
   // Sprint 2 – Legacy import fields (additive, nullable)
-  nextOfKinPhone String?       // Optional next-of-kin contact from CSV
-  legacyMemberNo String?       // CSV "NO." column reference
-  importBatchId  String?       // UUID linking to DataImportLog
+  nextOfKinPhone String? // Optional next-of-kin contact from CSV
+  legacyMemberNo String? // CSV "NO." column reference
+  importBatchId  String? // UUID linking to DataImportLog
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -384,6 +412,7 @@ model User {
   auditLogs        AuditLog[]
   member           Member?
   stageAssignments StageAssignment[]
+  requestedReports ReportJob[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -403,13 +432,13 @@ model AuditLog {
   actorId String? // userId of the actor who performed the action
   user    User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
-  action     String  // e.g., "USER.CREATED", "ROLE_CHANGED", "STATUS_APPROVED"
-  entityType String  // e.g., "User", "Loan"
+  action     String // e.g., "USER.CREATED", "ROLE_CHANGED", "STATUS_APPROVED"
+  entityType String // e.g., "User", "Loan"
   entityId   String?
 
-  oldValue  Json?   // Previous state (sanitized, no passwords)
-  newValue  Json?   // New state (sanitized, no passwords)
-  metadata  Json?   // Additional context (IP, userAgent, reason, etc.)
+  oldValue  Json? // Previous state (sanitized, no passwords)
+  newValue  Json? // New state (sanitized, no passwords)
+  metadata  Json? // Additional context (IP, userAgent, reason, etc.)
   ipAddress String?
   userAgent String?
   requestId String? @unique
@@ -435,30 +464,30 @@ model AuditLog {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model Member {
-  id           String  @id @default(uuid())
-  tenantId     String
-  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  userId       String  @unique // One User → one Member profile (user already scoped to one tenant)
-  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId   String @unique // One User → one Member profile (user already scoped to one tenant)
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  memberNumber String  // Auto-generated: M-000001, M-000002 … (tenant-scoped)
+  memberNumber String // Auto-generated: M-000001, M-000002 … (tenant-scoped)
 
-  nationalId   String?
-  kraPin       String?
-  employer     String?
-  occupation   String?
-  dateOfBirth  DateTime?
+  nationalId  String?
+  kraPin      String?
+  employer    String?
+  occupation  String?
+  dateOfBirth DateTime?
 
-  isActive     Boolean  @default(true)
-  joinedAt     DateTime @default(now())
+  isActive Boolean  @default(true)
+  joinedAt DateTime @default(now())
 
   kycStatus           KycStatus @default(PENDING_REVIEW)
   kycReviewedAt       DateTime?
-  kycReviewedByUserId String?   // userId of staff who reviewed
+  kycReviewedByUserId String? // userId of staff who reviewed
   kycRejectionReason  String?   @db.Text
 
   // Phase 4 – privacy & consent (Kenya Data Protection Act)
-  consentDataSharing Boolean  @default(false)
+  consentDataSharing Boolean   @default(false)
   consentUpdatedAt   DateTime?
   deletedAt          DateTime? // soft-delete for data retention
 
@@ -478,20 +507,20 @@ model Member {
 }
 
 model Account {
-  id            String      @id @default(uuid())
-  tenantId      String
-  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  memberId      String
-  member        Member      @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberId String
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
 
-  accountNumber String      // Auto-generated: ACC-BOSA-000001
+  accountNumber String // Auto-generated: ACC-BOSA-000001
   accountType   AccountType
   // Balance stored as Decimal(18,4) – always use Decimal class, never number
   balance       Decimal     @default(0) @db.Decimal(18, 4)
   isActive      Boolean     @default(true)
 
   // Optimistic locking version for concurrent balance updates
-  version       Int         @default(0)
+  version Int @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -504,16 +533,16 @@ model Account {
 }
 
 model LoanProduct {
-  id          String @id @default(uuid())
-  tenantId    String
-  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   name        String
   description String? @db.Text
 
   // All monetary limits in KES, stored as Decimal(18,4)
-  minAmount   Decimal @db.Decimal(18, 4)
-  maxAmount   Decimal @db.Decimal(18, 4)
+  minAmount Decimal @db.Decimal(18, 4)
+  maxAmount Decimal @db.Decimal(18, 4)
 
   // e.g., 0.1200 = 12.00 % per annum
   interestRate      Decimal      @db.Decimal(7, 4)
@@ -526,9 +555,9 @@ model LoanProduct {
   // 0 = repayments start immediately in the month following disbursement.
   gracePeriodMonths Int @default(0)
 
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   loans Loan[]
 
@@ -546,22 +575,22 @@ model Loan {
   loanProductId String
   loanProduct   LoanProduct @relation(fields: [loanProductId], references: [id])
 
-  loanNumber   String    // Auto-generated: LN-2025-000001
-  status       LoanStatus @default(DRAFT)
-  purpose      String?   @db.Text // Loan purpose stated by member
+  loanNumber String // Auto-generated: LN-2025-000001
+  status     LoanStatus @default(DRAFT)
+  purpose    String?    @db.Text // Loan purpose stated by member
 
   principalAmount   Decimal @db.Decimal(18, 4)
   interestRate      Decimal @db.Decimal(7, 4) // Copied from product at application time
   processingFee     Decimal @default(0) @db.Decimal(18, 4)
   tenureMonths      Int
-  gracePeriodMonths Int     @default(0)        // Copied from product at application time
+  gracePeriodMonths Int     @default(0) // Copied from product at application time
   monthlyInstalment Decimal @db.Decimal(18, 4) // Pre-calculated at application (excludes grace period)
 
   appliedAt   DateTime  @default(now())
   approvedAt  DateTime?
-  approvedBy  String?   // userId
+  approvedBy  String? // userId
   disbursedAt DateTime?
-  disbursedBy String?   // userId
+  disbursedBy String? // userId
   dueDate     DateTime? // Final repayment due date
 
   // Repayment tracking (updated on each repayment transaction)
@@ -569,10 +598,12 @@ model Loan {
   outstandingBalance Decimal @db.Decimal(18, 4) // = principalAmount initially, decremented on repayment
 
   // Phase 4 – arrears & staging (updated daily by interest-accrual job)
-  arrearsAmount Decimal      @default(0) @db.Decimal(18, 4)
-  arrearsDays   Int          @default(0)
-  staging       LoanStaging  @default(PERFORMING)
-  lastAccrualDate DateTime?  // last date interest accrual ran for this loan (idempotency)
+  arrearsAmount              Decimal     @default(0) @db.Decimal(18, 4)
+  arrearsDays                Int         @default(0)
+  staging                    LoanStaging @default(PERFORMING)
+  lastAccrualDate            DateTime? // last date interest accrual ran for this loan (idempotency)
+  accruedInterest            Decimal     @default(0) @db.Decimal(18, 4) // running total of accrued but unpaid interest
+  repaymentScheduleGenerated Boolean     @default(false) // set to true after disburse() generates LoanRepayment rows
 
   notes String? @db.Text
 
@@ -582,6 +613,7 @@ model Loan {
   transactions   Transaction[]
   guarantors     Guarantor[]
   approvalChains LoanApprovalChain[]
+  loanRepayments LoanRepayment[]
 
   @@unique([tenantId, loanNumber])
   @@index([tenantId, memberId])
@@ -600,18 +632,21 @@ model Guarantor {
   memberId String
   member   Member @relation(fields: [memberId], references: [id])
 
-  status          GuarantorStatus @default(PENDING)
-  guaranteedAmount Decimal        @db.Decimal(18, 4)
+  status           GuarantorStatus @default(PENDING)
+  guaranteedAmount Decimal         @db.Decimal(18, 4)
 
-  invitedAt   DateTime  @default(now())
-  respondedAt DateTime?
-  notes       String?   @db.Text // Reason for decline, etc.
+  invitedAt     DateTime  @default(now())
+  respondedAt   DateTime?
+  notes         String?   @db.Text // Reason for decline, etc.
+  auditMetadata Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([loanId, memberId]) // A member can only guarantee a loan once
+  @@unique([tenantId, loanId, memberId])
   @@index([tenantId, memberId])
+  @@index([tenantId, loanId, status])
   @@index([loanId])
   @@schema("public")
 }
@@ -646,6 +681,7 @@ model Transaction {
 
   @@index([tenantId, accountId])
   @@index([tenantId, loanId])
+  @@index([tenantId, status, createdAt])
   @@index([reference])
   @@index([createdAt])
   @@schema("public")
@@ -662,8 +698,8 @@ model MpesaTransaction {
 
   // ── Business-entity links (set at initiation for fast callback lookup) ──
   memberId        String?
-  loanId          String?   // present for repayments and disbursements
-  loanRepaymentId String?   // set when a specific LoanRepayment record is created
+  loanId          String? // present for repayments and disbursements
+  loanRepaymentId String? // set when a specific LoanRepayment record is created
 
   // ── Daraja identifiers (only the relevant fields are non-null per type) ──
   // STK Push / C2B: checkoutRequestId present
@@ -674,25 +710,25 @@ model MpesaTransaction {
   originatorConversationId String? @unique
 
   // ── Transaction details ──────────────────────────────────────────────────
-  type            MpesaTxType
-  triggerSource   MpesaTriggerSource
-  phoneNumber     String              // E.164 (2547XXXXXXXX) – masked in logs
-  amount          Decimal             @db.Decimal(18, 4)
-  accountReference String?            // Account number or "LOAN-{loanNumber}"
-  description     String?
+  type             MpesaTxType
+  triggerSource    MpesaTriggerSource
+  phoneNumber      String // E.164 (2547XXXXXXXX) – masked in logs
+  amount           Decimal            @db.Decimal(18, 4)
+  accountReference String? // Account number or "LOAN-{loanNumber}"
+  description      String?
 
   // ── Layer 3 idempotency (universal unique key across all M-Pesa tx types) ──
   // Format: STK-{checkoutRequestId} | B2C-{conversationId} | C2B-{transId}
   // Built by buildMpesaRef.*() at creation time. Catches races that slip
   // through Layer 1 (BullMQ jobId dedup) and Layer 2 (status !== PENDING guard).
-  reference       String  @unique
+  reference String @unique
 
   // ── Daraja result (populated by callback) ───────────────────────────────
   status             TransactionStatus @default(PENDING)
   resultCode         Int?
   resultDesc         String?
-  mpesaReceiptNumber String?           // M-Pesa transaction ID from Safaricom
-  transactionDate    DateTime?         // When Safaricom processed the payment
+  mpesaReceiptNumber String? // M-Pesa transaction ID from Safaricom
+  transactionDate    DateTime? // When Safaricom processed the payment
 
   // ── Compliance fields (SASRA: raw payload + timestamps required) ────────
   // Store the verbatim Daraja payload for audit. Never delete this record.
@@ -705,6 +741,7 @@ model MpesaTransaction {
   @@index([tenantId, memberId])
   @@index([tenantId, loanId])
   @@index([tenantId, status])
+  @@index([tenantId, status, createdAt])
   @@index([tenantId, type])
   @@index([checkoutRequestId])
   @@index([conversationId])
@@ -723,13 +760,13 @@ model LoanApprovalChain {
   loanId   String
   loan     Loan   @relation(fields: [loanId], references: [id], onDelete: Cascade)
 
-  approverId String  // userId of approver
-  role       String  // role at time of approval (MANAGER / TELLER)
+  approverId String // userId of approver
+  role       String // role at time of approval (MANAGER / TELLER)
   status     ApprovalStatus @default(PENDING)
-  notes      String? @db.Text
+  notes      String?        @db.Text
 
   decidedAt DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([tenantId, loanId])
   @@schema("public")
@@ -741,7 +778,7 @@ model LoginSession {
   tenantId String
   userId   String
 
-  ipHash    String  // SHA-256 of client IP
+  ipHash    String // SHA-256 of client IP
   userAgent String? @db.Text
   geoHint   String? // country/region hint (optional, populated from IP headers)
 
@@ -760,10 +797,10 @@ model WebhookSubscription {
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  url       String       // Target HTTPS URL
-  secret    String       // HMAC-SHA256 signing secret (stored, NOT hashed)
-  events    String[]     // e.g., ["loan.status_changed", "repayment.posted"]
-  status    WebhookStatus @default(ACTIVE)
+  url    String // Target HTTPS URL
+  secret String // HMAC-SHA256 signing secret (stored, NOT hashed)
+  events String[] // e.g., ["loan.status_changed", "repayment.posted"]
+  status WebhookStatus @default(ACTIVE)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -776,19 +813,19 @@ model WebhookSubscription {
 
 // Delivery log for each outbound webhook dispatch
 model WebhookDelivery {
-  id             String @id @default(uuid())
+  id             String              @id @default(uuid())
   subscriptionId String
   subscription   WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
-  event       String // e.g., "loan.status_changed"
-  payload     Json
-  status      WebhookDeliveryStatus @default(PENDING)
-  httpStatus  Int?
-  responseBody String? @db.Text
-  attempts    Int      @default(0)
-  nextRetryAt DateTime?
+  event        String // e.g., "loan.status_changed"
+  payload      Json
+  status       WebhookDeliveryStatus @default(PENDING)
+  httpStatus   Int?
+  responseBody String?               @db.Text
+  attempts     Int                   @default(0)
+  nextRetryAt  DateTime?
 
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
   deliveredAt DateTime?
 
   @@index([subscriptionId])
@@ -802,18 +839,18 @@ model WebhookDelivery {
 
 // Integration Outbox – guarantees at-least-once delivery for all external integrations
 model IntegrationOutbox {
-  id             String       @id @default(uuid())
-  tenantId       String
-  idempotencyKey String       @unique // Prevents duplicate processing
-  integrationType String      // CRB_EXPORT | AML_SCREEN | NOTIFY | WEBHOOK
-  payload        Json         // Serialized payload for the integration
-  status         OutboxStatus @default(PENDING)
-  attempts       Int          @default(0)
-  maxAttempts    Int          @default(5)
-  lastError      String?      @db.Text
-  nextRetryAt    DateTime?
-  processedAt    DateTime?
-  deadLetteredAt DateTime?
+  id              String       @id @default(uuid())
+  tenantId        String
+  idempotencyKey  String       @unique // Prevents duplicate processing
+  integrationType String // CRB_EXPORT | AML_SCREEN | NOTIFY | WEBHOOK
+  payload         Json // Serialized payload for the integration
+  status          OutboxStatus @default(PENDING)
+  attempts        Int          @default(0)
+  maxAttempts     Int          @default(5)
+  lastError       String?      @db.Text
+  nextRetryAt     DateTime?
+  processedAt     DateTime?
+  deadLetteredAt  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -826,17 +863,17 @@ model IntegrationOutbox {
 
 // CRB Report – tracks CRB Africa/Metropol submissions
 model CrbReport {
-  id          String          @id @default(uuid())
-  tenantId    String
-  loanIds     String[]        // Loan UUIDs included in this report
-  periodStart DateTime
-  periodEnd   DateTime
-  xmlPayload  String          @db.Text // Generated CRB XML
-  status      CrbReportStatus @default(PENDING)
-  submittedAt DateTime?
-  responseCode String?
-  responseMessage String?     @db.Text
-  outboxId    String?         // Link to IntegrationOutbox entry
+  id              String          @id @default(uuid())
+  tenantId        String
+  loanIds         String[] // Loan UUIDs included in this report
+  periodStart     DateTime
+  periodEnd       DateTime
+  xmlPayload      String          @db.Text // Generated CRB XML
+  status          CrbReportStatus @default(PENDING)
+  submittedAt     DateTime?
+  responseCode    String?
+  responseMessage String?         @db.Text
+  outboxId        String? // Link to IntegrationOutbox entry
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -849,18 +886,18 @@ model CrbReport {
 
 // AML/CFT Screening – async screening results
 model AmlScreening {
-  id          String             @id @default(uuid())
-  tenantId    String
-  memberId    String
-  trigger     String             // KYC | DEPOSIT | MANUAL
-  triggerRef  String?            // e.g., transaction ID for deposit triggers
-  riskScore   Int?               // 0–100
-  status      AmlScreeningStatus @default(PENDING)
-  watchlistMatches Json?         // Array of matched entries from sanctions/PEP lists
-  screenedAt  DateTime?
-  reviewedBy  String?            // userId of compliance officer who reviewed
-  reviewNotes String?            @db.Text
-  outboxId    String?
+  id               String             @id @default(uuid())
+  tenantId         String
+  memberId         String
+  trigger          String // KYC | DEPOSIT | MANUAL
+  triggerRef       String? // e.g., transaction ID for deposit triggers
+  riskScore        Int? // 0–100
+  status           AmlScreeningStatus @default(PENDING)
+  watchlistMatches Json? // Array of matched entries from sanctions/PEP lists
+  screenedAt       DateTime?
+  reviewedBy       String? // userId of compliance officer who reviewed
+  reviewNotes      String?            @db.Text
+  outboxId         String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -873,17 +910,17 @@ model AmlScreening {
 
 // IFRS 9 ECL Provisioning Entry – daily calculated expected credit loss
 model ProvisioningEntry {
-  id          String      @id @default(uuid())
-  tenantId    String
-  loanId      String
+  id              String      @id @default(uuid())
+  tenantId        String
+  loanId          String
   calculationDate DateTime // Date of ECL calculation
-  staging     LoanStaging // Staging at time of calculation
+  staging         LoanStaging // Staging at time of calculation
 
   // ECL = PD × LGD × EAD
-  pd          Decimal     @db.Decimal(10, 6) // Probability of Default
-  lgd         Decimal     @db.Decimal(10, 6) // Loss Given Default
-  ead         Decimal     @db.Decimal(18, 4) // Exposure at Default
-  eclAmount   Decimal     @db.Decimal(18, 4) // Calculated ECL
+  pd              Decimal @db.Decimal(10, 6) // Probability of Default
+  lgd             Decimal @db.Decimal(10, 6) // Loss Given Default
+  ead             Decimal @db.Decimal(18, 4) // Exposure at Default
+  eclAmount       Decimal @db.Decimal(18, 4) // Calculated ECL
   macroAdjustment Decimal @default(1) @db.Decimal(7, 4) // Macro-economic adjustment factor
 
   createdAt DateTime @default(now())
@@ -899,12 +936,12 @@ model DsarRequest {
   id          String            @id @default(uuid())
   tenantId    String
   memberId    String
-  requestedBy String            // userId who initiated the request
+  requestedBy String // userId who initiated the request
   status      DsarRequestStatus @default(PENDING)
-  downloadUrl String?           // Pre-signed MinIO URL for encrypted ZIP
-  expiresAt   DateTime?         // URL expiry (30 days from generation)
-  redactedAt  DateTime?         // When auto-redaction occurred
-  auditTrail  Json?             // Tracks what data was included
+  downloadUrl String? // Pre-signed MinIO URL for encrypted ZIP
+  expiresAt   DateTime? // URL expiry (30 days from generation)
+  redactedAt  DateTime? // When auto-redaction occurred
+  auditTrail  Json? // Tracks what data was included
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -917,19 +954,19 @@ model DsarRequest {
 
 // SASRA Ratio Snapshot – historical liquidity & capital adequacy ratios
 model SasraRatioSnapshot {
-  id          String   @id @default(uuid())
-  tenantId    String
-  period      String   // YYYY-MM format
-  liquidAssets        Decimal @db.Decimal(18, 4)
-  shortTermLiabilities Decimal @db.Decimal(18, 4)
-  liquidityRatio      Decimal @db.Decimal(10, 6)
-  coreCapital         Decimal @db.Decimal(18, 4)
-  totalAssets         Decimal @db.Decimal(18, 4)
-  capitalAdequacyRatio Decimal @db.Decimal(10, 6)
-  totalLoans          Decimal @db.Decimal(18, 4)
-  nplAmount           Decimal @db.Decimal(18, 4)
+  id                    String  @id @default(uuid())
+  tenantId              String
+  period                String // YYYY-MM format
+  liquidAssets          Decimal @db.Decimal(18, 4)
+  shortTermLiabilities  Decimal @db.Decimal(18, 4)
+  liquidityRatio        Decimal @db.Decimal(10, 6)
+  coreCapital           Decimal @db.Decimal(18, 4)
+  totalAssets           Decimal @db.Decimal(18, 4)
+  capitalAdequacyRatio  Decimal @db.Decimal(10, 6)
+  totalLoans            Decimal @db.Decimal(18, 4)
+  nplAmount             Decimal @db.Decimal(18, 4)
   portfolioQualityRatio Decimal @db.Decimal(10, 6)
-  metadata    Json?    // Additional CBK-required fields
+  metadata              Json? // Additional CBK-required fields
 
   createdAt DateTime @default(now())
 
@@ -940,16 +977,16 @@ model SasraRatioSnapshot {
 
 // CBK Monthly Return – versioned filing records
 model CbkReturn {
-  id          String   @id @default(uuid())
-  tenantId    String
-  period      String   // YYYY-MM format
-  version     Int      @default(1)
-  csvPayload  String   @db.Text // Generated CSV content
-  loanPortfolio       Decimal @db.Decimal(18, 4)
-  nplRatio            Decimal @db.Decimal(10, 6)
-  depositGrowth       Decimal @db.Decimal(10, 6)
-  capitalAdequacy     Decimal @db.Decimal(10, 6)
-  filingDate  DateTime @default(now())
+  id              String   @id @default(uuid())
+  tenantId        String
+  period          String // YYYY-MM format
+  version         Int      @default(1)
+  csvPayload      String   @db.Text // Generated CSV content
+  loanPortfolio   Decimal  @db.Decimal(18, 4)
+  nplRatio        Decimal  @db.Decimal(10, 6)
+  depositGrowth   Decimal  @db.Decimal(10, 6)
+  capitalAdequacy Decimal  @db.Decimal(10, 6)
+  filingDate      DateTime @default(now())
 
   createdAt DateTime @default(now())
 
@@ -960,17 +997,17 @@ model CbkReturn {
 
 // OAuth2 API Client – partner credentials for Open API Gateway
 model ApiClient {
-  id          String          @id @default(uuid())
-  tenantId    String
-  clientId    String          @unique // OAuth2 client_id
-  clientSecretHash String     // Argon2 hash of client_secret
-  name        String          // Partner name
-  scopes      String[]        // e.g., ["read:loans", "write:deposits"]
-  rateLimitTier String        @default("partner") // internal | partner | public
-  status      ApiClientStatus @default(ACTIVE)
-  webhookUrl  String?         // Optional webhook endpoint
-  ipWhitelist String[]        // Allowed IPs (empty = all)
-  lastUsedAt  DateTime?
+  id               String          @id @default(uuid())
+  tenantId         String
+  clientId         String          @unique // OAuth2 client_id
+  clientSecretHash String // Argon2 hash of client_secret
+  name             String // Partner name
+  scopes           String[] // e.g., ["read:loans", "write:deposits"]
+  rateLimitTier    String          @default("partner") // internal | partner | public
+  status           ApiClientStatus @default(ACTIVE)
+  webhookUrl       String? // Optional webhook endpoint
+  ipWhitelist      String[] // Allowed IPs (empty = all)
+  lastUsedAt       DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -986,11 +1023,11 @@ model NotificationLog {
   tenantId    String
   memberId    String?
   channel     NotificationChannel
-  recipient   String              // Email, phone number, WhatsApp number
-  templateId  String              // Template identifier
-  payload     Json                // Template variables
+  recipient   String // Email, phone number, WhatsApp number
+  templateId  String // Template identifier
+  payload     Json // Template variables
   status      NotificationStatus  @default(PENDING)
-  providerRef String?             // External provider reference ID
+  providerRef String? // External provider reference ID
   cost        Decimal?            @db.Decimal(10, 4) // Cost in KES
   sentAt      DateTime?
   deliveredAt DateTime?
@@ -1011,17 +1048,17 @@ model NotificationLog {
 
 // Compliance Alert – generated by policy engine on threshold breach
 model ComplianceAlert {
-  id          String                  @id @default(uuid())
-  tenantId    String
-  policy      String                  // e.g., "CBK_SINGLE_BORROWER", "SASRA_NPL_RATIO"
-  severity    ComplianceAlertSeverity @default(WARNING)
-  status      ComplianceAlertStatus   @default(OPEN)
-  message     String                  @db.Text
-  details     Json?                   // Policy evaluation details
-  remediation String?                 @db.Text
-  acknowledgedBy String?              // userId
+  id             String                  @id @default(uuid())
+  tenantId       String
+  policy         String // e.g., "CBK_SINGLE_BORROWER", "SASRA_NPL_RATIO"
+  severity       ComplianceAlertSeverity @default(WARNING)
+  status         ComplianceAlertStatus   @default(OPEN)
+  message        String                  @db.Text
+  details        Json? // Policy evaluation details
+  remediation    String?                 @db.Text
+  acknowledgedBy String? // userId
   acknowledgedAt DateTime?
-  resolvedAt  DateTime?
+  resolvedAt     DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1040,9 +1077,9 @@ model FeatureFlag {
   description String?
   status      FeatureFlagStatus @default(ACTIVE)
   rolloutPct  Int               @default(100) // 0–100 percentage rollout
-  tenantIds   String[]          // Empty = all tenants
-  roles       String[]          // Empty = all roles
-  metadata    Json?             // Additional rule conditions
+  tenantIds   String[] // Empty = all tenants
+  roles       String[] // Empty = all roles
+  metadata    Json? // Additional rule conditions
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1054,15 +1091,15 @@ model FeatureFlag {
 
 // Risk Score – behavioral risk assessment per member/context
 model RiskScore {
-  id          String   @id @default(uuid())
-  tenantId    String
-  memberId    String
-  context     String   // LOAN_APPLY | DEPOSIT | LOGIN | MANUAL
-  score       Int      // 0–100
-  flags       String[] // e.g., ["HIGH_VELOCITY", "DEVICE_CHANGE", "GUARANTOR_RING"]
+  id             String   @id @default(uuid())
+  tenantId       String
+  memberId       String
+  context        String // LOAN_APPLY | DEPOSIT | LOGIN | MANUAL
+  score          Int // 0–100
+  flags          String[] // e.g., ["HIGH_VELOCITY", "DEVICE_CHANGE", "GUARANTOR_RING"]
   recommendation String // APPROVE | REVIEW | BLOCK
-  details     Json?    // Full evaluation breakdown
-  evaluatedAt DateTime @default(now())
+  details        Json? // Full evaluation breakdown
+  evaluatedAt    DateTime @default(now())
 
   @@index([tenantId, memberId])
   @@index([tenantId, context])
@@ -1072,13 +1109,13 @@ model RiskScore {
 
 // ML Feature Store – versioned feature snapshots for offline model training
 model FeatureSnapshot {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   tenantId    String
   memberId    String
-  version     String   // e.g., "2026-04-15"
-  features    Json     // Aggregated feature vector
+  version     String // e.g., "2026-04-15"
+  features    Json // Aggregated feature vector
   exportedAt  DateTime?
-  storagePath String?  // MinIO path for exported file
+  storagePath String? // MinIO path for exported file
 
   createdAt DateTime @default(now())
 
@@ -1090,12 +1127,12 @@ model FeatureSnapshot {
 
 // Tenant Region Config – multi-region routing
 model TenantRegionConfig {
-  id          String   @id @default(uuid())
-  tenantId    String   @unique
-  region      String   // KE-NAIROBI | UG-KAMPALA | RW-KIGALI
-  primaryDsn  String   @db.Text // Primary DB connection string (encrypted)
-  replicaDsn  String?  @db.Text // Read replica DSN
-  piiRegion   String   // Data residency region for PII
+  id                     String  @id @default(uuid())
+  tenantId               String  @unique
+  region                 String // KE-NAIROBI | UG-KAMPALA | RW-KIGALI
+  primaryDsn             String  @db.Text // Primary DB connection string (encrypted)
+  replicaDsn             String? @db.Text // Read replica DSN
+  piiRegion              String // Data residency region for PII
   allowCrossRegionExport Boolean @default(false)
 
   createdAt DateTime @default(now())
@@ -1108,19 +1145,19 @@ model TenantRegionConfig {
 
 // Canary Deployment – tracks canary analysis results
 model CanaryDeployment {
-  id          String   @id @default(uuid())
-  version     String   // Docker image tag / git SHA
-  environment String   @default("production")
-  trafficPct  Int      @default(10) // % traffic routed to canary
-  status      String   @default("RUNNING") // RUNNING | PASSED | FAILED | ROLLED_BACK
-  p95Latency  Decimal? @db.Decimal(10, 2) // ms
-  errorRate   Decimal? @db.Decimal(10, 6) // 0.0–1.0
-  queueDepth  Int?
-  baselineP95 Decimal? @db.Decimal(10, 2)
-  baselineErr Decimal? @db.Decimal(10, 6)
-  rollbackReason String? @db.Text
-  startedAt   DateTime @default(now())
-  completedAt DateTime?
+  id             String    @id @default(uuid())
+  version        String // Docker image tag / git SHA
+  environment    String    @default("production")
+  trafficPct     Int       @default(10) // % traffic routed to canary
+  status         String    @default("RUNNING") // RUNNING | PASSED | FAILED | ROLLED_BACK
+  p95Latency     Decimal?  @db.Decimal(10, 2) // ms
+  errorRate      Decimal?  @db.Decimal(10, 6) // 0.0–1.0
+  queueDepth     Int?
+  baselineP95    Decimal?  @db.Decimal(10, 2)
+  baselineErr    Decimal?  @db.Decimal(10, 6)
+  rollbackReason String?   @db.Text
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
 
   @@index([status])
   @@index([startedAt])
@@ -1136,7 +1173,7 @@ model CanaryDeployment {
 model FailedLoginAttempt {
   id            String    @id @default(uuid())
   tenantId      String
-  username      String    // email or phone used in the attempt
+  username      String // email or phone used in the attempt
   ipAddress     String
   attempts      Int       @default(1)
   blocked       Boolean   @default(false)
@@ -1156,7 +1193,7 @@ model BlockedIP {
   id        String    @id @default(uuid())
   tenantId  String
   ipAddress String
-  reason    String    // Brute Force | SQLi Attempt | Rate Limit Exceeded | Manual
+  reason    String // Brute Force | SQLi Attempt | Rate Limit Exceeded | Manual
   blockedAt DateTime  @default(now())
   expiresAt DateTime? // null = permanent block
   isActive  Boolean   @default(true)
@@ -1173,18 +1210,18 @@ model BlockedIP {
 
 // Data Access Log – PII lineage tracking for DPA/GDPR compliance
 model DataAccessLog {
-  id          String   @id @default(uuid())
-  tenantId    String
-  entity      String   // e.g., "Member", "Loan"
-  entityId    String
-  field       String?  // specific PII field accessed
-  accessorId  String   // userId or serviceId
+  id           String   @id @default(uuid())
+  tenantId     String
+  entity       String // e.g., "Member", "Loan"
+  entityId     String
+  field        String? // specific PII field accessed
+  accessorId   String // userId or serviceId
   accessorRole String
-  purpose     String   // e.g., "CRB_REPORTING", "ADMIN_VIEW"
-  action      String   // READ | EXPORT | MODIFY | DELETE
-  ipAddress   String?
-  requestId   String?
-  timestamp   DateTime @default(now())
+  purpose      String // e.g., "CRB_REPORTING", "ADMIN_VIEW"
+  action       String // READ | EXPORT | MODIFY | DELETE
+  ipAddress    String?
+  requestId    String?
+  timestamp    DateTime @default(now())
 
   @@index([tenantId])
   @@index([tenantId, entityId])
@@ -1198,10 +1235,10 @@ model ConsentRegistry {
   id        String   @id @default(uuid())
   tenantId  String
   memberId  String
-  purpose   String   // CRB_REPORTING | AML_SCREENING | MARKETING | DATA_SHARING | ANALYTICS | THIRD_PARTY
+  purpose   String // CRB_REPORTING | AML_SCREENING | MARKETING | DATA_SHARING | ANALYTICS | THIRD_PARTY
   granted   Boolean
   version   String   @default("1.0")
-  channel   String   // WEB | MOBILE | USSD | AGENT | SYSTEM
+  channel   String // WEB | MOBILE | USSD | AGENT | SYSTEM
   ipAddress String?
   metadata  Json?
   timestamp DateTime @default(now())
@@ -1218,11 +1255,11 @@ model ErasureRequest {
   tenantId      String
   memberId      String
   reason        String    @db.Text
-  requestedBy   String    // userId
+  requestedBy   String // userId
   status        String    @default("PENDING") // PENDING | PROCESSING | COMPLETED | FAILED
   jobId         String?
   certificateId String?
-  certificate   Json?     // ErasureCertificate
+  certificate   Json? // ErasureCertificate
   completedAt   DateTime?
 
   createdAt DateTime @default(now())
@@ -1243,7 +1280,7 @@ model Partner {
   apiKeyHash       String
   scopes           String[]
   rateLimitTier    String    @default("standard")
-  slaConfig        Json      // { p95LatencyMs, uptimePct, errorRatePct }
+  slaConfig        Json // { p95LatencyMs, uptimePct, errorRatePct }
   contactName      String
   contactEmail     String
   contactPhone     String?
@@ -1271,7 +1308,7 @@ model PartnerUsageSnapshot {
   id           String  @id @default(uuid())
   partnerId    String
   partner      Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
-  period       String  // YYYY-MM
+  period       String // YYYY-MM
   totalCalls   Int     @default(0)
   totalErrors  Int     @default(0)
   totalBytes   Int     @default(0)
@@ -1312,14 +1349,36 @@ model SlaIncident {
 model ExecutiveReport {
   id          String   @id @default(uuid())
   tenantId    String
-  period      String   // YYYY-MM or YYYY-QN
-  periodType  String   // MONTHLY | QUARTERLY
+  period      String // YYYY-MM or YYYY-QN
+  periodType  String // MONTHLY | QUARTERLY
   reportData  Json
   generatedAt DateTime @default(now())
 
   @@unique([tenantId, period, periodType])
   @@index([tenantId])
   @@index([generatedAt])
+  @@schema("public")
+}
+
+model ReportJob {
+  id           String       @id @default(uuid())
+  tenantId     String
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  requestedBy  String?
+  requester    User?        @relation(fields: [requestedBy], references: [id], onDelete: SetNull)
+  type         ReportType
+  format       ReportFormat
+  status       ReportStatus @default(QUEUED)
+  filters      Json?
+  objectKey    String?      @db.VarChar(500)
+  errorMessage String?      @db.Text
+  expiresAt    DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  completedAt  DateTime?
+
+  @@index([tenantId, status])
+  @@index([tenantId, requestedBy, createdAt])
   @@schema("public")
 }
 
@@ -1352,12 +1411,12 @@ model Constituency {
 }
 
 model Ward {
-  id               String        @id @default(cuid())
-  code             String        @unique
-  name             String
-  constituencyId   String
-  constituency     Constituency  @relation(fields: [constituencyId], references: [id])
-  stages           Stage[]
+  id                 String              @id @default(cuid())
+  code               String              @unique
+  name               String
+  constituencyId     String
+  constituency       Constituency        @relation(fields: [constituencyId], references: [id])
+  stages             Stage[]
   memberApplications MemberApplication[]
 
   @@index([constituencyId])
@@ -1379,15 +1438,15 @@ model MemberApplication {
   id          String            @id @default(cuid())
   firstName   String
   lastName    String
-  idNumber    String            // Mandatory – Kenyan National ID (7–8 digits)
-  phoneNumber String            // Mandatory – format: 2547xxxxxxxx or 07xxxxxxxx
+  idNumber    String // Mandatory – Kenyan National ID (7–8 digits)
+  phoneNumber String // Mandatory – format: 2547xxxxxxxx or 07xxxxxxxx
   stageName   String
   position    String            @default("MEMBER") // CHAIRMAN | SECRETARY | TREASURER | MEMBER
   wardId      String
   ward        Ward              @relation(fields: [wardId], references: [id])
   status      ApplicationStatus @default(SUBMITTED)
-  documentUrl String?           // MinIO pre-signed URL for KYC form scan
-  reviewedBy  String?           // userId of reviewer
+  documentUrl String? // MinIO pre-signed URL for KYC form scan
+  reviewedBy  String? // userId of reviewer
   reviewNotes String?           @db.Text
   tenantId    String
   createdAt   DateTime          @default(now())
@@ -1412,15 +1471,15 @@ enum StagePosition {
 }
 
 model Stage {
-  id           String          @id @default(cuid())
+  id           String            @id @default(cuid())
   name         String
   wardId       String
-  ward         Ward            @relation(fields: [wardId], references: [id])
+  ward         Ward              @relation(fields: [wardId], references: [id])
   tenantId     String
   assignments  StageAssignment[]
-  memberStages MemberStage[]   // MVP: Member → Stage M2M
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  memberStages MemberStage[] // MVP: Member → Stage M2M
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
 
   @@unique([name, wardId, tenantId])
   @@index([tenantId])
@@ -1455,7 +1514,7 @@ model MemberStage {
   stage      Stage    @relation(fields: [stageId], references: [id], onDelete: Cascade)
   assignedAt DateTime @default(now())
   isActive   Boolean  @default(true)
-  assignedBy String?  // userId of staff who assigned the stage
+  assignedBy String? // userId of staff who assigned the stage
 
   @@unique([memberId, stageId])
   @@index([memberId])
@@ -1480,12 +1539,13 @@ enum SavingsType {
 model LoanRepayment {
   id          String   @id @default(cuid())
   loanId      String
-  dayNumber   Int      // 1-30 per CSV 30-day schedule
+  loan        Loan     @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  dayNumber   Int // 1-N per tenure months (schedule) or 1-30 per CSV (legacy)
   amountPaid  Decimal  @db.Decimal(10, 2)
   paymentDate DateTime
   method      String   @default("CASH")
-  status      String   @default("CONFIRMED")
-  recordedBy  String?  // userId of teller
+  status      String   @default("CONFIRMED") // PENDING (scheduled) | CONFIRMED (paid)
+  recordedBy  String? // userId of teller
   tenantId    String
   createdAt   DateTime @default(now())
 
@@ -1498,9 +1558,9 @@ model LoanRepayment {
 /// Individual or group savings record (immutable – no deletes)
 model SavingsRecord {
   id            String      @id @default(cuid())
-  memberId      String?     // Nullable for group welfare entries
+  memberId      String? // Nullable for group welfare entries
   groupId       String?
-  weekNumber    Int         // 1-52
+  weekNumber    Int // 1-52
   amount        Decimal     @db.Decimal(10, 2)
   periodDate    DateTime
   recordType    SavingsType
@@ -1516,13 +1576,13 @@ model SavingsRecord {
 
 /// Group welfare (receivership) entity
 model GroupWelfare {
-  id            String   @id @default(cuid())
-  stageId       String
-  name          String
-  weeklyTarget  Decimal  @db.Decimal(10, 2) @default(300)
-  tenantId      String
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id           String   @id @default(cuid())
+  stageId      String
+  name         String
+  weeklyTarget Decimal  @default(300) @db.Decimal(10, 2)
+  tenantId     String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   collections GroupWelfareCollection[]
 
@@ -1538,7 +1598,7 @@ model GroupWelfareCollection {
   weekNumber      Int
   amountCollected Decimal  @db.Decimal(10, 2)
   periodDate      DateTime
-  deficit         Decimal  @db.Decimal(10, 2) @default(0)
+  deficit         Decimal  @default(0) @db.Decimal(10, 2)
   tenantId        String
   createdAt       DateTime @default(now())
 
@@ -1554,8 +1614,8 @@ model GroupWelfareCollection {
 model RefreshSession {
   id          String   @id @default(cuid())
   userId      String
-  deviceId    String   // SHA-256 of user-agent + timezone + screen-res
-  fingerprint String   // Raw fingerprint string (for display)
+  deviceId    String // SHA-256 of user-agent + timezone + screen-res
+  fingerprint String // Raw fingerprint string (for display)
   expiresAt   DateTime
   isRevoked   Boolean  @default(false)
   createdAt   DateTime @default(now())
@@ -1569,7 +1629,7 @@ model RefreshSession {
 model DataConsent {
   id          String   @id @default(cuid())
   userId      String
-  consentType String   // "DATA_PROCESSING" | "STATEMENT_EXPORT" | "LOAN_TERMS"
+  consentType String // "DATA_PROCESSING" | "STATEMENT_EXPORT" | "LOAN_TERMS"
   version     String   @default("1.0")
   acceptedAt  DateTime
   ipAddress   String
@@ -1586,45 +1646,45 @@ model DataConsent {
 
 /// Tracks every CSV/Excel import job with full audit trail
 model DataImportLog {
-  id          String          @id @default(uuid())
-  tenantId    String
-  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   /// UUID used as idempotency key – stored on imported User.importBatchId
-  batchId     String          @unique @default(uuid())
+  batchId String @unique @default(uuid())
 
   /// Who triggered the import
-  initiatedBy String          // userId of TENANT_ADMIN
+  initiatedBy String // userId of TENANT_ADMIN
 
   /// Source file metadata
-  fileName    String
-  fileSize    Int             // bytes
-  totalRows   Int             @default(0)
+  fileName  String
+  fileSize  Int // bytes
+  totalRows Int    @default(0)
 
   /// Processing counters (updated by worker)
-  successCount Int            @default(0)
-  failedCount  Int            @default(0)
-  warningCount Int            @default(0)
-  skippedCount Int            @default(0)
+  successCount Int @default(0)
+  failedCount  Int @default(0)
+  warningCount Int @default(0)
+  skippedCount Int @default(0)
 
-  status      ImportJobStatus @default(QUEUED)
+  status ImportJobStatus @default(QUEUED)
 
   /// Whether this was a dry-run (preview only, no DB writes)
-  dryRun      Boolean         @default(false)
+  dryRun Boolean @default(false)
 
   /// Row-level validation failures: { row, field, value, reason, errorCode }[]
   errorDetails Json?
 
   /// Structured summary report
-  reportData  Json?
+  reportData Json?
 
   /// BullMQ job ID for polling
-  queueJobId  String?
+  queueJobId String?
 
   startedAt   DateTime?
   completedAt DateTime?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@index([tenantId])
   @@index([tenantId, status])

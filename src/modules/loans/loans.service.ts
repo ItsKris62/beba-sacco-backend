@@ -1,6 +1,6 @@
 import {
   Injectable, Logger, NotFoundException, BadRequestException,
-  ConflictException, ForbiddenException,
+  ConflictException, ForbiddenException, UnprocessableEntityException,
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { GuarantorStatus, LoanStatus, TransactionType, TransactionStatus, InterestType } from '@prisma/client';
@@ -430,11 +430,21 @@ export class LoansService {
         id: true, status: true, loanNumber: true,
         principalAmount: true, memberId: true, tenureMonths: true,
         gracePeriodMonths: true, monthlyInstalment: true,
+        repaymentScheduleGenerated: true,
         member: { select: { user: { select: { email: true, firstName: true } } } },
       },
     });
     if (!loan) throw new NotFoundException('Loan not found');
 
+    // 409 for idempotent retry: if the loan is already ACTIVE it was successfully
+    // disbursed by an earlier request. Clients can safely treat 409 as a success
+    // indicator and proceed to fetch the loan details.
+    if (loan.status === LoanStatus.ACTIVE) {
+      throw new ConflictException(
+        `Loan ${loan.loanNumber} has already been disbursed and is ACTIVE. ` +
+        'Retrieve the current loan details for the disbursement record.',
+      );
+    }
     if (loan.status !== LoanStatus.APPROVED) {
       throw new BadRequestException(
         `Cannot disburse a loan in "${loan.status}" status. Expected APPROVED.`,
@@ -471,6 +481,38 @@ export class LoansService {
     const txClient = this.prisma.direct ?? this.prisma;
     const disbursalResult = await txClient.$transaction(
       async (tx) => {
+        const lockedLoans = await tx.$queryRaw<
+          Array<{
+            id: string;
+            status: LoanStatus;
+            principalAmount: string;
+            tenureMonths: number;
+            gracePeriodMonths: number | null;
+            monthlyInstalment: string;
+            repaymentScheduleGenerated: boolean;
+          }>
+        >`
+          SELECT id, status, "principalAmount", "tenureMonths", "gracePeriodMonths",
+                 "monthlyInstalment", "repaymentScheduleGenerated"
+          FROM "Loan"
+          WHERE id = ${id} AND "tenantId" = ${tenantId}
+          FOR UPDATE
+        `;
+        const lockedLoan = lockedLoans[0];
+        if (!lockedLoan) throw new NotFoundException('Loan not found');
+        if (lockedLoan.status === LoanStatus.ACTIVE) {
+          throw new ConflictException(
+            `Loan ${loan.loanNumber} has already been disbursed and is ACTIVE.`,
+          );
+        }
+        if (lockedLoan.status !== LoanStatus.APPROVED) {
+          throw new BadRequestException(
+            `Cannot disburse a loan in "${lockedLoan.status}" status. Expected APPROVED.`,
+          );
+        }
+
+        const txPrincipal = new Decimal(lockedLoan.principalAmount.toString());
+
         // Lock account row with FOR UPDATE via raw query to get current balance + version
         const lockedRows = await tx.$queryRaw`
           SELECT id, balance, version FROM "Account"
@@ -492,7 +534,7 @@ export class LoansService {
         if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
 
         const balanceBefore = new Decimal(account.balance.toString());
-        const balanceAfter = balanceBefore.plus(principal);
+        const balanceAfter = balanceBefore.plus(txPrincipal);
         const newVersion = account.version + 1;
 
         const txn = await tx.transaction.create({
@@ -502,7 +544,7 @@ export class LoansService {
             loanId: id,
             type: TransactionType.LOAN_DISBURSEMENT,
             status: TransactionStatus.COMPLETED,
-            amount: principal.toDecimalPlaces(4).toString(),
+            amount: txPrincipal.toDecimalPlaces(4).toString(),
             balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
             balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
             reference,
@@ -523,7 +565,7 @@ export class LoansService {
         const disbursedAt = new Date();
         // dueDate = disbursement + grace period + repayment tenure
         const dueDate = new Date(disbursedAt);
-        dueDate.setMonth(dueDate.getMonth() + (loan.gracePeriodMonths ?? 0) + loan.tenureMonths);
+        dueDate.setMonth(dueDate.getMonth() + (lockedLoan.gracePeriodMonths ?? 0) + lockedLoan.tenureMonths);
 
         const updatedLoan = await tx.loan.update({
           where: { id },
@@ -532,28 +574,64 @@ export class LoansService {
             disbursedAt,
             disbursedBy,
             dueDate,
+            repaymentScheduleGenerated: true,
           },
         });
 
-        await this.audit.create({
-          tenantId,
-          userId: disbursedBy,
-          action: 'LOAN.DISBURSE',
-          resource: 'Loan',
-          resourceId: id,
-          metadata: {
-            loanNumber: loan.loanNumber,
-            principalAmount: principal.toNumber(),
-            fosaAccountId: fosaAccount.id,
-            reference,
-            gracePeriodMonths: loan.gracePeriodMonths ?? 0,
-            disbursedAt,
-            dueDate,
-          },
-          ipAddress,
-        }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+        // Generate monthly LoanRepayment schedule records (one per tenure month).
+        // skipDuplicates guards against re-runs inside the same Serializable tx.
+        if (!lockedLoan.repaymentScheduleGenerated) {
+          const instalment = new Decimal(lockedLoan.monthlyInstalment.toString());
+          await tx.loanRepayment.createMany({
+            data: Array.from({ length: lockedLoan.tenureMonths }, (_, i) => {
+              const paymentDate = new Date(disbursedAt);
+              paymentDate.setMonth(
+                paymentDate.getMonth() + (lockedLoan.gracePeriodMonths ?? 0) + i + 1,
+              );
+              return {
+                tenantId,
+                loanId: id,
+                dayNumber: i + 1,
+                amountPaid: instalment.toDecimalPlaces(2).toString(),
+                paymentDate,
+                method: 'SCHEDULED',
+                status: 'PENDING',
+              };
+            }),
+            skipDuplicates: true,
+          });
+        }
 
-        return { loan: updatedLoan, transaction: txn, newBalance: balanceAfter.toNumber(), dueDate };
+        await tx.auditLog.create({
+          data: {
+            tenantId,
+            actorId: disbursedBy,
+            action: 'LOAN.DISBURSE',
+            entityType: 'Loan',
+            entityId: id,
+            oldValue: { status: lockedLoan.status, accountBalance: balanceBefore.toNumber() },
+            newValue: { status: LoanStatus.ACTIVE, accountBalance: balanceAfter.toNumber() },
+            metadata: {
+              loanNumber: loan.loanNumber,
+              principalAmount: txPrincipal.toNumber(),
+              fosaAccountId: fosaAccount.id,
+              reference,
+              gracePeriodMonths: lockedLoan.gracePeriodMonths ?? 0,
+              disbursedAt,
+              dueDate,
+            },
+            ipAddress: ipAddress ?? null,
+          },
+        });
+
+        return {
+          loan: updatedLoan,
+          transaction: txn,
+          newBalance: balanceAfter.toNumber(),
+          dueDate,
+          disbursement_status: 'COMPLETED' as const,
+          estimated_settlement: disbursedAt.toISOString(),
+        };
       },
       { isolationLevel: 'Serializable' as const },
     );
@@ -834,7 +912,7 @@ export class LoansService {
 
     const newStatus = dto.action === GuarantorAction.ACCEPT
       ? GuarantorStatus.ACCEPTED
-      : GuarantorStatus.DECLINED;
+      : GuarantorStatus.REJECTED;
 
     await this.prisma.guarantor.update({
       where: { id: guarantor.id },
@@ -915,6 +993,18 @@ export class LoansService {
 
   /**
    * Post a loan repayment: debit member FOSA, update loan outstanding balance.
+   *
+   * Concurrency safety:
+   *   - Uses the direct (non-pooler) Prisma client for Serializable isolation.
+   *   - Acquires FOR UPDATE row locks on both Account and Loan before reading
+   *     balances, eliminating the TOCTOU window that allowed concurrent repayments
+   *     to both read a stale balance and double-deduct.
+   *   - Balance and outstanding checks happen INSIDE the transaction under the lock.
+   *
+   * Error codes:
+   *   - 404  Active loan or FOSA account not found
+   *   - 422  Insufficient FOSA balance (UnprocessableEntity per SACCO spec)
+   *   - 400  Loan status changed during concurrent processing
    */
   async repay(
     loanId: string,
@@ -926,111 +1016,191 @@ export class LoansService {
     if (amountKes <= 0) throw new BadRequestException('Repayment amount must be positive');
     const amount = new Decimal(amountKes);
 
+    // ── Pre-flight reads (no state change, no lock needed) ───────────────────
     const loan = await this.prisma.loan.findFirst({
       where: { id: loanId, tenantId, status: LoanStatus.ACTIVE },
-      select: { id: true, loanNumber: true, memberId: true, outstandingBalance: true, monthlyInstalment: true },
+      select: { id: true, loanNumber: true, memberId: true, monthlyInstalment: true },
     });
     if (!loan) throw new NotFoundException('Active loan not found');
 
     const fosaAccount = await this.prisma.account.findFirst({
       where: { memberId: loan.memberId, tenantId, accountType: 'FOSA', isActive: true },
-      select: { id: true, balance: true },
+      select: { id: true },
     });
     if (!fosaAccount) throw new BadRequestException('No active FOSA account for repayment');
 
-    // Fetch member user info for email (separate query so it doesn't bloat the repay loan select)
+    // Fetch member email outside transaction — read-only, low contention
     const repayMemberUser = await this.prisma.member.findFirst({
       where: { id: loan.memberId, tenantId },
       select: { user: { select: { email: true, firstName: true } } },
     });
 
-    const balance = new Decimal(fosaAccount.balance.toString());
-    if (balance.lessThan(amount)) {
-      throw new BadRequestException(
-        `Insufficient FOSA balance KES ${balance.toNumber()} for repayment of KES ${amount.toNumber()}`,
-      );
-    }
+    // ── Serializable transaction with FOR UPDATE row locks ───────────────────
+    // Use the direct (non-pooled) client so the Serializable isolation level is
+    // actually honoured. Falls back to the pooled client if DIRECT_URL is not set,
+    // which is acceptable for dev but should be configured in production.
+    const txClient = this.prisma.direct ?? this.prisma;
 
-    const outstanding = new Decimal(loan.outstandingBalance.toString());
-    const actualRepayment = amount.greaterThan(outstanding) ? outstanding : amount;
-    const reference = `REPAY-${uuidv4()}`;
+    const repayResult = await txClient.$transaction(
+      async (tx) => {
+        // Acquire exclusive row locks on both Account and Loan atomically.
+        // This prevents two concurrent repayments from reading the same stale
+        // balance and both decrementing by their full amount.
+        const [lockedAccounts, lockedLoans] = await Promise.all([
+          tx.$queryRaw<{ id: string; balance: string; version: number }[]>`
+            SELECT id, balance, version
+            FROM "Account"
+            WHERE id = ${fosaAccount.id}
+              AND "tenantId" = ${tenantId}
+              AND "isActive" = true
+            FOR UPDATE
+          `,
+          tx.$queryRaw<{ id: string; outstandingBalance: string; status: string; accruedInterest: string; arrearsAmount: string }[]>`
+            SELECT id, "outstandingBalance", status, "accruedInterest", "arrearsAmount"
+            FROM "Loan"
+            WHERE id = ${loanId}
+              AND "tenantId" = ${tenantId}
+            FOR UPDATE
+          `,
+        ]);
 
-    const repayResult = await this.prisma.$transaction(async (tx) => {
-      const acc = await tx.account.findFirst({ where: { id: fosaAccount.id, isActive: true } });
-      if (!acc) throw new NotFoundException('FOSA account not found');
+        const acc = lockedAccounts[0];
+        if (!acc) throw new NotFoundException('FOSA account not found or inactive');
 
-      const balBefore = new Decimal(acc.balance.toString());
-      const balAfter = balBefore.minus(actualRepayment);
+        const currentLoan = lockedLoans[0];
+        if (!currentLoan) throw new NotFoundException('Loan not found');
+        // Guard: status may have changed between the pre-flight read and the lock
+        if (currentLoan.status !== LoanStatus.ACTIVE) {
+          throw new BadRequestException(
+            `Loan status changed to "${currentLoan.status}" during concurrent processing. ` +
+            'Please retry the repayment.',
+          );
+        }
 
-      const txn = await tx.transaction.create({
-        data: {
+        const balBefore = new Decimal(acc.balance.toString());
+        const outstanding = new Decimal(currentLoan.outstandingBalance.toString());
+        const accrued = new Decimal(currentLoan.accruedInterest.toString());
+        const arrears = new Decimal(currentLoan.arrearsAmount.toString());
+
+        // Cap repayment at total amount owed (penalties + interest + principal)
+        const totalOwed = arrears.plus(accrued).plus(outstanding);
+        const actualRepayment = amount.greaterThan(totalOwed) ? totalOwed : amount;
+
+        // 422 Unprocessable Entity: member does not have sufficient funds
+        if (balBefore.lessThan(actualRepayment)) {
+          throw new UnprocessableEntityException(
+            `Insufficient FOSA balance KES ${balBefore.toFixed(2)} ` +
+            `for repayment of KES ${actualRepayment.toFixed(2)}. ` +
+            'Please deposit funds before repaying.',
+          );
+        }
+
+        // SASRA waterfall: Penalties → Accrued Interest → Principal
+        let remaining = actualRepayment;
+
+        const toArrears = Decimal.min(remaining, arrears);
+        remaining = remaining.minus(toArrears);
+        const newArrearsAmount = arrears.minus(toArrears);
+
+        const toInterest = Decimal.min(remaining, accrued);
+        remaining = remaining.minus(toInterest);
+        const newAccruedInterest = accrued.minus(toInterest);
+
+        const toPrincipal = remaining;
+        const newOutstanding = outstanding.minus(toPrincipal);
+
+        const balAfter = balBefore.minus(actualRepayment);
+        const reference = `REPAY-${uuidv4()}`;
+
+        const txn = await tx.transaction.create({
+          data: {
+            tenantId,
+            accountId: fosaAccount.id,
+            loanId,
+            type: TransactionType.LOAN_REPAYMENT,
+            status: TransactionStatus.COMPLETED,
+            amount: actualRepayment.toDecimalPlaces(4).toString(),
+            balanceBefore: balBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balAfter.toDecimalPlaces(4).toString(),
+            reference,
+            description: `Loan repayment – ${loan.loanNumber}`,
+            processedBy,
+          },
+        });
+
+        await tx.account.update({
+          where: { id: fosaAccount.id },
+          data: { balance: balAfter.toDecimalPlaces(4).toString() },
+        });
+
+        const newStatus = newOutstanding.lessThanOrEqualTo(0)
+          ? LoanStatus.FULLY_PAID
+          : LoanStatus.ACTIVE;
+
+        const updatedLoan = await tx.loan.update({
+          where: { id: loanId },
+          data: {
+            outstandingBalance: newOutstanding.lessThan(0)
+              ? '0'
+              : newOutstanding.toDecimalPlaces(4).toString(),
+            accruedInterest: newAccruedInterest.lessThan(0)
+              ? '0'
+              : newAccruedInterest.toDecimalPlaces(4).toString(),
+            arrearsAmount: newArrearsAmount.lessThan(0)
+              ? '0'
+              : newArrearsAmount.toDecimalPlaces(4).toString(),
+            totalRepaid: { increment: actualRepayment.toDecimalPlaces(4).toNumber() },
+            status: newStatus,
+          },
+        });
+
+        await this.audit.create({
           tenantId,
-          accountId: fosaAccount.id,
-          loanId,
-          type: TransactionType.LOAN_REPAYMENT,
-          status: TransactionStatus.COMPLETED,
-          amount: actualRepayment.toDecimalPlaces(4).toString(),
-          balanceBefore: balBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balAfter.toDecimalPlaces(4).toString(),
+          userId: processedBy,
+          action: 'LOAN.REPAYMENT',
+          resource: 'Loan',
+          resourceId: loanId,
+          metadata: {
+            loanNumber: loan.loanNumber,
+            amount: actualRepayment.toNumber(),
+            newOutstanding: Math.max(0, newOutstanding.toNumber()),
+            newStatus,
+            reference,
+          },
+          ipAddress,
+        }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+        return {
+          loan: updatedLoan,
+          transaction: txn,
           reference,
-          description: `Loan repayment – ${loan.loanNumber}`,
-          processedBy,
-        },
-      });
+          paidAt: new Date(),
+          newOutstandingBalance: Math.max(0, newOutstanding.toNumber()),
+          allocation: {
+            toPenalties: toArrears.toNumber(),
+            toInterest: toInterest.toNumber(),
+            toPrincipal: toPrincipal.toNumber(),
+          },
+        };
+      },
+      { isolationLevel: 'Serializable' as const },
+    );
 
-      await tx.account.update({
-        where: { id: fosaAccount.id },
-        data: { balance: balAfter.toDecimalPlaces(4).toString() },
-      });
-
-      const newOutstanding = outstanding.minus(actualRepayment);
-      const newStatus = newOutstanding.lessThanOrEqualTo(0) ? LoanStatus.FULLY_PAID : LoanStatus.ACTIVE;
-      const newTotalRepaid = new Decimal(loan.outstandingBalance.toString())
-        .minus(newOutstanding)
-        .plus(0); // placeholder — use actual accumulated field from db ideally
-
-      const updatedLoan = await tx.loan.update({
-        where: { id: loanId },
-        data: {
-          outstandingBalance: newOutstanding.lessThan(0) ? '0' : newOutstanding.toDecimalPlaces(4).toString(),
-          totalRepaid: { increment: actualRepayment.toDecimalPlaces(4).toNumber() },
-          status: newStatus,
-        },
-      });
-
-      await this.audit.create({
-        tenantId,
-        userId: processedBy,
-        action: 'LOAN.REPAYMENT',
-        resource: 'Loan',
-        resourceId: loanId,
-        metadata: {
-          loanNumber: loan.loanNumber,
-          amount: actualRepayment.toNumber(),
-          newOutstanding: newOutstanding.toNumber(),
-          newStatus,
-          reference,
-        },
-        ipAddress,
-      }).catch((e: unknown) => this.logger.error('Audit write failed', e));
-
-      return { loan: updatedLoan, transaction: txn, reference, paidAt: new Date(), newOutstandingBalance: Math.max(0, newOutstanding.toNumber()) };
-    });
-
-    // Notify member of repayment receipt
+    // Notify member after the transaction commits — fire-and-forget
     if (repayMemberUser?.user?.email) {
-      this.enqueueEmail({
-        type: 'REPAYMENT_RECEIPT',
-        to: repayMemberUser.user.email,
-        firstName: repayMemberUser.user.firstName,
-        loanNumber: loan.loanNumber,
-        amountPaid: repayResult.transaction.amount instanceof Object
-          ? parseFloat(repayResult.transaction.amount.toString())
-          : parseFloat(String(repayResult.transaction.amount)),
-        outstandingBalance: repayResult.newOutstandingBalance,
-        reference: repayResult.reference,
-        paidAt: repayResult.paidAt.toISOString(),
-      }, `loan.repay:${loanId}`);
+      this.enqueueEmail(
+        {
+          type: 'REPAYMENT_RECEIPT',
+          to: repayMemberUser.user.email,
+          firstName: repayMemberUser.user.firstName,
+          loanNumber: loan.loanNumber,
+          amountPaid: parseFloat(repayResult.transaction.amount.toString()),
+          outstandingBalance: repayResult.newOutstandingBalance,
+          reference: repayResult.reference,
+          paidAt: repayResult.paidAt.toISOString(),
+        },
+        `loan.repay:${loanId}`,
+      );
     }
 
     return repayResult;

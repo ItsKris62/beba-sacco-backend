@@ -1,7 +1,7 @@
 import {
-  ExceptionFilter,
-  Catch,
   ArgumentsHost,
+  Catch,
+  ExceptionFilter,
   HttpException,
   HttpStatus,
   Logger,
@@ -9,40 +9,24 @@ import {
 import { Request, Response } from 'express';
 import * as Sentry from '@sentry/node';
 
-/**
- * Standardized error response shape.
- * All API errors follow this structure for predictable client parsing.
- */
-interface ErrorResponse {
-  statusCode: number;
-  message: string | string[];
-  error: string;
+interface ProblemDetail {
+  type: string;
+  title: string;
+  status: number;
+  detail: string | string[];
+  instance: string;
+  correlationId?: string;
   timestamp: string;
-  path: string;
-  requestId?: string;
-  /** Only present in development — never exposed in production */
+  errorCode: string;
   stack?: string;
 }
 
-/**
- * Shape returned by NestJS HttpException.getResponse()
- * when the exception was built from a ValidationPipe error.
- */
 interface HttpExceptionBody {
   message?: string | string[];
   error?: string;
   statusCode?: number;
 }
 
-/**
- * Global Exception Filter
- *
- * Catches ALL thrown exceptions and formats them into the standardized
- * ErrorResponse shape. Never leaks stack traces in production.
- *
- * TODO: Phase 1 – send to Sentry for unhandled (5xx) errors
- * TODO: Phase 2 – add structured error codes for client-side i18n
- */
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(GlobalExceptionFilter.name);
@@ -53,53 +37,79 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const request = ctx.getRequest<Request>();
 
     let status: number;
-    let message: string | string[];
-    let error: string;
+    let detail: string | string[];
+    let errorCode: string;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
       const body = exception.getResponse();
 
       if (typeof body === 'string') {
-        message = body;
-        error = exception.name;
+        detail = body;
+        errorCode = exception.name;
       } else {
         const typed = body as HttpExceptionBody;
-        message = typed.message ?? exception.message;
-        error = typed.error ?? exception.name;
+        detail = typed.message ?? exception.message;
+        errorCode = typed.error ?? exception.name;
       }
     } else if (exception instanceof Error) {
       status = HttpStatus.INTERNAL_SERVER_ERROR;
-      message = 'Internal server error';
-      error = 'InternalServerError';
-
-      // Log full error for ops visibility — but never expose to client
+      detail = 'Internal server error';
+      errorCode = 'InternalServerError';
       this.logger.error(
-        `[${request.headers['x-request-id'] ?? 'no-id'}] Unhandled exception: ${exception.message}`,
+        `[${this.correlationId(request) ?? 'no-id'}] Unhandled exception: ${exception.message}`,
         exception.stack,
       );
-
       Sentry.captureException(exception);
     } else {
       status = HttpStatus.INTERNAL_SERVER_ERROR;
-      message = 'An unexpected error occurred';
-      error = 'UnknownError';
+      detail = 'An unexpected error occurred';
+      errorCode = 'UnknownError';
       this.logger.error('Unknown exception type thrown', exception);
     }
 
-    const errorResponse: ErrorResponse = {
-      statusCode: status,
-      message,
-      error,
+    const problem: ProblemDetail = {
+      type: `https://api.beba.sacco/problems/${this.toKebabCase(errorCode)}`,
+      title: this.titleFor(status, errorCode),
+      status,
+      detail,
+      instance: request.originalUrl ?? request.url,
+      correlationId: this.correlationId(request),
       timestamp: new Date().toISOString(),
-      path: request.url,
-      requestId: request.headers['x-request-id'] as string | undefined,
+      errorCode,
     };
 
     if (process.env.NODE_ENV === 'development' && exception instanceof Error) {
-      errorResponse.stack = exception.stack;
+      problem.stack = exception.stack;
     }
 
-    response.status(status).json(errorResponse);
+    response.status(status).type('application/problem+json').json(problem);
+  }
+
+  private correlationId(request: Request): string | undefined {
+    return (
+      (request.headers['x-correlation-id'] as string | undefined) ??
+      (request.headers['x-request-id'] as string | undefined)
+    );
+  }
+
+  private titleFor(status: number, errorCode: string): string {
+    if (status >= 500) return 'Service Error';
+    if (status === HttpStatus.UNAUTHORIZED) return 'Authentication Required';
+    if (status === HttpStatus.FORBIDDEN) return 'Forbidden';
+    if (status === HttpStatus.NOT_FOUND) return 'Resource Not Found';
+    if (status === HttpStatus.CONFLICT) return 'Conflict';
+    if (status === HttpStatus.UNPROCESSABLE_ENTITY) return 'Validation Failed';
+    return errorCode.replace(/Exception$/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
+  }
+
+  private toKebabCase(value: string): string {
+    const kebab = value
+      .replace(/Exception$/, '')
+      .replace(/([a-z])([A-Z])/g, '$1-$2')
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .toLowerCase();
+    return kebab || 'unknown-error';
   }
 }

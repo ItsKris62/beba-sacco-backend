@@ -415,6 +415,114 @@ export class MemberPortalService {
     };
   }
 
+  // ─── LOAN DETAIL ─────────────────────────────────────────────
+
+  /**
+   * Return full loan detail for a member's own loan.
+   *
+   * Ownership: loan.memberId must match the resolved memberId from JWT.
+   * accruedInterest is stubbed at 0 until Tier 3 adds the schema column.
+   * repaymentSchedule is generated analytically from loan metadata; actual
+   * LoanRepayment rows will replace this stub in Tier 3.
+   */
+  async getLoanDetail(loanId: string, userId: string, tenantId: string) {
+    const member = await this.resolveMember(userId, tenantId);
+
+    const loan = await this.prisma.loan.findFirst({
+      where: { id: loanId, tenantId, memberId: member.id },
+      include: {
+        loanProduct: { select: { name: true, interestType: true, interestRate: true } },
+        guarantors: {
+          select: {
+            status: true,
+            guaranteedAmount: true,
+            member: {
+              select: {
+                memberNumber: true,
+                user: { select: { firstName: true, lastName: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!loan) {
+      throw new NotFoundException('Loan not found or does not belong to you');
+    }
+
+    // Last 5 transactions for this loan
+    const recentTransactions = await this.prisma.transaction.findMany({
+      where: { loanId, tenantId },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: {
+        id: true,
+        type: true,
+        status: true,
+        amount: true,
+        balanceBefore: true,
+        balanceAfter: true,
+        reference: true,
+        description: true,
+        createdAt: true,
+      },
+    });
+
+    const outstanding = new Decimal(loan.outstandingBalance.toString());
+    const accruedInterest = new Decimal(loan.accruedInterest.toString());
+    const totalAmountDue = outstanding.plus(accruedInterest).toNumber();
+
+    // Fetch LoanRepayment schedule rows (generated at disburse time)
+    const scheduleRows = await this.prisma.loanRepayment.findMany({
+      where: { loanId, tenantId },
+      orderBy: { dayNumber: 'asc' },
+      select: { dayNumber: true, amountPaid: true, paymentDate: true, status: true },
+    });
+    const now = new Date();
+    const schedule = scheduleRows.map((r) => ({
+      month: r.dayNumber,
+      dueDate: r.paymentDate.toISOString().split('T')[0],
+      expectedAmount: new Decimal(r.amountPaid.toString()).toNumber(),
+      status: (
+        r.status === 'CONFIRMED' ? 'PAID'
+        : r.paymentDate < now ? 'OVERDUE'
+        : 'UPCOMING'
+      ) as 'PAID' | 'OVERDUE' | 'UPCOMING',
+    }));
+
+    return {
+      id: loan.id,
+      loanNumber: loan.loanNumber,
+      status: loan.status,
+      product: loan.loanProduct,
+      principalAmount: new Decimal(loan.principalAmount.toString()).toNumber(),
+      interestRate: new Decimal(loan.interestRate.toString()).toNumber(),
+      processingFee: new Decimal(loan.processingFee.toString()).toNumber(),
+      tenureMonths: loan.tenureMonths,
+      monthlyInstalment: new Decimal(loan.monthlyInstalment.toString()).toNumber(),
+      outstandingBalance: outstanding.toNumber(),
+      accruedInterest: accruedInterest.toNumber(),
+      totalAmountDue,
+      totalRepaid: new Decimal(loan.totalRepaid.toString()).toNumber(),
+      disbursedAt: loan.disbursedAt,
+      dueDate: loan.dueDate,
+      appliedAt: loan.appliedAt,
+      guarantors: loan.guarantors.map((g) => ({
+        memberNumber: g.member.memberNumber,
+        memberName: `${g.member.user.firstName} ${g.member.user.lastName}`,
+        guaranteedAmount: new Decimal(g.guaranteedAmount.toString()).toNumber(),
+        status: g.status,
+      })),
+      recentTransactions: recentTransactions.map((t) => ({
+        ...t,
+        amount: new Decimal(t.amount.toString()).toNumber(),
+        balanceBefore: new Decimal(t.balanceBefore.toString()).toNumber(),
+        balanceAfter: new Decimal(t.balanceAfter.toString()).toNumber(),
+      })),
+      repaymentSchedule: schedule,
+    };
+  }
+
   // ─── MPESA DEPOSIT STATUS ─────────────────────────────────────
 
   /**

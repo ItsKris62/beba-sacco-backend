@@ -5,10 +5,10 @@ import { PrismaService } from '../../prisma/prisma.service';
 export interface CreateAuditLogDto {
   tenantId: string;
   actorId?: string;
-  userId?: string;     // deprecated alias for actorId (backward compat)
-  action: string;      // e.g. 'USER.CREATED', 'ROLE_CHANGED', 'STATUS_APPROVED'
+  userId?: string; // deprecated alias for actorId (backward compat)
+  action: string; // e.g. 'USER.CREATED', 'ROLE_CHANGED', 'STATUS_APPROVED'
   entityType?: string; // e.g. 'User', 'Loan'
-  resource?: string;   // deprecated alias for entityType (backward compat)
+  resource?: string; // deprecated alias for entityType (backward compat)
   entityId?: string;
   resourceId?: string; // deprecated alias for entityId (backward compat)
   oldValue?: Record<string, unknown>;
@@ -50,7 +50,12 @@ export class AuditService {
     // Backward compat: resource/resourceId → entityType/entityId
     const entityType = dto.entityType ?? dto.resource ?? 'Unknown';
     const entityId = dto.entityId ?? dto.resourceId ?? null;
-    const actorId = dto.actorId ?? dto.userId ?? null;
+    const requestedActorId = dto.actorId ?? dto.userId ?? null;
+    const actorId = requestedActorId === 'SYSTEM' ? null : requestedActorId;
+    const metadata = {
+      ...(dto.metadata ?? {}),
+      ...(requestedActorId === 'SYSTEM' && { actorId: 'SYSTEM' }),
+    };
 
     await this.prisma.auditLog.create({
       data: {
@@ -61,7 +66,7 @@ export class AuditService {
         entityId,
         oldValue: dto.oldValue ? (dto.oldValue as Prisma.InputJsonValue) : Prisma.JsonNull,
         newValue: dto.newValue ? (dto.newValue as Prisma.InputJsonValue) : Prisma.JsonNull,
-        metadata: (dto.metadata ?? {}) as Prisma.InputJsonValue,
+        metadata: metadata as Prisma.InputJsonValue,
         ipAddress: dto.ipAddress ?? null,
         userAgent: dto.userAgent ?? null,
         requestId: dto.requestId ?? null,
@@ -89,7 +94,9 @@ export class AuditService {
       tenantId: filters.tenantId,
       ...(filters.actorId && { actorId: filters.actorId }),
       ...(filters.action && { action: { contains: filters.action, mode: 'insensitive' } }),
-      ...(filters.entityType && { entityType: { contains: filters.entityType, mode: 'insensitive' } }),
+      ...(filters.entityType && {
+        entityType: { contains: filters.entityType, mode: 'insensitive' },
+      }),
       ...((filters.fromDate || filters.toDate) && {
         timestamp: {
           ...(filters.fromDate && { gte: filters.fromDate }),

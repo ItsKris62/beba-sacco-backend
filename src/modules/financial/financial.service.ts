@@ -1,9 +1,18 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
-import { LoanStatus, TransactionType, TransactionStatus, InterestType, LoanStaging } from '@prisma/client';
+import {
+  LoanStatus,
+  TransactionType,
+  TransactionStatus,
+  InterestType,
+  LoanStaging,
+} from '@prisma/client';
+import type { Queue } from 'bullmq';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
+import { AuditLogJobPayload, QUEUE_NAMES } from '../queue/queue.constants';
 
 /**
  * FinancialService – Phase 4
@@ -25,6 +34,9 @@ export class FinancialService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    @Optional()
+    @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
+    private readonly auditQueue?: Queue<AuditLogJobPayload>,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -39,7 +51,10 @@ export class FinancialService {
    *
    * Per-loan idempotency: `Loan.lastAccrualDate` checked before posting.
    */
-  async runDailyAccrual(tenantId: string, accrualDate: string): Promise<{ processed: number; skipped: number }> {
+  async runDailyAccrual(
+    tenantId: string,
+    accrualDate: string,
+  ): Promise<{ processed: number; skipped: number }> {
     const lockKey = `accrual:${tenantId}:${accrualDate}`;
 
     // Distributed lock – SET NX with 25h TTL
@@ -50,6 +65,7 @@ export class FinancialService {
     }
 
     const dateObj = new Date(accrualDate);
+    const correlationId = uuidv4();
     const activeLoanStatuses: LoanStatus[] = [LoanStatus.ACTIVE, LoanStatus.DISBURSED];
 
     const loans = await this.prisma.loan.findMany({
@@ -57,10 +73,7 @@ export class FinancialService {
         tenantId,
         status: { in: activeLoanStatuses },
         // Skip loans already accrued today
-        OR: [
-          { lastAccrualDate: null },
-          { lastAccrualDate: { lt: dateObj } },
-        ],
+        OR: [{ lastAccrualDate: null }, { lastAccrualDate: { lt: dateObj } }],
       },
       include: {
         loanProduct: { select: { interestType: true } },
@@ -75,7 +88,7 @@ export class FinancialService {
 
     for (const loan of loans) {
       try {
-        await this.accrueInterestForLoan(loan, dateObj);
+        await this.accrueInterestForLoan(loan, dateObj, correlationId);
         processed++;
       } catch (err) {
         this.logger.error(`Accrual failed for loan ${loan.id}`, err);
@@ -83,7 +96,9 @@ export class FinancialService {
       }
     }
 
-    this.logger.log(`Accrual complete: tenant=${tenantId} date=${accrualDate} processed=${processed} skipped=${skipped}`);
+    this.logger.log(
+      `Accrual complete: tenant=${tenantId} date=${accrualDate} processed=${processed} skipped=${skipped}`,
+    );
     return { processed, skipped };
   }
 
@@ -96,10 +111,13 @@ export class FinancialService {
       interestRate: Decimal;
       dueDate: Date | null;
       arrearsDays: number;
+      accruedInterest?: Decimal;
+      lastAccrualDate?: Date | null;
       loanProduct: { interestType: string };
       member: { accounts: { id: string; balance: Decimal }[] };
     },
     accrualDate: Date,
+    correlationId: string,
   ): Promise<void> {
     const outstanding = new Decimal(loan.outstandingBalance.toString());
     if (outstanding.lte(0)) return;
@@ -110,9 +128,7 @@ export class FinancialService {
 
     // Penalty: if past due date, add a daily penalty of 0.1% of outstanding
     const isPastDue = loan.dueDate && accrualDate > loan.dueDate;
-    const dailyPenalty = isPastDue
-      ? outstanding.times(0.001).toDecimalPlaces(4)
-      : new Decimal(0);
+    const dailyPenalty = isPastDue ? outstanding.times(0.001).toDecimalPlaces(4) : new Decimal(0);
 
     // Determine arrears days (days since due date)
     let newArrearsDays = 0;
@@ -132,6 +148,16 @@ export class FinancialService {
     }
 
     const accrualDateStr = accrualDate.toISOString().split('T')[0];
+    const oldAccrued = new Decimal(loan.accruedInterest?.toString() ?? '0');
+    const newAccrued = oldAccrued.plus(dailyInterest).toDecimalPlaces(4);
+    const daysElapsed = loan.lastAccrualDate
+      ? Math.max(
+          1,
+          Math.floor(
+            (accrualDate.getTime() - loan.lastAccrualDate.getTime()) / (24 * 60 * 60 * 1000),
+          ),
+        )
+      : 1;
 
     await this.prisma.$transaction(async (tx) => {
       // Post interest accrual transaction
@@ -192,23 +218,73 @@ export class FinancialService {
         });
       }
 
-      // Update loan arrears + staging
+      // Update loan arrears + staging + running accruedInterest total
       await tx.loan.update({
         where: { id: loan.id },
         data: {
           arrearsDays: newArrearsDays,
           arrearsAmount: isPastDue
-            ? new Decimal(loan.outstandingBalance.toString())
-                .toDecimalPlaces(4)
-                .toString()
+            ? new Decimal(loan.outstandingBalance.toString()).toDecimalPlaces(4).toString()
             : '0',
           staging,
           lastAccrualDate: accrualDate,
+          accruedInterest: { increment: dailyInterest.toDecimalPlaces(4).toNumber() },
           // Transition to DEFAULTED if NPL
-          ...(staging === LoanStaging.NPL &&
-            loan.loanProduct && { status: LoanStatus.DEFAULTED }),
+          ...(staging === LoanStaging.NPL && loan.loanProduct && { status: LoanStatus.DEFAULTED }),
         },
       });
+    });
+
+    this.emitAuditLogNonBlocking(
+      {
+        tenantId: loan.tenantId,
+        actorId: 'SYSTEM',
+        userId: 'SYSTEM',
+        action: 'INTEREST.ACCRUAL',
+        entityType: 'LOAN',
+        resource: 'LOAN',
+        entityId: loan.id,
+        resourceId: loan.id,
+        oldValue: { accruedInterest: oldAccrued.toFixed(4) },
+        newValue: { accruedInterest: newAccrued.toFixed(4) },
+        metadata: {
+          dailyRate: annualRate.dividedBy(365).toDecimalPlaces(10).toString(),
+          daysElapsed,
+          correlationId,
+        },
+        requestId: `audit:INTEREST.ACCRUAL:${loan.tenantId}:${loan.id}:${accrualDateStr}`,
+      },
+      `audit:INTEREST.ACCRUAL:${loan.tenantId}:${loan.id}:${accrualDateStr}`,
+      correlationId,
+    );
+  }
+
+  private emitAuditLogNonBlocking(
+    payload: AuditLogJobPayload,
+    jobId: string,
+    correlationId: string,
+  ): void {
+    setImmediate(() => {
+      this.auditQueue
+        ?.add('domain-event', payload, {
+          jobId,
+          attempts: 1,
+          removeOnComplete: true,
+          removeOnFail: false,
+        })
+        .catch((err: unknown) => {
+          this.logger.error(
+            JSON.stringify({
+              event: 'audit.emit_failed',
+              action: payload.action,
+              entityId: payload.entityId ?? payload.resourceId,
+              tenantId: payload.tenantId,
+              correlationId,
+              spanId: jobId,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        });
     });
   }
 
@@ -233,7 +309,12 @@ export class FinancialService {
   async getGuarantorExposure(
     memberId: string,
     tenantId: string,
-  ): Promise<{ totalExposure: number; fosaBalance: number; exposureRatio: number; canGuarantee: boolean }> {
+  ): Promise<{
+    totalExposure: number;
+    fosaBalance: number;
+    exposureRatio: number;
+    canGuarantee: boolean;
+  }> {
     const [guarantees, fosaAccount] = await Promise.all([
       this.prisma.guarantor.findMany({
         where: {
@@ -255,15 +336,11 @@ export class FinancialService {
       new Decimal(0),
     );
 
-    const fosaBalance = fosaAccount
-      ? new Decimal(fosaAccount.balance.toString())
-      : new Decimal(0);
+    const fosaBalance = fosaAccount ? new Decimal(fosaAccount.balance.toString()) : new Decimal(0);
 
     const maxAllowed = fosaBalance.times(1.5);
     const canGuarantee = totalExposure.lt(maxAllowed);
-    const exposureRatio = fosaBalance.gt(0)
-      ? totalExposure.dividedBy(fosaBalance).toNumber()
-      : 0;
+    const exposureRatio = fosaBalance.gt(0) ? totalExposure.dividedBy(fosaBalance).toNumber() : 0;
 
     return {
       totalExposure: totalExposure.toNumber(),
@@ -289,7 +366,13 @@ export class FinancialService {
   async runLedgerIntegrityCheck(tenantId: string): Promise<{
     checked: number;
     driftCount: number;
-    drifts: { accountId: string; accountNumber: string; expected: number; actual: number; drift: number }[];
+    drifts: {
+      accountId: string;
+      accountNumber: string;
+      expected: number;
+      actual: number;
+      drift: number;
+    }[];
   }> {
     const CREDIT_TYPES = [
       TransactionType.DEPOSIT,
@@ -310,7 +393,13 @@ export class FinancialService {
       select: { id: true, accountNumber: true, balance: true },
     });
 
-    const drifts: { accountId: string; accountNumber: string; expected: number; actual: number; drift: number }[] = [];
+    const drifts: {
+      accountId: string;
+      accountNumber: string;
+      expected: number;
+      actual: number;
+      drift: number;
+    }[] = [];
 
     for (const account of accounts) {
       const [credits, debits] = await this.prisma.$transaction([

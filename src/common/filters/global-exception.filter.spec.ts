@@ -11,7 +11,8 @@ jest.mock('@sentry/node', () => ({
 
 function makeHost(url = '/api/test', requestId?: string): ArgumentsHost {
   const json = jest.fn();
-  const status = jest.fn(() => ({ json }));
+  const type = jest.fn(() => ({ json }));
+  const status = jest.fn(() => ({ type }));
   const headers: Record<string, string> = {};
   if (requestId) headers['x-request-id'] = requestId;
 
@@ -102,7 +103,8 @@ describe('GlobalExceptionFilter [H-3]', () => {
 
   it('returns 500 status for unhandled Error', () => {
     const json = jest.fn();
-    const statusFn = jest.fn(() => ({ json }));
+    const typeFn = jest.fn(() => ({ json }));
+    const statusFn = jest.fn(() => ({ type: typeFn }));
     const host = {
       switchToHttp: () => ({
         getResponse: () => ({ status: statusFn }),
@@ -115,17 +117,18 @@ describe('GlobalExceptionFilter [H-3]', () => {
     expect(statusFn).toHaveBeenCalledWith(500);
     expect(json).toHaveBeenCalledWith(
       expect.objectContaining({
-        statusCode: 500,
-        message: 'Internal server error',
-        error: 'InternalServerError',
-        path: '/api/test',
+        status: 500,
+        detail: 'Internal server error',
+        errorCode: 'InternalServerError',
+        instance: '/api/test',
       }),
     );
   });
 
   it('returns 404 with correct shape for HttpException', () => {
     const json = jest.fn();
-    const statusFn = jest.fn(() => ({ json }));
+    const typeFn = jest.fn(() => ({ json }));
+    const statusFn = jest.fn(() => ({ type: typeFn }));
     const host = {
       switchToHttp: () => ({
         getResponse: () => ({ status: statusFn }),
@@ -138,9 +141,9 @@ describe('GlobalExceptionFilter [H-3]', () => {
     expect(statusFn).toHaveBeenCalledWith(404);
     expect(json).toHaveBeenCalledWith(
       expect.objectContaining({
-        statusCode: 404,
-        path: '/api/loans/missing',
-        requestId: 'req-abc',
+        status: 404,
+        instance: '/api/loans/missing',
+        correlationId: 'req-abc',
       }),
     );
   });

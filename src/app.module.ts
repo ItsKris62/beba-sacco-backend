@@ -14,6 +14,7 @@ import { validationSchema } from './common/config/validation.schema';
 
 // Common
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
+import { TenantMiddleware } from './common/middleware/tenant.middleware';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { JwtAuthGuard } from './common/guards/jwt.guard';
 import { RBACGuard } from './common/guards/rbac.guard';
@@ -58,6 +59,9 @@ import { DataImportModule } from './modules/data-import/data-import.module';
 // Sprint 3 – domain modules
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { StatementsModule } from './modules/statements/statements.module';
+import { ReportsModule } from './modules/reports/reports.module';
+// Tier 2 – Accounting
+import { AccountingModule } from './modules/accounting/accounting.module';
 
 // Prisma
 import { PrismaModule } from './prisma/prisma.module';
@@ -173,6 +177,8 @@ import { AuditService } from './modules/audit/audit.service';
     // Sprint 3 – Dashboard, Statements, Session & ODPC Compliance
     DashboardModule,
     StatementsModule,
+    ReportsModule,
+    AccountingModule,
   ],
 
   providers: [
@@ -197,8 +203,7 @@ import { AuditService } from './modules/audit/audit.service';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(RequestIdMiddleware).forRoutes('*');
+    consumer.apply(RequestIdMiddleware, TenantMiddleware, IdempotencyMiddleware).forRoutes('*');
     // Phase 4 – idempotency enforcement on mutating endpoints
-    consumer.apply(IdempotencyMiddleware).forRoutes('*');
   }
 }

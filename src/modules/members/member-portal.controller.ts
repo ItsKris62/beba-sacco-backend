@@ -1,14 +1,15 @@
 import {
   Controller, Get, Post, Patch, Body, Param, Query, ParseUUIDPipe,
-  HttpCode, HttpStatus, Req, UseGuards, ForbiddenException,
+  HttpCode, HttpStatus, Req, UseGuards, ForbiddenException, Res,
 } from '@nestjs/common';
 import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader, ApiParam,
 } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { MembersService } from './members.service';
+import { MemberPortalService } from './member-portal.service';
 import { LoansService } from '../loans/loans.service';
 import { LoanApplicationService } from '../loans/loan-application.service';
 import { MpesaService } from '../mpesa/mpesa.service';
@@ -19,9 +20,11 @@ import { CurrentTenant } from '../../common/decorators/current-tenant.decorator'
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { MemberDepositDto } from '../mpesa/dto/deposit-request.dto';
-import { ApplyLoanDto } from '../loans/dto/apply-loan.dto';
+import { MemberApplyLoanDto } from '../loans/dto/member-apply-loan.dto';
 import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { DashboardService } from '../dashboard/dashboard.service';
+import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
 
 /**
  * Member Portal Controller
@@ -40,11 +43,13 @@ import { PrismaService } from '../../prisma/prisma.service';
 export class MemberPortalController {
   constructor(
     private readonly members: MembersService,
+    private readonly portal: MemberPortalService,
     private readonly loans: LoansService,
     private readonly loanApp: LoanApplicationService,
     private readonly mpesa: MpesaService,
     private readonly statements: StatementService,
     private readonly prisma: PrismaService,
+    private readonly dashboardService: DashboardService,
   ) {}
 
   /** Resolve memberId from the authenticated user's id */
@@ -65,51 +70,22 @@ export class MemberPortalController {
     summary: 'Member personal dashboard',
     description: 'Returns balances, active loans, and pending deposits for the authenticated member.',
   })
-  @ApiResponse({ status: 200, description: 'Dashboard data' })
+  @ApiResponse({ status: 200, description: 'Dashboard data', type: MemberDashboardDto })
+  @ApiResponse({ status: 206, description: 'Partial dashboard data', type: MemberDashboardDto })
   async getDashboard(
     @CurrentUser() user: AuthenticatedUser,
     @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    const memberId = await this.resolveMemberId(user.id, tenant.id);
-
-    const [accounts, activeLoans, pendingDeposits] = await Promise.all([
-      this.prisma.account.findMany({
-        where: { memberId, tenantId: tenant.id, isActive: true },
-        select: { accountType: true, balance: true, accountNumber: true },
-      }),
-      this.prisma.loan.findMany({
-        where: { memberId, tenantId: tenant.id, status: { in: ['ACTIVE', 'DISBURSED', 'APPROVED'] } },
-        select: { loanNumber: true, principalAmount: true, outstandingBalance: true, status: true },
-        orderBy: { appliedAt: 'desc' },
-        take: 5,
-      }),
-      this.prisma.mpesaTransaction.findMany({
-        where: { memberId, tenantId: tenant.id, status: 'PENDING' },
-        select: { amount: true, createdAt: true, type: true },
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-      }),
-    ]);
-
-    return {
-      memberId,
-      accounts: accounts.map((a) => ({
-        type: a.accountType,
-        balance: a.balance,
-        accountNumber: a.accountNumber,
-      })),
-      activeLoans: activeLoans.map((l) => ({
-        loanNumber: l.loanNumber,
-        principalAmount: l.principalAmount,
-        outstandingBalance: l.outstandingBalance,
-        status: l.status,
-      })),
-      pendingDeposits: pendingDeposits.map((d) => ({
-        amount: d.amount,
-        createdAt: d.createdAt,
-        type: d.type,
-      })),
-    };
+    const result = await this.dashboardService.getMemberDashboard(
+      tenant.id,
+      user.id,
+      (req.headers['x-correlation-id'] as string | undefined) ??
+        (req.headers['x-request-id'] as string | undefined),
+    );
+    if (result.partial) res.status(HttpStatus.PARTIAL_CONTENT);
+    return result.data;
   }
 
   // ─── FOSA STATEMENT ────────────────────────────────────────────────────────
@@ -143,19 +119,75 @@ export class MemberPortalController {
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Apply for a loan (member self-service)',
-    description: 'Members can apply for Development or Jipange loan products.',
+    description:
+      'Members apply for Development or Jipange loan products. ' +
+      'memberId is resolved from the JWT — never accepted from the request body. ' +
+      'Publishes LoanApplied domain event to BullMQ. ' +
+      'Supply Idempotency-Key header to prevent duplicate submissions on retry.',
   })
-  @ApiResponse({ status: 201, description: 'Loan application submitted' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description: 'Client-generated UUID to make this request idempotent (24 h TTL)',
+    example: '550e8400-e29b-41d4-a716-446655440000',
+  })
+  @ApiResponse({ status: 201, description: 'Loan application created (DRAFT)' })
+  @ApiResponse({ status: 400, description: 'Validation error or product constraint violated' })
+  @ApiResponse({ status: 409, description: 'Idempotency key already in use (duplicate request)' })
+  @ApiResponse({ status: 422, description: 'Eligibility not met: KYC pending, deposit limit, or defaulted loan' })
   async applyLoan(
-    @Body() dto: ApplyLoanDto,
+    @Body() dto: MemberApplyLoanDto,
     @CurrentUser() user: AuthenticatedUser,
     @CurrentTenant() tenant: Tenant,
     @Req() req: Request,
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
-    // Override memberId to prevent members applying on behalf of others
-    const safeDto = { ...dto, memberId };
-    return this.loans.apply(safeDto, tenant.id, user.id, req.ip);
+    const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
+    return this.loanApp.memberApply(dto, tenant.id, memberId, user.id, req, idempotencyKey);
+  }
+
+  // ─── LOAN DETAIL ──────────────────────────────────────────────────────────
+
+  @Get('loans/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Get loan detail (member self-service)',
+    description:
+      'Returns full loan detail for a loan owned by the authenticated member: ' +
+      'outstanding balance, accrued interest (stubbed at 0 until Tier 3), totalAmountDue, ' +
+      'last 5 transactions, and an analytically generated repayment schedule stub.',
+  })
+  @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Loan detail',
+    schema: {
+      example: {
+        id: 'uuid',
+        loanNumber: 'LN-2026-000001',
+        status: 'ACTIVE',
+        principalAmount: 50000,
+        outstandingBalance: 42000,
+        accruedInterest: 0,
+        totalAmountDue: 42000,
+        totalRepaid: 8000,
+        disbursedAt: '2026-05-01T10:00:00.000Z',
+        dueDate: '2027-05-01T00:00:00.000Z',
+        recentTransactions: [],
+        repaymentSchedule: [
+          { month: 1, dueDate: '2026-06-01', expectedAmount: 4667, status: 'OVERDUE' },
+        ],
+      },
+    },
+  })
+  @ApiResponse({ status: 403, description: 'Loan does not belong to authenticated member' })
+  @ApiResponse({ status: 404, description: 'Loan not found' })
+  async getLoanDetail(
+    @Param('id', ParseUUIDPipe) loanId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.portal.getLoanDetail(loanId, user.id, tenant.id);
   }
 
   // ─── GUARANTOR STATUS ──────────────────────────────────────────────────────
@@ -195,6 +227,11 @@ export class MemberPortalController {
       'Idempotent via Redis. Only the targeted guarantor can respond.',
   })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Client-generated UUID for safe guarantor response retries',
+  })
   @ApiResponse({ status: 200, description: 'Response recorded with consent evidence' })
   @ApiResponse({ status: 400, description: 'Expired consent or missing acknowledgment' })
   @ApiResponse({ status: 403, description: 'Not authorized to respond to this request' })
@@ -207,9 +244,10 @@ export class MemberPortalController {
     @Req() req: Request,
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
+    const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
     // Use the new LoanApplicationService for enhanced consent flow
     // The service validates: JWT ownership, 72h expiry, digital ack, idempotency
-    return this.loanApp.guarantorResponse(loanId, memberId, dto, tenant.id, user.id, req);
+    return this.loanApp.guarantorResponse(loanId, memberId, dto, tenant.id, user.id, req, idempotencyKey);
   }
 
   // ─── M-PESA DEPOSIT ────────────────────────────────────────────────────────

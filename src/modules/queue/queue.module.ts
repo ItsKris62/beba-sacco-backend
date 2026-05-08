@@ -6,6 +6,7 @@ import { QUEUE_NAMES } from './queue.constants';
 // Processors
 import { MpesaCallbackProcessor } from './processors/mpesa-callback.processor';
 import { GuarantorReminderProcessor } from './processors/guarantor-reminder.processor';
+import { GuarantorProcessor } from './processors/guarantor.processor';
 import { AuditLogProcessor } from './processors/audit-log.processor';
 import { LoanDisburseProcessor } from './processors/loan-disburse.processor';
 import { EmailProcessor } from './processors/email.processor';
@@ -15,6 +16,7 @@ import { MpesaReconciliationProcessor } from './processors/mpesa-reconciliation.
 import { LedgerIntegrityProcessor } from './processors/ledger-integrity.processor';
 import { RepaymentScheduleProcessor } from './processors/repayment-schedule.processor';
 import { OutboundWebhookProcessor } from './processors/outbound-webhook.processor';
+import { ReportProcessor } from './processors/report.processor';
 // Sprint 4 – cron-scheduled STK repayment
 import { MpesaRepaymentScheduler } from './processors/mpesa-repayment.scheduler';
 import { MpesaRepaymentProcessor } from './processors/mpesa-repayment.processor';
@@ -26,6 +28,7 @@ import { AuditModule } from '../audit/audit.module';
 import { PlunkService } from '../../common/services/plunk.service';
 import { FinancialModule } from '../financial/financial.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
+import { ReportsModule } from '../reports/reports.module';
 
 /**
  * Queue Module – BullMQ + Redis
@@ -90,6 +93,8 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT },
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ },
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
+      { name: QUEUE_NAMES.GUARANTOR_VALIDATION },
+      { name: QUEUE_NAMES.GUARANTOR_VALIDATION_DLQ },
       { name: QUEUE_NAMES.AUDIT_LOG },
       { name: QUEUE_NAMES.LOAN_DISBURSE },
       { name: QUEUE_NAMES.EMAIL },
@@ -100,12 +105,15 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
       { name: QUEUE_NAMES.LEDGER_INTEGRITY },
       { name: QUEUE_NAMES.OUTBOUND_WEBHOOK },
       { name: QUEUE_NAMES.MPESA_STK_REPAYMENT },
+      { name: QUEUE_NAMES.REPORT_GENERATION },
+      { name: QUEUE_NAMES.REPORT_GENERATION_DLQ },
     ),
     MpesaModule,
     LoansModule,
     AuditModule,
     FinancialModule,
     WebhooksModule,
+    ReportsModule,
   ],
   providers: [
     // PlunkService is @Global but QueueModule is loaded before CommonServicesModule
@@ -113,6 +121,7 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
     PlunkService,
     MpesaCallbackProcessor,
     GuarantorReminderProcessor,
+    GuarantorProcessor,
     AuditLogProcessor,
     LoanDisburseProcessor,
     EmailProcessor,
@@ -122,6 +131,7 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
     LedgerIntegrityProcessor,
     RepaymentScheduleProcessor,
     OutboundWebhookProcessor,
+    ReportProcessor,
     // Sprint 4
     MpesaRepaymentScheduler,
     MpesaRepaymentProcessor,

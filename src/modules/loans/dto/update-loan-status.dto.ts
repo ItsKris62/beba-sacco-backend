@@ -6,6 +6,9 @@ export enum AdminLoanStatus {
   UNDER_REVIEW = 'UNDER_REVIEW',
   APPROVED = 'APPROVED',
   REJECTED = 'REJECTED',
+  // DISBURSED is routed to LoansService.disburse() at the controller level — it triggers the
+  // full financial disbursement (FOSA credit + Serializable transaction), not a status-only update.
+  DISBURSED = 'DISBURSED',
 }
 
 /**
@@ -15,7 +18,9 @@ export enum AdminLoanStatus {
 export class UpdateLoanStatusDto {
   @ApiProperty({
     enum: AdminLoanStatus,
-    description: 'New status to transition the loan application to',
+    description:
+      'New status to transition the loan application to. ' +
+      'DISBURSED triggers real financial disbursement (FOSA credit); all other values are workflow-only transitions.',
     example: 'APPROVED',
   })
   @IsEnum(AdminLoanStatus)

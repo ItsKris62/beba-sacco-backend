@@ -5,10 +5,12 @@
 export const QUEUE_NAMES = {
   MPESA_CALLBACK: 'mpesa.callback',
   MPESA_STK_REPAYMENT: 'mpesa.stk-repayment', // Cron-scheduled STK repayment initiation jobs
-  MPESA_DISBURSEMENT: 'mpesa.disbursement',         // B2C loan disbursement initiation
+  MPESA_DISBURSEMENT: 'mpesa.disbursement', // B2C loan disbursement initiation
   MPESA_DISBURSEMENT_DLQ: 'mpesa.disbursement.dlq', // Dead-letter queue for B2C failures
-  MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq',         // Dead-letter queue for callback failures
+  MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq', // Dead-letter queue for callback failures
   LOAN_GUARANTOR_REMINDER: 'loan.guarantor.reminder',
+  GUARANTOR_VALIDATION: 'loan.guarantor.validation',
+  GUARANTOR_VALIDATION_DLQ: 'loan.guarantor.validation.dlq',
   AUDIT_LOG: 'audit.log',
   LOAN_DISBURSE: 'loan.disburse',
   EMAIL: 'email',
@@ -38,10 +40,13 @@ export const QUEUE_NAMES = {
   PARTNER_PROVISION: 'partners.provision',
   REGULATORY_SUBMISSION: 'compliance.regulatory-submission',
   EXECUTIVE_REPORT: 'reports.executive',
+  REPORT_GENERATION: 'reports.generation',
+  REPORT_GENERATION_DLQ: 'reports.generation.dlq',
   DR_DRILL: 'sre.dr-drill',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
+export const GUARANTOR_VALIDATION_QUEUE_JOB = 'validate';
 
 // ─── Job payload types ────────────────────────────────────────────────────────
 
@@ -74,12 +79,37 @@ export interface GuarantorReminderJobPayload {
   loanNumber: string;
 }
 
+export interface GuarantorValidationJobPayload {
+  guarantorId: string;
+  loanId: string;
+  tenantId: string;
+  memberId: string;
+  status: 'ACCEPTED' | 'REJECTED' | 'EXPIRED';
+}
+
+export interface ReportGenerationJobPayload {
+  jobId: string;
+  tenantId: string;
+  requestedBy: string;
+  type: 'LOAN_BOOK' | 'MEMBER_BALANCES' | 'AUDIT_TRAIL' | 'EXECUTIVE';
+  format: 'CSV' | 'PDF';
+  filters: {
+    from: string;
+    to: string;
+  };
+}
+
 export interface AuditLogJobPayload {
   tenantId: string;
+  actorId?: string;
   userId?: string;
   action: string;
+  entityType?: string;
   resource: string;
+  entityId?: string;
   resourceId?: string;
+  oldValue?: Record<string, unknown>;
+  newValue?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   ipAddress?: string;
   userAgent?: string;
@@ -107,7 +137,7 @@ export type EmailJobPayload =
   | MemberRejectedEmailPayload;
 
 interface BaseEmailPayload {
-  to: string;       // recipient email address
+  to: string; // recipient email address
   firstName: string; // used in salutation
 }
 

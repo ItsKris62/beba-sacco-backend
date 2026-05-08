@@ -1,8 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { TransactionStatus } from '@prisma/client';
+import type { Queue } from 'bullmq';
+import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
+import { AuditLogJobPayload, QUEUE_NAMES } from '../queue/queue.constants';
 
 export interface ReconReport {
   settlementDate: string;
@@ -46,9 +50,13 @@ export class ReconciliationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    @Optional()
+    @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
+    private readonly auditQueue?: Queue<AuditLogJobPayload>,
   ) {}
 
   async runReconciliation(tenantId: string, settlementDate: string): Promise<ReconReport> {
+    const correlationId = uuidv4();
     const lockKey = `recon:${tenantId}:${settlementDate}`;
     const locked = await this.redis.set(lockKey, '1', this.RECON_LOCK_TTL, true);
     if (!locked) {
@@ -70,6 +78,8 @@ export class ReconciliationService {
     const mismatches: ReconMismatch[] = [];
     const duplicates: string[] = [];
     let autoResolved = 0;
+    let matchedCount = 0;
+    let pendingCount = 0;
     let totalDaraja = new Decimal(0);
     let totalPosted = new Decimal(0);
 
@@ -93,6 +103,8 @@ export class ReconciliationService {
               status: 'AMOUNT_MISMATCH',
               reason: `Daraja says ${mpesaAmount.toNumber()} but posted ${postedAmount.toNumber()}`,
             });
+          } else {
+            matchedCount++;
           }
         } else {
           // Completed in Mpesa but no Transaction record – flag
@@ -107,19 +119,53 @@ export class ReconciliationService {
       } else if (mpesaTxn.status === TransactionStatus.PENDING) {
         const age = now.getTime() - mpesaTxn.createdAt.getTime();
         if (age > staleThreshold) {
+          const flagReason = `Stale PENDING after ${Math.floor(age / 60000)} minutes`;
           // Flag stale PENDING as RECON_PENDING
           await this.prisma.mpesaTransaction.update({
             where: { id: mpesaTxn.id },
-            data: { status: TransactionStatus.RECON_PENDING },
+            data: {
+              status: TransactionStatus.RECON_PENDING,
+              resultDesc: flagReason,
+            },
           });
           mismatches.push({
             checkoutRequestId: mpesaTxn.checkoutRequestId ?? mpesaTxn.id,
             darajaAmount: mpesaAmount.toNumber(),
             postedAmount: null,
             status: 'RECON_PENDING',
-            reason: `Stale PENDING after ${Math.floor(age / 60000)} minutes`,
+            reason: flagReason,
           });
+          this.emitAuditLogNonBlocking(
+            {
+              tenantId,
+              actorId: 'SYSTEM',
+              userId: 'SYSTEM',
+              action: 'RECON.FLAG_PENDING',
+              entityType: 'TRANSACTION',
+              resource: 'TRANSACTION',
+              entityId: mpesaTxn.transactionId ?? mpesaTxn.id,
+              resourceId: mpesaTxn.transactionId ?? mpesaTxn.id,
+              oldValue: { status: TransactionStatus.PENDING },
+              newValue: { status: TransactionStatus.RECON_PENDING },
+              metadata: {
+                correlationId,
+                settlementDate,
+                mismatch: {
+                  checkoutRequestId: mpesaTxn.checkoutRequestId ?? mpesaTxn.id,
+                  darajaAmount: mpesaAmount.toNumber(),
+                  postedAmount: null,
+                  reason: flagReason,
+                },
+                mpesaTransactionId: mpesaTxn.id,
+              },
+              requestId: `audit:RECON.FLAG_PENDING:${tenantId}:${mpesaTxn.id}:${settlementDate}`,
+            },
+            `audit:RECON.FLAG_PENDING:${tenantId}:${mpesaTxn.id}:${settlementDate}`,
+            correlationId,
+          );
           autoResolved++;
+        } else {
+          pendingCount++;
         }
       }
 
@@ -166,6 +212,33 @@ export class ReconciliationService {
       172_800, // 48 h
     );
 
+    this.emitAuditLogNonBlocking(
+      {
+        tenantId,
+        actorId: 'SYSTEM',
+        userId: 'SYSTEM',
+        action: 'RECON.COMPLETE',
+        entityType: 'RECONCILIATION',
+        resource: 'RECONCILIATION',
+        entityId: settlementDate,
+        resourceId: settlementDate,
+        metadata: {
+          correlationId,
+          settlementDate,
+          matchedCount,
+          pendingCount,
+          flaggedTotal: autoResolved,
+          mismatchCount: mismatches.length,
+          duplicateCount: duplicates.length,
+          totalDaraja: totalDaraja.toNumber(),
+          totalPosted: totalPosted.toNumber(),
+        },
+        requestId: `audit:RECON.COMPLETE:${tenantId}:${settlementDate}`,
+      },
+      `audit:RECON.COMPLETE:${tenantId}:${settlementDate}`,
+      correlationId,
+    );
+
     return report;
   }
 
@@ -185,5 +258,34 @@ export class ReconciliationService {
       duplicates: [],
       autoResolved: 0,
     };
+  }
+
+  private emitAuditLogNonBlocking(
+    payload: AuditLogJobPayload,
+    jobId: string,
+    correlationId: string,
+  ): void {
+    setImmediate(() => {
+      this.auditQueue
+        ?.add('domain-event', payload, {
+          jobId,
+          attempts: 1,
+          removeOnComplete: true,
+          removeOnFail: false,
+        })
+        .catch((err: unknown) => {
+          this.logger.error(
+            JSON.stringify({
+              event: 'audit.emit_failed',
+              action: payload.action,
+              entityId: payload.entityId ?? payload.resourceId,
+              tenantId: payload.tenantId,
+              correlationId,
+              spanId: jobId,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        });
+    });
   }
 }
