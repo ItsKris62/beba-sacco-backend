@@ -29,6 +29,7 @@ import { PlunkService } from '../../common/services/plunk.service';
 import { FinancialModule } from '../financial/financial.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { ReportsModule } from '../reports/reports.module';
+import { StorageModule } from '../storage/storage.module';
 
 /**
  * Queue Module – BullMQ + Redis
@@ -114,6 +115,7 @@ import { ReportsModule } from '../reports/reports.module';
     FinancialModule,
     WebhooksModule,
     ReportsModule,
+    StorageModule,
   ],
   providers: [
     // PlunkService is @Global but QueueModule is loaded before CommonServicesModule
