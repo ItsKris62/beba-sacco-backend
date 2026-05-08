@@ -155,7 +155,7 @@ export class DashboardService {
           account: { select: { accountType: true } },
         },
       }),
-      this.prisma.guarantor.findMany({
+      this.prisma.loanGuarantor.findMany({
         where: { memberId: member.id, tenantId, status: 'PENDING' },
         select: {
           id: true,

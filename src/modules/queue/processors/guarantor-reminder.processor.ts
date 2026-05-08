@@ -6,7 +6,7 @@ import { QUEUE_NAMES, GuarantorReminderJobPayload } from '../queue.constants';
 import { PlunkService } from '../../../common/services/plunk.service';
 
 /**
- * Guarantor Reminder Processor
+ * LoanGuarantor Reminder Processor
  *
  * Fires 24 hours after a guarantor is invited (see LoansService.inviteGuarantors).
  * Looks up the guarantor's name and borrower's name from the DB,
@@ -30,11 +30,11 @@ export class GuarantorReminderProcessor extends WorkerHost {
     const { loanId, guarantorId, tenantId, loanNumber } = job.data;
 
     this.logger.log(
-      `Guarantor reminder: loanId=${loanId} guarantorMemberId=${guarantorId} loan=${loanNumber}`,
+      `LoanGuarantor reminder: loanId=${loanId} guarantorMemberId=${guarantorId} loan=${loanNumber}`,
     );
 
     // Skip if guarantor already responded
-    const guarantor = await this.prisma.guarantor.findFirst({
+    const guarantor = await this.prisma.loanGuarantor.findFirst({
       where: { loanId, memberId: guarantorId, tenantId },
       select: {
         status: true,
@@ -44,13 +44,13 @@ export class GuarantorReminderProcessor extends WorkerHost {
     });
 
     if (!guarantor) {
-      this.logger.warn(`Guarantor record not found for loanId=${loanId} memberId=${guarantorId}`);
+      this.logger.warn(`LoanGuarantor record not found for loanId=${loanId} memberId=${guarantorId}`);
       return;
     }
 
     if (guarantor.status !== 'PENDING') {
       this.logger.log(
-        `Guarantor ${guarantorId} already responded (${guarantor.status}) — skipping reminder`,
+        `LoanGuarantor ${guarantorId} already responded (${guarantor.status}) — skipping reminder`,
       );
       return;
     }
@@ -75,7 +75,7 @@ export class GuarantorReminderProcessor extends WorkerHost {
       body: await this.buildReminderEmail(guarantorFirstName, borrowerName, loanNumber, guaranteedAmount),
     });
 
-    this.logger.log(`Guarantor reminder email sent to ${guarantorEmail} for loan ${loanNumber}`);
+    this.logger.log(`LoanGuarantor reminder email sent to ${guarantorEmail} for loan ${loanNumber}`);
   }
 
   private async buildReminderEmail(

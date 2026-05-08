@@ -8,7 +8,7 @@ import { RedisService } from '../../common/services/redis.service';
  * Redis-backed velocity counters that enforce per-user rate rules:
  *   - Deposits:         > 3 in 5 min    → block
  *   - Loan apps:        > 2 in 24 h     → block
- *   - Guarantor invites:> 5 in 10 min   → block
+ *   - LoanGuarantor invites:> 5 in 10 min   → block
  *   - Login attempts:   > 10 in 15 min  → block (brute-force)
  *
  * Keys use `ipHash` (SHA-256 of IP) instead of raw IP to avoid storing PII.

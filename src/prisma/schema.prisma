@@ -343,7 +343,7 @@ model Tenant {
   loanProducts         LoanProduct[]
   loans                Loan[]
   transactions         Transaction[]
-  guarantors           Guarantor[]
+  guarantors           LoanGuarantor[]
   counter              TenantCounter?
   webhookSubscriptions WebhookSubscription[]
   dataImportLogs       DataImportLog[]
@@ -496,7 +496,7 @@ model Member {
 
   accounts         Account[]
   loans            Loan[]
-  guarantors       Guarantor[]
+  guarantors       LoanGuarantor[]
   stageAssignments MemberStage[] // MVP: many-to-many with Stage
 
   @@unique([tenantId, memberNumber])
@@ -517,6 +517,7 @@ model Account {
   accountType   AccountType
   // Balance stored as Decimal(18,4) – always use Decimal class, never number
   balance       Decimal     @default(0) @db.Decimal(18, 4)
+  lockedBalance Decimal     @default(0) @db.Decimal(18, 4)
   isActive      Boolean     @default(true)
 
   // Optimistic locking version for concurrent balance updates
@@ -543,6 +544,9 @@ model LoanProduct {
   // All monetary limits in KES, stored as Decimal(18,4)
   minAmount Decimal @db.Decimal(18, 4)
   maxAmount Decimal @db.Decimal(18, 4)
+  
+  savingsMultiplier Decimal? @db.Decimal(7, 4)
+  minActiveMonths   Int      @default(0)
 
   // e.g., 0.1200 = 12.00 % per annum
   interestRate      Decimal      @db.Decimal(7, 4)
@@ -611,7 +615,7 @@ model Loan {
   updatedAt DateTime @updatedAt
 
   transactions   Transaction[]
-  guarantors     Guarantor[]
+  guarantors     LoanGuarantor[]
   approvalChains LoanApprovalChain[]
   loanRepayments LoanRepayment[]
 
@@ -622,7 +626,7 @@ model Loan {
   @@schema("public")
 }
 
-model Guarantor {
+model LoanGuarantor {
   id       String @id @default(uuid())
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -648,6 +652,7 @@ model Guarantor {
   @@index([tenantId, memberId])
   @@index([tenantId, loanId, status])
   @@index([loanId])
+  @@map("Guarantor")
   @@schema("public")
 }
 

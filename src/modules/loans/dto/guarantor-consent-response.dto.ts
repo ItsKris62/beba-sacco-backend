@@ -2,7 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 
 /**
- * Guarantor action enum — explicit consent actions.
+ * LoanGuarantor action enum — explicit consent actions.
  */
 export enum GuarantorConsentAction {
   ACCEPT = 'ACCEPT',

@@ -133,7 +133,7 @@ describe('LoanApplicationService', () => {
       prisma.member.findFirst.mockResolvedValue({ id: 'g1', user: { firstName: 'J' } } as any);
       prisma.account.findFirst.mockResolvedValue({ id: 'a1', balance: '50000' } as any);
       prisma.loan.findFirst.mockResolvedValue(null);
-      prisma.guarantor.count.mockResolvedValue(3);
+      prisma.loanGuarantor.count.mockResolvedValue(3);
 
       const result = await service.validateGuarantorEligibility('g1', 'l1', 't1', new Decimal(1000), 'm1');
       expect(result.eligible).toBe(false);
@@ -156,7 +156,7 @@ describe('LoanApplicationService', () => {
 
     it('should reject missing digital acknowledgment', async () => {
       prisma.member.findFirst.mockResolvedValue({ userId: 'u1' } as any);
-      prisma.guarantor.findFirst.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: new Date(), guaranteedAmount: '1000' } as any);
+      prisma.loanGuarantor.findFirst.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: new Date(), guaranteedAmount: '1000' } as any);
 
       await expect(
         service.guarantorResponse('l1', 'g1', { action: 'ACCEPT' as any, digitalAcknowledgment: false }, 't1', 'u1', mockReq),
@@ -167,7 +167,7 @@ describe('LoanApplicationService', () => {
       const oldDate = new Date();
       oldDate.setHours(oldDate.getHours() - 73);
       prisma.member.findFirst.mockResolvedValue({ userId: 'u1' } as any);
-      prisma.guarantor.findFirst.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: oldDate, guaranteedAmount: '1000' } as any);
+      prisma.loanGuarantor.findFirst.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: oldDate, guaranteedAmount: '1000' } as any);
 
       await expect(
         service.guarantorResponse('l1', 'g1', { action: 'ACCEPT' as any, digitalAcknowledgment: true }, 't1', 'u1', mockReq),
@@ -176,8 +176,8 @@ describe('LoanApplicationService', () => {
 
     it('should accept valid consent and publish event', async () => {
       prisma.member.findFirst.mockResolvedValue({ userId: 'u1' } as any);
-      prisma.guarantor.findFirst.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: new Date(), guaranteedAmount: '1000' } as any);
-      prisma.guarantor.update.mockResolvedValue({} as any);
+      prisma.loanGuarantor.findFirst.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: new Date(), guaranteedAmount: '1000' } as any);
+      prisma.loanGuarantor.update.mockResolvedValue({} as any);
       prisma.loan.findFirst.mockResolvedValue(null);
 
       const result = await service.guarantorResponse('l1', 'g1', { action: 'ACCEPT' as any, digitalAcknowledgment: true }, 't1', 'u1', mockReq);

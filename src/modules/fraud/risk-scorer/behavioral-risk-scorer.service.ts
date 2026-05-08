@@ -19,7 +19,7 @@ export interface RiskScoreResult {
  * Evaluates member risk across multiple dimensions:
  *  1. Login velocity (failed attempts, device/IP changes)
  *  2. Transaction amount vs historical average
- *  3. Guarantor circularity (ring detection via graph traversal)
+ *  3. LoanGuarantor circularity (ring detection via graph traversal)
  *  4. Repayment pattern shift
  *  5. KYC freshness
  *
@@ -218,7 +218,7 @@ export class BehavioralRiskScorerService {
       if (current.depth > 5) continue; // Limit traversal depth
 
       // Find loans where this member is a guarantor
-      const guaranteedLoans = await this.prisma.guarantor.findMany({
+      const guaranteedLoans = await this.prisma.loanGuarantor.findMany({
         where: { tenantId, memberId: current.memberId, status: 'ACCEPTED' },
         select: { loanId: true },
       });

@@ -12,11 +12,11 @@ import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 
 /**
- * Loan Application & Guarantor Workflow Module (MVP)
+ * Loan Application & LoanGuarantor Workflow Module (MVP)
  *
  * Encapsulates the complete loan application lifecycle:
  * - Member self-service application with eligibility checks
- * - Guarantor invitation and explicit consent
+ * - LoanGuarantor invitation and explicit consent
  * - Admin oversight (status changes, exposure checks)
  * - Domain event publishing to BullMQ
  *

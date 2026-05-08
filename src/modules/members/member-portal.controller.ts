@@ -199,7 +199,7 @@ export class MemberPortalController {
     description: 'Members can view the status of guarantors for their own loan applications.',
   })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
-  @ApiResponse({ status: 200, description: 'Guarantor status list' })
+  @ApiResponse({ status: 200, description: 'LoanGuarantor status list' })
   async getGuarantorStatus(
     @Param('id', ParseUUIDPipe) loanId: string,
     @CurrentUser() user: AuthenticatedUser,

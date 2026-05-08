@@ -17,7 +17,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
  *   - Account balances
  *   - Transaction history
  *   - Loan records
- *   - Guarantor relationships
+ *   - LoanGuarantor relationships
  *   - Audit log entries
  *   - Consent records
  */
@@ -173,8 +173,8 @@ export class DsarService {
         },
       }),
 
-      // Guarantor relationships (both as guarantor and borrower)
-      this.prisma.guarantor.findMany({
+      // LoanGuarantor relationships (both as guarantor and borrower)
+      this.prisma.loanGuarantor.findMany({
         where: { memberId, tenantId },
         select: {
           id: true,

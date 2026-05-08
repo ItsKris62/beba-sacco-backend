@@ -18,7 +18,7 @@ export interface MemberFeatureVector {
   maxArrearsDays: number;
   hasNplLoan: boolean;
   loanRepaymentRate: number;
-  // Guarantor features
+  // LoanGuarantor features
   guarantorCount: number;
   guarantorRingDetected: boolean;
   // KYC features
@@ -60,7 +60,7 @@ export class FeatureStoreService {
         where: { tenantId, memberId },
         select: { status: true, outstandingBalance: true, arrearsDays: true, staging: true, totalRepaid: true, principalAmount: true },
       }),
-      this.prisma.guarantor.count({ where: { tenantId, memberId, status: 'ACCEPTED' } }),
+      this.prisma.loanGuarantor.count({ where: { tenantId, memberId, status: 'ACCEPTED' } }),
       this.prisma.riskScore.findFirst({
         where: { tenantId, memberId },
         orderBy: { evaluatedAt: 'desc' },

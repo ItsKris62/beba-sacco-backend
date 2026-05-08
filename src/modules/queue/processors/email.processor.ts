@@ -197,7 +197,7 @@ export class EmailProcessor extends WorkerHost {
     return {
       subject: `${p.borrowerName} has requested you as a guarantor`,
       body: this.wrap(p.firstName, `
-        <h2>Guarantor Request</h2>
+        <h2>LoanGuarantor Request</h2>
         <p>Your fellow member <strong>${p.borrowerName}</strong> has listed you as a guarantor for their loan application.</p>
         <div class="highlight">
           <table>

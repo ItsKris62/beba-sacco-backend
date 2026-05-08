@@ -104,7 +104,7 @@ export class LoanAdminController {
   @ApiParam({ name: 'id', description: 'Member UUID' })
   @ApiResponse({
     status: 200,
-    description: 'Guarantor exposure data',
+    description: 'LoanGuarantor exposure data',
     schema: {
       example: {
         memberId: 'uuid',

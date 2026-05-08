@@ -15,6 +15,7 @@ import {
   InterestType,
   UserRole,
 } from '@prisma/client';
+import { canTransition } from './loan-state-machine';
 import { v4 as uuidv4 } from 'uuid';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -218,7 +219,7 @@ export class LoanApplicationService {
     // Check accounts
     const accounts = await this.prisma.account.findMany({
       where: { memberId, tenantId, isActive: true },
-      select: { accountType: true, balance: true },
+      select: { accountType: true, balance: true, lockedBalance: true },
     });
 
     const hasFosa = accounts.some((a) => a.accountType === 'FOSA');
@@ -230,10 +231,10 @@ export class LoanApplicationService {
 
     const fosaBalance = accounts
       .filter((a) => a.accountType === 'FOSA')
-      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString())), new Decimal(0));
+      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString()).minus(new Decimal(a.lockedBalance?.toString() ?? '0'))), new Decimal(0));
     const bosaBalance = accounts
       .filter((a) => a.accountType === 'BOSA')
-      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString())), new Decimal(0));
+      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString()).minus(new Decimal(a.lockedBalance?.toString() ?? '0'))), new Decimal(0));
 
     // Check blacklist (placeholder — MemberBlacklist model in schema additions)
     // TODO: Uncomment after migrating schema additions
@@ -290,17 +291,20 @@ export class LoanApplicationService {
     // Check FOSA
     const fosaAccount = await this.prisma.account.findFirst({
       where: { memberId: guarantorMemberId, tenantId, accountType: 'FOSA', isActive: true },
-      select: { id: true, balance: true },
+      select: { id: true, balance: true, lockedBalance: true },
     });
     if (!fosaAccount) {
       return { eligible: false, reason: 'Guarantor has no active FOSA account' };
     }
 
     const fosaBalance = new Decimal(fosaAccount.balance.toString());
-    if (fosaBalance.lessThan(proposedAmount)) {
+    const lockedBalance = new Decimal(fosaAccount.lockedBalance?.toString() ?? '0');
+    const availableBalance = fosaBalance.minus(lockedBalance);
+
+    if (availableBalance.lessThan(proposedAmount)) {
       return {
         eligible: false,
-        reason: `Insufficient FOSA balance: holds KES ${fosaBalance.toFixed(2)}, committing KES ${proposedAmount.toFixed(2)}`,
+        reason: `Insufficient FOSA available balance: available KES ${availableBalance.toFixed(2)}, committing KES ${proposedAmount.toFixed(2)}`,
       };
     }
 
@@ -326,7 +330,7 @@ export class LoanApplicationService {
     // TODO: Replace with TenantGuaranteeConfig after schema migration
     const maxGuarantees = 3;
 
-    const activeGuarantees = await this.prisma.guarantor.count({
+    const activeGuarantees = await this.prisma.loanGuarantor.count({
       where: {
         memberId: guarantorMemberId,
         tenantId,
@@ -456,7 +460,7 @@ export class LoanApplicationService {
       });
       const loanNumber = `LN-${year}-${String(counter.loanSeq).padStart(6, '0')}`;
 
-      return tx.loan.create({
+      const createdLoan = await tx.loan.create({
         data: {
           tenantId,
           memberId,
@@ -480,6 +484,53 @@ export class LoanApplicationService {
           loanProduct: { select: { name: true, interestType: true } },
         },
       });
+
+      if (dto.guarantors && dto.guarantors.length > 0) {
+        for (const item of dto.guarantors) {
+          const eligibility = await this.validateGuarantorEligibility(
+            item.memberId,
+            createdLoan.id,
+            tenantId,
+            new Decimal(item.guaranteedAmount),
+            memberId,
+          );
+          if (!eligibility.eligible) {
+            throw new BadRequestException(`Guarantor ${item.memberId} not eligible: ${eligibility.reason}`);
+          }
+
+          const fosaAccount = await tx.account.findFirst({
+            where: { memberId: item.memberId, tenantId, accountType: 'FOSA', isActive: true },
+          });
+
+          if (fosaAccount) {
+            await tx.account.update({
+              where: { id: fosaAccount.id },
+              data: {
+                lockedBalance: new Decimal(fosaAccount.lockedBalance?.toString() ?? '0')
+                  .plus(item.guaranteedAmount)
+                  .toString(),
+              },
+            });
+          }
+
+          await tx.loanGuarantor.create({
+            data: {
+              tenantId,
+              loanId: createdLoan.id,
+              memberId: item.memberId,
+              guaranteedAmount: new Decimal(item.guaranteedAmount).toDecimalPlaces(4).toString(),
+              status: GuarantorStatus.PENDING,
+            },
+          });
+        }
+        await tx.loan.update({
+          where: { id: createdLoan.id },
+          data: { status: LoanStatus.PENDING_GUARANTORS },
+        });
+        createdLoan.status = LoanStatus.PENDING_GUARANTORS;
+      }
+
+      return createdLoan;
     });
 
     // 6. Async audit + domain event
@@ -589,7 +640,7 @@ export class LoanApplicationService {
       expiresAt.setHours(expiresAt.getHours() + consentExpiryHours);
 
       // Upsert GuarantorRequest (idempotent re-invite)
-      await this.prisma.guarantor.upsert({
+      await this.prisma.loanGuarantor.upsert({
         where: { loanId_memberId: { loanId, memberId: item.memberId } },
         create: {
           tenantId,
@@ -776,7 +827,7 @@ export class LoanApplicationService {
           retentionYears: 7,
         };
 
-        const updatedGuarantor = await tx.guarantor.update({
+        const updatedGuarantor = await tx.loanGuarantor.update({
           where: { id: locked.id },
           data: {
             status: newStatus,
@@ -785,6 +836,22 @@ export class LoanApplicationService {
             auditMetadata,
           },
         });
+
+        if (newStatus === GuarantorStatus.REJECTED || newStatus === GuarantorStatus.EXPIRED) {
+          const fosaAccount = await tx.account.findFirst({
+            where: { memberId: guarantorMemberId, tenantId, accountType: 'FOSA', isActive: true },
+          });
+          if (fosaAccount) {
+            await tx.account.update({
+              where: { id: fosaAccount.id },
+              data: {
+                lockedBalance: new Decimal(fosaAccount.lockedBalance?.toString() ?? '0')
+                  .minus(locked.guaranteedAmount)
+                  .toString(),
+              },
+            });
+          }
+        }
 
         await tx.auditLog.create({
           data: {
@@ -807,7 +874,7 @@ export class LoanApplicationService {
             select: { id: true, principalAmount: true, status: true },
           });
           if (loan) {
-            const accepted = await tx.guarantor.findMany({
+            const accepted = await tx.loanGuarantor.findMany({
               where: { loanId, tenantId, status: GuarantorStatus.ACCEPTED },
               select: { guaranteedAmount: true },
             });
@@ -957,7 +1024,7 @@ export class LoanApplicationService {
     });
     if (!loan) return;
 
-    const acceptedGuarantors = await this.prisma.guarantor.findMany({
+    const acceptedGuarantors = await this.prisma.loanGuarantor.findMany({
       where: { loanId, status: GuarantorStatus.ACCEPTED },
       select: { guaranteedAmount: true },
     });
@@ -996,7 +1063,7 @@ export class LoanApplicationService {
       where.memberId = memberId;
     }
 
-    const guarantors = await this.prisma.guarantor.findMany({
+    const guarantors = await this.prisma.loanGuarantor.findMany({
       where,
       include: {
         member: {
@@ -1066,11 +1133,13 @@ export class LoanApplicationService {
 
     const oldStatus = loan.status;
     const correlationId = (req.headers['x-request-id'] as string) ?? uuidv4();
+    const targetStatus = dto.status as unknown as LoanStatus;
+
+    if (!canTransition(oldStatus, targetStatus)) {
+      throw new BadRequestException(`Cannot transition from ${oldStatus} to ${targetStatus}`);
+    }
 
     // DISBURSED must go through LoansService.disburse() (real FOSA credit).
-    // The admin controller routes DISBURSED before calling this method; reaching
-    // here with DISBURSED means a misconfigured direct service call — reject it.
-    const targetStatus = dto.status as unknown as LoanStatus;
     if (targetStatus === LoanStatus.DISBURSED) {
       throw new BadRequestException(
         'DISBURSED transitions must go through PATCH /admin/loans/:id/status which routes ' +
@@ -1186,7 +1255,7 @@ export class LoanApplicationService {
     // TODO: Replace with TenantGuaranteeConfig after schema migration
     const maxGuarantees = 3;
 
-    const activeGuarantees = await this.prisma.guarantor.findMany({
+    const activeGuarantees = await this.prisma.loanGuarantor.findMany({
       where: {
         memberId,
         tenantId,

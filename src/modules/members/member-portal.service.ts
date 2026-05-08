@@ -76,7 +76,7 @@ export class MemberPortalService {
             account: { select: { accountType: true } },
           },
         }),
-        this.prisma.guarantor.findMany({
+        this.prisma.loanGuarantor.findMany({
           where: { memberId: member.id, tenantId, status: 'PENDING' },
           include: {
             loan: {

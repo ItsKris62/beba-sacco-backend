@@ -771,7 +771,7 @@ export class LoansService {
         select: { id: true, user: { select: { email: true, firstName: true } } },
       });
       if (!guarantorMember) {
-        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'Guarantor not found or inactive' });
+        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'LoanGuarantor not found or inactive' });
         continue;
       }
 
@@ -780,11 +780,11 @@ export class LoansService {
         select: { id: true, balance: true },
       });
       if (!fosaAccount) {
-        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'Guarantor has no active FOSA account' });
+        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'LoanGuarantor has no active FOSA account' });
         continue;
       }
 
-      // Guarantor's FOSA balance must cover their committed guaranteed amount.
+      // LoanGuarantor's FOSA balance must cover their committed guaranteed amount.
       // This protects the SACCO from guarantors who pledge more than they hold.
       const fosaBalance = new Decimal(fosaAccount.balance.toString());
       const committedAmount = new Decimal(item.guaranteedAmount);
@@ -803,12 +803,12 @@ export class LoansService {
         select: { id: true },
       });
       if (defaultedLoan) {
-        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'Guarantor has a defaulted loan' });
+        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'LoanGuarantor has a defaulted loan' });
         continue;
       }
 
       // Upsert guarantor (idempotent re-invite)
-      await this.prisma.guarantor.upsert({
+      await this.prisma.loanGuarantor.upsert({
         where: { loanId_memberId: { loanId, memberId: item.memberId } },
         create: {
           tenantId,
@@ -905,10 +905,10 @@ export class LoansService {
     tenantId: string,
     ipAddress?: string,
   ) {
-    const guarantor = await this.prisma.guarantor.findFirst({
+    const guarantor = await this.prisma.loanGuarantor.findFirst({
       where: { loanId, memberId, tenantId },
     });
-    if (!guarantor) throw new NotFoundException('Guarantor record not found for this loan');
+    if (!guarantor) throw new NotFoundException('LoanGuarantor record not found for this loan');
 
     if (guarantor.status !== GuarantorStatus.PENDING) {
       throw new BadRequestException(
@@ -920,7 +920,7 @@ export class LoansService {
       ? GuarantorStatus.ACCEPTED
       : GuarantorStatus.REJECTED;
 
-    await this.prisma.guarantor.update({
+    await this.prisma.loanGuarantor.update({
       where: { id: guarantor.id },
       data: { status: newStatus, respondedAt: new Date(), notes: dto.notes },
     });
@@ -929,7 +929,7 @@ export class LoansService {
       tenantId,
       userId: memberId,
       action: `LOAN.GUARANTOR_${newStatus}`,
-      resource: 'Guarantor',
+      resource: 'LoanGuarantor',
       resourceId: guarantor.id,
       metadata: { loanId, notes: dto.notes },
       ipAddress,
@@ -951,7 +951,7 @@ export class LoansService {
     });
     if (!loan) return;
 
-    const acceptedGuarantors = await this.prisma.guarantor.findMany({
+    const acceptedGuarantors = await this.prisma.loanGuarantor.findMany({
       where: { loanId, status: GuarantorStatus.ACCEPTED },
       select: { guaranteedAmount: true },
     });
@@ -981,7 +981,7 @@ export class LoansService {
     });
     if (!loan) throw new NotFoundException('Loan not found');
 
-    return this.prisma.guarantor.findMany({
+    return this.prisma.loanGuarantor.findMany({
       where: { loanId },
       include: {
         member: {

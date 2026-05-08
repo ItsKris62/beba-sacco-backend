@@ -101,7 +101,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     // ("Unknown argument: tenantId") on every create/update against those models.
     const tenantScopedModels = new Set([
       'User', 'Member', 'Account', 'Loan', 'LoanProduct',
-      'Transaction', 'Guarantor', 'MpesaTransaction', 'AuditLog',
+      'Transaction', 'LoanGuarantor', 'MpesaTransaction', 'AuditLog',
       'LoanApprovalChain', 'LoginSession', 'WebhookSubscription',
       'IntegrationOutbox', 'CrbReport', 'AmlScreening',
       'ProvisioningEntry', 'DsarRequest', 'SasraRatioSnapshot',

@@ -13,7 +13,7 @@ import { QUEUE_NAMES, AnalyticsStreamJobPayload } from '../../queue/queue.consta
  * Views refreshed per entity type:
  *  - Transaction → daily_deposit_inflow, member_liquidity
  *  - Loan        → loan_pipeline_velocity
- *  - Guarantor   → guarantor_network_density
+ *  - LoanGuarantor   → guarantor_network_density
  *  - Member      → member_liquidity
  */
 @Processor(QUEUE_NAMES.ANALYTICS_STREAM)

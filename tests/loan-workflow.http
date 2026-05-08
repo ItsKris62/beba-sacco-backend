@@ -1,0 +1,64 @@
+@baseUrl = http://localhost:3001/api/v1
+@tenantId = test-sacco
+
+# Variables (to be filled during testing)
+@member1Token = <MEMBER_1_TOKEN>
+@member2Token = <GUARANTOR_TOKEN>
+@adminToken = <ADMIN_TOKEN>
+@loanProductId = <LOAN_PRODUCT_ID>
+@guarantorMemberId = <GUARANTOR_MEMBER_ID>
+@loanId = <LOAN_ID>
+
+### 1. Apply for Loan (Member 1)
+POST {{baseUrl}}/members/loans/apply
+Authorization: Bearer {{member1Token}}
+X-Tenant-ID: {{tenantId}}
+Content-Type: application/json
+
+{
+  "loanProductId": "{{loanProductId}}",
+  "principalAmount": 50000,
+  "tenureMonths": 12,
+  "purpose": "School Fees",
+  "guarantors": [
+    {
+      "memberId": "{{guarantorMemberId}}",
+      "guaranteedAmount": 50000
+    }
+  ]
+}
+
+### 2. Guarantor Consent (Member 2)
+POST {{baseUrl}}/members/loans/{{loanId}}/guarantor-response
+Authorization: Bearer {{member2Token}}
+X-Tenant-ID: {{tenantId}}
+X-Idempotency-Key: consent-1234
+Content-Type: application/json
+
+{
+  "action": "ACCEPT",
+  "digitalAcknowledgment": true,
+  "notes": "I agree to guarantee this loan."
+}
+
+### 3. Admin Reviews and Approves Loan
+PATCH {{baseUrl}}/admin/loans/{{loanId}}/status
+Authorization: Bearer {{adminToken}}
+X-Tenant-ID: {{tenantId}}
+Content-Type: application/json
+
+{
+  "status": "APPROVED",
+  "reason": "All checks passed"
+}
+
+### 4. Admin Disburses Loan
+PATCH {{baseUrl}}/admin/loans/{{loanId}}/status
+Authorization: Bearer {{adminToken}}
+X-Tenant-ID: {{tenantId}}
+X-Idempotency-Key: disburse-1234
+Content-Type: application/json
+
+{
+  "status": "DISBURSED"
+}

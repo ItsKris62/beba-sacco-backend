@@ -24,20 +24,20 @@ export class GuarantorProcessor extends WorkerHost {
     if (job.name !== GUARANTOR_VALIDATION_QUEUE_JOB) return;
 
     const { guarantorId, loanId, tenantId, memberId, status } = job.data;
-    const guarantor = await this.prisma.guarantor.findFirst({
+    const guarantor = await this.prisma.loanGuarantor.findFirst({
       where: { id: guarantorId, loanId, tenantId, memberId },
       select: { id: true, status: true },
     });
 
     if (!guarantor) {
-      throw new Error(`Guarantor ${guarantorId} not found for tenant ${tenantId}`);
+      throw new Error(`LoanGuarantor ${guarantorId} not found for tenant ${tenantId}`);
     }
 
     await this.prisma.auditLog.create({
       data: {
         tenantId,
         action: 'GUARANTOR.ASYNC_VALIDATED',
-        entityType: 'Guarantor',
+        entityType: 'LoanGuarantor',
         entityId: guarantorId,
         metadata: { loanId, memberId, status },
       },
@@ -53,6 +53,6 @@ export class GuarantorProcessor extends WorkerHost {
       removeOnComplete: 1000,
       removeOnFail: false,
     });
-    this.logger.error(`Guarantor validation failed job=${job.id}: ${error.message}`, error.stack);
+    this.logger.error(`LoanGuarantor validation failed job=${job.id}: ${error.message}`, error.stack);
   }
 }

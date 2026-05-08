@@ -164,7 +164,7 @@ describe('LoanAdminController — PATCH /admin/loans/:id/status', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
-  // ── Guarantor exposure ────────────────────────────────────────────────────
+  // ── LoanGuarantor exposure ────────────────────────────────────────────────────
 
   it('getGuarantorExposure delegates to loanApp.getGuarantorExposure()', async () => {
     const memberId = 'member-uuid-1';

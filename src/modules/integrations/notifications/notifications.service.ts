@@ -45,7 +45,7 @@ const TEMPLATES: Record<string, { subject: string; body: string }> = {
     body: 'Dear {{firstName}}, welcome to {{saccoName}}! Your member number is {{memberNumber}}.',
   },
   GUARANTOR_INVITE: {
-    subject: 'Guarantor Request',
+    subject: 'LoanGuarantor Request',
     body: 'Dear {{firstName}}, {{borrowerName}} has requested you to guarantee loan {{loanNumber}} for KES {{amount}}.',
   },
 };

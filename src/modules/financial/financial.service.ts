@@ -21,7 +21,7 @@ import { AuditLogJobPayload, QUEUE_NAMES } from '../queue/queue.constants';
  *   1. Daily interest & penalty accrual
  *   2. Loan staging tag updates (PERFORMING / WATCHLIST / NPL)
  *   3. Loan repayment schedule: enqueue delayed instalment jobs
- *   4. Guarantor exposure enforcement
+ *   4. LoanGuarantor exposure enforcement
  *   5. Ledger integrity check (SUM credit – SUM debit = account balance)
  */
 @Injectable()
@@ -316,7 +316,7 @@ export class FinancialService {
     canGuarantee: boolean;
   }> {
     const [guarantees, fosaAccount] = await Promise.all([
-      this.prisma.guarantor.findMany({
+      this.prisma.loanGuarantor.findMany({
         where: {
           memberId,
           tenantId,
