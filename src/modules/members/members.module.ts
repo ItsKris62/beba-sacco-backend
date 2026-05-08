@@ -25,7 +25,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     DashboardModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
-  controllers: [MembersController, MemberPortalController],
+  controllers: [MemberPortalController, MembersController],
   providers: [MembersService, MemberPortalService, PrismaService],
   exports: [MembersService, MemberPortalService],
 })
