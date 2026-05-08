@@ -207,20 +207,26 @@ export class LoansService {
       throw new BadRequestException(`Maximum tenure is ${product.maxTenureMonths} months`);
     }
 
-    // Max loan limit: 3× total BOSA + FOSA balance
+    // Max loan limit: 3× BOSA balance + 1.5× FOSA balance
     const accounts = await this.prisma.account.findMany({
       where: { memberId: dto.memberId, tenantId, isActive: true },
       select: { balance: true, accountType: true },
     });
-    const totalDeposits = accounts.reduce(
-      (sum, acc) => sum.plus(new Decimal(acc.balance.toString())),
-      new Decimal(0),
-    );
-    const maxLoanLimit = totalDeposits.times(3);
+    
+    let maxLoanLimit = new Decimal(0);
+    for (const acc of accounts) {
+      const bal = new Decimal(acc.balance.toString());
+      if (acc.accountType === 'BOSA') {
+        maxLoanLimit = maxLoanLimit.plus(bal.times(3));
+      } else if (acc.accountType === 'FOSA') {
+        maxLoanLimit = maxLoanLimit.plus(bal.times(1.5));
+      }
+    }
+
     if (principal.greaterThan(maxLoanLimit)) {
       throw new BadRequestException(
         `Loan amount exceeds your maximum eligible limit of KES ${maxLoanLimit.toFixed(2)} ` +
-          `(3× your total deposits of KES ${totalDeposits.toFixed(2)})`,
+          `(3× your BOSA + 1.5× your FOSA balance)`,
       );
     }
 
