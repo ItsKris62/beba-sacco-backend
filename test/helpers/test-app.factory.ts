@@ -13,6 +13,7 @@
  *   await teardown();
  */
 import { Test } from '@nestjs/testing';
+import { getQueueToken } from '@nestjs/bullmq';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../../src/app.module';
@@ -22,6 +23,7 @@ import { UserRole, LoanStatus, GuarantorStatus, AccountType } from '@prisma/clie
 import { Decimal } from 'decimal.js';
 import { v4 as uuidv4 } from 'uuid';
 import * as argon2 from 'argon2';
+import { QUEUE_NAMES } from '../../src/modules/queue/queue.constants';
 
 export interface TestSeed {
   tenantId: string;
@@ -52,9 +54,22 @@ export interface TestAppContext {
 
 export class TestAppFactory {
   static async create(): Promise<TestAppContext> {
-    const moduleRef = await Test.createTestingModule({
+    const mockRedis = this.createMockRedis();
+    const mockQueue = {
+      add: jest.fn().mockResolvedValue({ id: 'test-job' }),
+      addBulk: jest.fn().mockResolvedValue([]),
+      close: jest.fn().mockResolvedValue(undefined),
+      on: jest.fn(),
+    };
+    let builder = Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    }).overrideProvider(RedisService).useValue(mockRedis);
+
+    for (const queueName of Object.values(QUEUE_NAMES)) {
+      builder = builder.overrideProvider(getQueueToken(queueName)).useValue(mockQueue);
+    }
+
+    const moduleRef = await builder.compile();
 
     const app = moduleRef.createNestApplication();
     app.useGlobalPipes(
@@ -102,9 +117,9 @@ export class TestAppFactory {
 
   private static async cleanDatabase(prisma: PrismaService): Promise<void> {
     const tables = [
-      'LoanRepayment', 'Guarantor', 'Transaction', 'MpesaTransaction',
+      'LoanRepayment', 'LoanGuarantor', 'Guarantor', 'Transaction', 'MpesaTransaction',
       'Loan', 'Account', 'Member', 'LoanProduct', 'AuditLog',
-      'TenantCounter', 'ReportJob', 'User', 'Tenant',
+      'TenantCounter', 'ReportJob', 'StageAssignment', 'MemberStage', 'User', 'Tenant',
     ];
     for (const table of tables) {
       try {
@@ -113,6 +128,58 @@ export class TestAppFactory {
         // Ignore errors for tables that may not exist in all migrations
       }
     }
+  }
+
+  private static createMockRedis(): RedisService {
+    const store = new Map<string, string>();
+    const matches = (pattern: string, key: string) => {
+      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+      return new RegExp(`^${escaped}$`).test(key);
+    };
+    return {
+      get: async (key: string) => store.get(key) ?? null,
+      set: async (key: string, value: string, _ttl?: number, nx?: boolean) => {
+        if (nx && store.has(key)) return false;
+        store.set(key, value);
+        return true;
+      },
+      del: async (key: string) => { store.delete(key); },
+      exists: async (key: string) => store.has(key),
+      delPattern: async (pattern: string) => {
+        const keys = [...store.keys()].filter((key) => matches(pattern, key));
+        keys.forEach((key) => store.delete(key));
+        return keys.length;
+      },
+      getJson: async <T>(key: string) => {
+        const raw = store.get(key);
+        return raw ? JSON.parse(raw) as T : null;
+      },
+      setJson: async <T>(key: string, value: T) => {
+        store.set(key, JSON.stringify(value));
+        return true;
+      },
+      incr: async (key: string) => {
+        const next = Number(store.get(key) ?? '0') + 1;
+        store.set(key, String(next));
+        return next;
+      },
+      incrBy: async (key: string, amount: number) => {
+        const next = Number(store.get(key) ?? '0') + amount;
+        store.set(key, String(next));
+        return next;
+      },
+      incrWithExpireAt: async (key: string) => {
+        const next = Number(store.get(key) ?? '0') + 1;
+        store.set(key, String(next));
+        return next;
+      },
+      expire: async () => undefined,
+      ttl: async () => -1,
+      scanKeys: async (pattern: string) => [...store.keys()].filter((key) => matches(pattern, key)),
+      publish: async () => undefined,
+      ping: async () => true,
+      onModuleDestroy: () => undefined,
+    } as unknown as RedisService;
   }
 
   private static async seedTestData(

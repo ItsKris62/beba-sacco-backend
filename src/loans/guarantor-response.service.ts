@@ -69,6 +69,9 @@ export class GuarantorResponseService {
     req: Request,
     idempotencyHeader?: string,
   ) {
+    if (!idempotencyHeader?.trim()) {
+      throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
+    }
     const member = await this.prisma.member.findFirst({
       where: { id: guarantorMemberId, tenantId, isActive: true, userId: actorUserId },
       select: { id: true },
@@ -110,6 +113,9 @@ export class GuarantorResponseService {
     actorUserId: string,
     req: Request,
   ) {
+    if (!dto.notes?.trim()) {
+      throw new BadRequestException('ADMIN_OVERRIDE_REASON_REQUIRED');
+    }
     return this.applyDecision({
       loanId,
       tenantId,
@@ -218,7 +224,7 @@ export class GuarantorResponseService {
         entityId: locked.id,
         oldValue: { status: locked.status },
         newValue: { status: nextStatus },
-        payload: { loanId: args.loanId, guarantorMemberId: locked.memberId, notes: args.notes, source: args.source },
+        payload: { loanId: args.loanId, guarantorMemberId: locked.memberId, reason: args.notes, source: args.source },
       });
 
       const transition = await this.applyLoanState(tx, args.tenantId, args.loanId, loan, args.actorUserId, nextStatus);

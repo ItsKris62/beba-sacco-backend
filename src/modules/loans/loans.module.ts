@@ -7,6 +7,7 @@ import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { DisbursementGateService } from '../../loans/disbursement-gate.service';
 
 @Module({
   imports: [
@@ -17,7 +18,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     ),
   ],
   controllers: [LoansController],
-  providers: [LoansService, PrismaService, RedisService, IdempotencyService],
-  exports: [LoansService],
+  providers: [LoansService, PrismaService, RedisService, IdempotencyService, DisbursementGateService],
+  exports: [LoansService, DisbursementGateService],
 })
 export class LoansModule {}

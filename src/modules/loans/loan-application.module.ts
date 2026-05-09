@@ -6,6 +6,7 @@ import { LoanReviewService } from './loan-review.service';
 import { GuarantorValidationService } from './guarantor-validation.service';
 import { LoanRecoveryService } from './loan-recovery.service';
 import { GuarantorResponseService } from '../../loans/guarantor-response.service';
+import { GuarantorResponseController } from '../../loans/guarantor-response.controller';
 import { LoanAdminController } from './loan-admin.controller';
 import { LoansModule } from './loans.module';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -40,7 +41,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
       { name: QUEUE_NAMES.AUDIT_LOG },
     ),
   ],
-  controllers: [LoanAdminController],
+  controllers: [LoanAdminController, GuarantorResponseController],
   providers: [
     LoanApplicationService,
     LoanAdminService,

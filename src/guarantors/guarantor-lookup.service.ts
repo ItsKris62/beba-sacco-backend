@@ -5,10 +5,10 @@ import { PrismaService } from '../prisma/prisma.service';
 
 export interface GuarantorLookupResult {
   memberId: string;
-  name: string;
+  maskedName: string;
   kycStatus: 'KYC_VERIFIED';
-  availableBalance: number;
-  tenantId: string;
+  eligible: boolean;
+  reason?: string;
 }
 
 @Injectable()
@@ -19,6 +19,7 @@ export class GuarantorLookupService {
     idNumber: string,
     tenantId: string,
     requesterMemberId: string,
+    requiredAmount?: Decimal.Value,
   ): Promise<GuarantorLookupResult> {
     if (typeof idNumber !== 'string') {
       throw new BadRequestException('INVALID_ID_NUMBER: idNumber is required');
@@ -51,25 +52,41 @@ export class GuarantorLookupService {
     if (!member) {
       throw new NotFoundException('GUARANTOR_NOT_FOUND: no active SACCO member found for that National ID');
     }
-    if (member.id === requesterMemberId) {
-      throw new BadRequestException('SELF_GUARANTEE_NOT_ALLOWED: member cannot guarantee their own loan');
-    }
-    if (member.kycStatus !== KycStatus.APPROVED) {
-      throw new BadRequestException('GUARANTOR_KYC_NOT_VERIFIED: guarantor KYC must be verified');
-    }
-
     const availableBalance = member.accounts.reduce((sum, account) => {
       const balance = new Decimal(account.balance.toString());
       const locked = new Decimal(account.lockedBalance?.toString() ?? '0');
       return sum.plus(balance.minus(locked));
     }, new Decimal(0));
+    const required = new Decimal(requiredAmount ?? 0).toDecimalPlaces(4);
+    let eligible = true;
+    let reason: string | undefined;
+
+    if (member.id === requesterMemberId) {
+      eligible = false;
+      reason = 'SELF_GUARANTEE_NOT_ALLOWED';
+    } else if (member.kycStatus !== KycStatus.APPROVED) {
+      eligible = false;
+      reason = 'GUARANTOR_KYC_NOT_VERIFIED';
+    } else if (required.greaterThan(0) && availableBalance.lessThan(required)) {
+      eligible = false;
+      reason = `GUARANTOR_INSUFFICIENT_FUNDS: available KES ${availableBalance.toFixed(2)} is below required KES ${required.toFixed(2)}`;
+    }
 
     return {
       memberId: member.id,
-      name: [member.user.firstName, member.user.lastName].filter(Boolean).join(' '),
+      maskedName: this.maskName(member.user.firstName, member.user.lastName),
       kycStatus: 'KYC_VERIFIED',
-      availableBalance: availableBalance.toDecimalPlaces(4).toNumber(),
-      tenantId: member.tenantId,
+      eligible,
+      ...(reason && { reason }),
     };
+  }
+
+  private maskName(firstName?: string | null, lastName?: string | null): string {
+    const maskPart = (value?: string | null) => {
+      const trimmed = (value ?? '').trim();
+      if (!trimmed) return '****';
+      return `${trimmed[0].toUpperCase()}${'*'.repeat(Math.max(4, trimmed.length - 1))}`;
+    };
+    return `${maskPart(firstName)} ${maskPart(lastName)}`;
   }
 }

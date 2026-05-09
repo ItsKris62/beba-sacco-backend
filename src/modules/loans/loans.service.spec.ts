@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
+import { DisbursementGateService } from '../../loans/disbursement-gate.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -96,6 +97,7 @@ const mockIdempotency = {
 } as unknown as IdempotencyService;
 const mockEmailQueue = { add: jest.fn().mockResolvedValue({}) };
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue({}) };
+const mockDisbursementGate = { assertPassed: jest.fn().mockResolvedValue(undefined) } as unknown as DisbursementGateService;
 
 function makeService(prisma: PrismaService): LoansService {
   return new LoansService(
@@ -105,6 +107,7 @@ function makeService(prisma: PrismaService): LoansService {
     mockIdempotency,
     mockGuarantorQueue as never,
     mockEmailQueue as never,
+    mockDisbursementGate,
   );
 }
 

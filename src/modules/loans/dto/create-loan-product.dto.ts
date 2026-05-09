@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsInt, IsNumber, IsOptional, IsString, Max, Min, IsBoolean } from 'class-validator';
-import { InterestType } from '@prisma/client';
+import { AccountType, InterestType } from '@prisma/client';
 
 export class CreateLoanProductDto {
   @ApiProperty({ example: 'Emergency Loan', description: 'Unique product name within the tenant' })
@@ -55,6 +55,32 @@ export class CreateLoanProductDto {
   @Max(0.5)
   processingFeeRate?: number;
 
+  @ApiPropertyOptional({ enum: AccountType, description: 'Savings account type used for eligibility and guarantor holds' })
+  @IsOptional()
+  @IsEnum(AccountType)
+  requiredAccountType?: AccountType;
+
+  @ApiPropertyOptional({ example: 3, description: 'Maximum loan multiple against eligible savings' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(20)
+  savingsMultiplier?: number;
+
+  @ApiPropertyOptional({ example: 2, description: 'Minimum accepted guarantors required before review' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(20)
+  minGuarantors?: number;
+
+  @ApiPropertyOptional({ example: 5, description: 'Maximum guarantors a borrower may nominate' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(50)
+  maxGuarantors?: number;
+
   @ApiPropertyOptional({
     example: 1,
     description: 'Minimum guarantor coverage ratio. 1.0 means guarantors must cover 100% of the loan amount.',
@@ -65,6 +91,18 @@ export class CreateLoanProductDto {
   @Min(0)
   @Max(5)
   guarantorCoverageRatio?: number;
+
+  @ApiPropertyOptional({ example: false, description: 'Whether payslip upload is required for this product' })
+  @IsOptional()
+  @IsBoolean()
+  requiresPayslip?: boolean;
+
+  @ApiPropertyOptional({ example: 6, description: 'Minimum active membership age in months' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(600)
+  minActiveMonths?: number;
 
   @ApiPropertyOptional({
     example: 1,

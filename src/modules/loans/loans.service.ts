@@ -2,6 +2,7 @@ import {
   Injectable, Logger, NotFoundException, BadRequestException,
   ConflictException, ForbiddenException, UnprocessableEntityException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { AccountType, GuarantorStatus, LoanStatus, Prisma, TransactionType, TransactionStatus, InterestType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
@@ -21,6 +22,7 @@ import {
   GuarantorReminderJobPayload,
   EmailJobPayload,
 } from '../queue/queue.constants';
+import { DisbursementGateService } from '../../loans/disbursement-gate.service';
 
 /**
  * Loans Service
@@ -50,6 +52,7 @@ export class LoansService {
     private readonly guarantorReminderQueue: Queue<GuarantorReminderJobPayload>,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
+    private readonly disbursementGate: DisbursementGateService,
   ) {}
 
   /**
@@ -95,7 +98,13 @@ export class LoansService {
         interestType: dto.interestType,
         maxTenureMonths: dto.maxTenureMonths,
         processingFeeRate: new Decimal(dto.processingFeeRate ?? 0).toDecimalPlaces(4).toString(),
+        requiredAccountType: dto.requiredAccountType ?? null,
+        savingsMultiplier: new Decimal(dto.savingsMultiplier ?? 3).toDecimalPlaces(4).toString(),
+        minGuarantors: dto.minGuarantors ?? 0,
+        maxGuarantors: dto.maxGuarantors ?? 5,
         guarantorCoverageRatio: new Decimal(dto.guarantorCoverageRatio ?? 1).toDecimalPlaces(4).toString(),
+        requiresPayslip: dto.requiresPayslip ?? false,
+        minActiveMonths: dto.minActiveMonths ?? 0,
         gracePeriodMonths: dto.gracePeriodMonths ?? 0,
       },
     });
@@ -383,7 +392,7 @@ export class LoansService {
       );
     }
 
-    await this.assertGuarantorDisbursementGate(this.prisma, tenantId, id);
+    await this.disbursementGate.assertPassed(tenantId, id, this.prisma);
 
     const updated = await this.prisma.loan.update({
       where: { id },
@@ -521,7 +530,7 @@ export class LoansService {
           );
         }
 
-        await this.assertGuarantorDisbursementGate(tx, tenantId, id);
+        await this.disbursementGate.assertPassed(tenantId, id, tx);
 
         const txPrincipal = new Decimal(lockedLoan.principalAmount.toString());
 
@@ -1224,44 +1233,6 @@ export class LoansService {
 
   // ─── HELPERS ─────────────────────────────────────────────────
 
-  private async assertGuarantorDisbursementGate(
-    client: Prisma.TransactionClient | PrismaService,
-    tenantId: string,
-    loanId: string,
-  ): Promise<void> {
-    const loan = await client.loan.findFirst({
-      where: { id: loanId, tenantId },
-      select: {
-        principalAmount: true,
-        loanProduct: { select: { minGuarantors: true, guarantorCoverageRatio: true } },
-        guarantors: {
-          where: { tenantId },
-          select: { status: true, guaranteedAmount: true },
-        },
-      },
-    });
-    if (!loan) throw new NotFoundException('Loan not found');
-    if (loan.loanProduct.minGuarantors === 0) return;
-
-    const allAccepted = loan.guarantors.length > 0 && loan.guarantors.every((item) => item.status === GuarantorStatus.ACCEPTED);
-    const totalAccepted = loan.guarantors
-      .filter((item) => item.status === GuarantorStatus.ACCEPTED)
-      .reduce((sum, item) => sum.plus(new Decimal(item.guaranteedAmount.toString())), new Decimal(0));
-    const requiredCoverage = new Decimal(loan.principalAmount.toString()).times(
-      new Decimal(loan.loanProduct.guarantorCoverageRatio?.toString() ?? '1.0'),
-    );
-
-    if (!allAccepted) {
-      throw new BadRequestException('DISBURSEMENT_BLOCKED_GUARANTORS_PENDING: all guarantors must accept before approval/disbursement');
-    }
-    if (loan.guarantors.length < loan.loanProduct.minGuarantors) {
-      throw new BadRequestException('DISBURSEMENT_BLOCKED_MIN_GUARANTORS: minimum guarantor count not met');
-    }
-    if (totalAccepted.lessThan(requiredCoverage)) {
-      throw new BadRequestException('DISBURSEMENT_BLOCKED_COVERAGE: accepted guarantor coverage is below product requirement');
-    }
-  }
-
   private async releaseGuarantorHoldsOnFullRepayment(
     tx: Prisma.TransactionClient,
     tenantId: string,
@@ -1302,6 +1273,17 @@ export class LoansService {
         where: { id: guarantor.id, tenantId },
         data: { holdReleasedAt: new Date() },
       });
+      const auditTimestamp = new Date();
+      const prevAudit = await tx.auditLog.findFirst({
+        where: { tenantId },
+        orderBy: { timestamp: 'desc' },
+        select: { entryHash: true },
+      });
+      const auditPayload = { loanId, guarantorMemberId: guarantor.memberId, releasedAmount: releaseAmount.toString(), reason: 'LOAN_FULLY_PAID' };
+      const prevHash = prevAudit?.entryHash ?? null;
+      const entryHash = createHash('sha256')
+        .update(JSON.stringify({ tenantId, actorId, action: 'GUARANTOR.HOLD_RELEASED_LOAN_REPAID', entityType: 'LoanGuarantor', entityId: guarantor.id, payload: auditPayload, prevHash, timestamp: auditTimestamp }), 'utf8')
+        .digest('hex');
       await tx.auditLog.create({
         data: {
           tenantId,
@@ -1309,8 +1291,11 @@ export class LoansService {
           action: 'GUARANTOR.HOLD_RELEASED_LOAN_REPAID',
           entityType: 'LoanGuarantor',
           entityId: guarantor.id,
-          metadata: { loanId, guarantorMemberId: guarantor.memberId, releasedAmount: releaseAmount.toNumber() },
-          payload: { loanId, guarantorMemberId: guarantor.memberId, releasedAmount: releaseAmount.toString() },
+          metadata: auditPayload,
+          payload: auditPayload,
+          prevHash,
+          entryHash,
+          timestamp: auditTimestamp,
         },
       });
     }

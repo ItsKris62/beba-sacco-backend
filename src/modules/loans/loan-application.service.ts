@@ -376,6 +376,9 @@ export class LoanApplicationService {
     req: Request,
     idempotencyKey?: string,
   ) {
+    if (!idempotencyKey?.trim()) {
+      throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
+    }
     // 1. Idempotency guard
     if (idempotencyKey) {
       const idemKey = `loan:apply:${userId}:${memberId}:${dto.loanProductId}:${idempotencyKey}`;

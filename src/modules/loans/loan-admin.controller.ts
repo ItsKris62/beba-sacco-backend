@@ -7,7 +7,7 @@ import {
   ApiResponse, ApiHeader, ApiParam, ApiQuery, ApiBody, ApiProperty, ApiPropertyOptional,
 } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
-import { IsEnum, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 import { Decimal } from 'decimal.js';
 import { Request } from 'express';
 import { LoanApplicationService } from './loan-application.service';
@@ -15,7 +15,6 @@ import { LoansService } from './loans.service';
 import { LoanAdminService } from './loan-admin.service';
 import { LoanReviewService } from './loan-review.service';
 import { LoanRecoveryService } from './loan-recovery.service';
-import { GuarantorResponseService, GuarantorWorkflowAction } from '../../loans/guarantor-response.service';
 import { UpdateLoanStatusDto, AdminLoanStatus } from './dto/update-loan-status.dto';
 import { GetAdminLoansQueryDto } from './dto/get-admin-loans-query.dto';
 import { ReviewLoanDto } from './dto/review-loan.dto';
@@ -32,23 +31,6 @@ export class RecoverLoanDto {
   defaultAmount!: number;
 
   @ApiPropertyOptional({ description: 'Recovery notes for audit context', example: '90-day default recovery' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(1000)
-  notes?: string;
-}
-
-enum AdminGuarantorDecision {
-  ACCEPT = 'ACCEPT',
-  DECLINE = 'DECLINE',
-}
-
-class AdminGuarantorStatusDto {
-  @ApiProperty({ enum: AdminGuarantorDecision, example: AdminGuarantorDecision.ACCEPT })
-  @IsEnum(AdminGuarantorDecision)
-  action!: AdminGuarantorDecision;
-
-  @ApiPropertyOptional({ description: 'Decision note for audit trail', example: 'Confirmed by phone' })
   @IsOptional()
   @IsString()
   @MaxLength(1000)
@@ -78,7 +60,6 @@ export class LoanAdminController {
     private readonly loanAdmin: LoanAdminService,
     private readonly loanReview: LoanReviewService,
     private readonly loanRecovery: LoanRecoveryService,
-    private readonly guarantorResponses: GuarantorResponseService,
   ) {}
 
   // ─── LOAN LIST ───────────────────────────────────────────────────────────────
@@ -248,36 +229,6 @@ export class LoanAdminController {
   ) {
     const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
     return this.loanReview.process(loanId, dto, tenant.id, actor.id, req.ip, idempotencyKey);
-  }
-
-  @Patch('loans/:loanId/guarantors/:guarantorId/status')
-  @HttpCode(HttpStatus.OK)
-  @Roles(UserRole.MANAGER)
-  @ApiOperation({
-    summary: 'Accept or decline a pending guarantor on behalf of a member',
-    description: 'Manager-only override. Applies the same loan state transitions and writes chained audit logs.',
-  })
-  @ApiParam({ name: 'loanId', description: 'Loan UUID' })
-  @ApiParam({ name: 'guarantorId', description: 'LoanGuarantor UUID or guarantor member UUID' })
-  @ApiBody({ type: AdminGuarantorStatusDto })
-  @ApiResponse({ status: 200, description: 'Guarantor decision applied' })
-  @ApiResponse({ status: 403, description: 'Manager role required' })
-  async updateGuarantorStatus(
-    @Param('loanId', ParseUUIDPipe) loanId: string,
-    @Param('guarantorId', ParseUUIDPipe) guarantorId: string,
-    @Body() dto: AdminGuarantorStatusDto,
-    @CurrentTenant() tenant: Tenant,
-    @CurrentUser() actor: AuthenticatedUser,
-    @Req() req: Request,
-  ) {
-    return this.guarantorResponses.adminOverride(
-      loanId,
-      guarantorId,
-      { action: dto.action as GuarantorWorkflowAction, notes: dto.notes },
-      tenant.id,
-      actor.id,
-      req,
-    );
   }
 
   @Patch('loans/:id/recover')

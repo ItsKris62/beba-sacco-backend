@@ -13,6 +13,7 @@ import { StatementsModule } from '../statements/statements.module';
 import { StorageModule } from '../storage/storage.module';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { GuarantorLookupService } from '../../guarantors/guarantor-lookup.service';
+import { GuarantorLookupController } from '../../guarantors/guarantor-lookup.controller';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 
 @Module({
@@ -26,7 +27,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     DashboardModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
-  controllers: [MemberPortalController, MembersController],
+  controllers: [MemberPortalController, MembersController, GuarantorLookupController],
   providers: [MembersService, MemberPortalService, GuarantorLookupService, PrismaService],
   exports: [MembersService, MemberPortalService],
 })

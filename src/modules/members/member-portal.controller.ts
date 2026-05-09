@@ -25,8 +25,6 @@ import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-resp
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
-import { GuarantorLookupService } from '../../guarantors/guarantor-lookup.service';
-import { GuarantorResponseService, GuarantorWorkflowAction } from '../../loans/guarantor-response.service';
 
 /**
  * Member Portal Controller
@@ -52,8 +50,6 @@ export class MemberPortalController {
     private readonly statements: StatementService,
     private readonly prisma: PrismaService,
     private readonly dashboardService: DashboardService,
-    private readonly guarantorLookup: GuarantorLookupService,
-    private readonly guarantorResponses: GuarantorResponseService,
   ) {}
 
   /** Resolve memberId from the authenticated user's id */
@@ -64,24 +60,6 @@ export class MemberPortalController {
     });
     if (!member) throw new Error('Member profile not found');
     return member.id;
-  }
-
-  // ─── GUARANTOR LOOKUP ───────────────────────────────────────────────────────
-
-  @Post('guarantors/lookup')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Lookup eligible guarantor by National ID',
-    description: 'Returns a safe, masked member profile for existing active SACCO members only.',
-  })
-  @ApiResponse({ status: 200, description: 'Eligible guarantor summary' })
-  async lookupGuarantor(
-    @Body() body: { idNumber: string },
-    @CurrentUser() user: AuthenticatedUser,
-    @CurrentTenant() tenant: Tenant,
-  ) {
-    const memberId = await this.resolveMemberId(user.id, tenant.id);
-    return this.guarantorLookup.lookupByNationalId(body.idNumber, tenant.id, memberId);
   }
 
   // ─── DASHBOARD ─────────────────────────────────────────────────────────────
@@ -237,62 +215,6 @@ export class MemberPortalController {
     });
     if (!loan) throw new ForbiddenException('Loan not found or does not belong to you');
     return this.loanApp.getGuarantorStatus(loanId, tenant.id);
-  }
-
-  // ─── GUARANTOR CONSENT RESPONSE ────────────────────────────────────────────
-
-  @Get('guarantor/requests')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'List pending guarantor requests for the authenticated member' })
-  @ApiResponse({ status: 200, description: 'Pending guarantor requests' })
-  async getGuarantorRequests(
-    @CurrentUser() user: AuthenticatedUser,
-    @CurrentTenant() tenant: Tenant,
-  ) {
-    const memberId = await this.resolveMemberId(user.id, tenant.id);
-    return this.guarantorResponses.getPendingRequests(tenant.id, memberId);
-  }
-
-  @Post('loans/:id/guarantor-response')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Respond to a guarantor invitation (explicit consent)',
-    description:
-      'Accept or decline a loan guarantor request with explicit digital acknowledgment. ' +
-      'Requires digitalAcknowledgment=true. 72h expiry window enforced. ' +
-      'Idempotent via Redis. Only the targeted guarantor can respond.',
-  })
-  @ApiParam({ name: 'id', description: 'Loan UUID' })
-  @ApiHeader({
-    name: 'Idempotency-Key',
-    required: true,
-    description: 'Client-generated UUID for safe guarantor response retries',
-  })
-  @ApiResponse({ status: 200, description: 'Response recorded with consent evidence' })
-  @ApiResponse({ status: 400, description: 'Expired consent or missing acknowledgment' })
-  @ApiResponse({ status: 403, description: 'Not authorized to respond to this request' })
-  @ApiResponse({ status: 409, description: 'Already responded or processing' })
-  async guarantorResponse(
-    @Param('id', ParseUUIDPipe) loanId: string,
-    @Body() dto: GuarantorConsentResponseDto,
-    @CurrentUser() user: AuthenticatedUser,
-    @CurrentTenant() tenant: Tenant,
-    @Req() req: Request,
-  ) {
-    const memberId = await this.resolveMemberId(user.id, tenant.id);
-    const idempotencyKey =
-      (req.headers['x-idempotency-key'] as string | undefined) ??
-      (req.headers['idempotency-key'] as string | undefined);
-    const action = (dto.action === 'REJECT' ? 'DECLINE' : dto.action) as GuarantorWorkflowAction;
-    return this.guarantorResponses.respondAsMember(
-      loanId,
-      memberId,
-      { action, notes: dto.notes },
-      tenant.id,
-      user.id,
-      req,
-      idempotencyKey,
-    );
   }
 
   // ─── M-PESA DEPOSIT ────────────────────────────────────────────────────────

@@ -1,10 +1,12 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { AccountType, GuarantorStatus, LoanStatus, Prisma, TenantStatus } from '@prisma/client';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Job } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { assertTransition } from '../../../core/state-machine';
 import { GuarantorValidationService } from '../../loans/guarantor-validation.service';
 import {
   GUARANTOR_EXPIRY_CHECK_JOB,
@@ -67,6 +69,15 @@ export class GuarantorExpiryConsumer extends WorkerHost {
   @OnWorkerEvent('failed')
   onFailed(job: Job<GuarantorExpiryJobPayload>, error: Error): void {
     this.logger.error(`Guarantor expiry check failed job=${job.id}: ${error.message}`, error.stack);
+  }
+
+  @Cron('0 * * * *')
+  async runHourlyExpirySweep(): Promise<void> {
+    const cutoff = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    const tenantIds = await this.getActiveTenantIds();
+    for (const tenantId of tenantIds) {
+      await this.expireTenantGuarantors(tenantId, cutoff);
+    }
   }
 
   private async getActiveTenantIds(): Promise<string[]> {
@@ -189,7 +200,7 @@ export class GuarantorExpiryConsumer extends WorkerHost {
           loanId: guarantor.loanId,
           guarantorMemberId: guarantor.memberId,
           accountType,
-          guaranteedAmount: new Decimal(guarantor.guaranteedAmount.toString()).toNumber(),
+          guaranteedAmount: new Decimal(guarantor.guaranteedAmount.toString()).toString(),
           reason: GuarantorStatus.EXPIRED,
           cutoff: cutoff.toISOString(),
         },
@@ -260,6 +271,19 @@ export class GuarantorExpiryConsumer extends WorkerHost {
         where: { id: guarantor.id, tenantId },
         data: { holdReleasedAt: new Date() },
       });
+      await this.createAuditLogInTransaction(tx, {
+        tenantId,
+        action: 'GUARANTOR.HOLD_RELEASED',
+        entityType: 'LoanGuarantor',
+        entityId: guarantor.id,
+        metadata: {
+          loanId,
+          guarantorMemberId: guarantor.memberId,
+          accountType,
+          guaranteedAmount: new Decimal(guarantor.guaranteedAmount.toString()).toString(),
+          reason: 'LOAN_REJECTED_AFTER_GUARANTOR_EXPIRY',
+        },
+      });
     }
 
     const totalAccepted = acceptedGuarantors.reduce(
@@ -270,6 +294,7 @@ export class GuarantorExpiryConsumer extends WorkerHost {
       new Decimal(loan.loanProduct.guarantorCoverageRatio.toString()),
     );
 
+    assertTransition(loan.status, LoanStatus.REJECTED_GUARANTOR_DECLINE);
     await tx.loan.updateMany({
       where: { id: loanId, tenantId, status: LoanStatus.PENDING_GUARANTORS },
       data: {
@@ -288,8 +313,8 @@ export class GuarantorExpiryConsumer extends WorkerHost {
       metadata: {
         acceptedCount: acceptedGuarantors.length,
         minGuarantors: loan.loanProduct.minGuarantors,
-        totalAccepted: totalAccepted.toNumber(),
-        requiredCoverage: requiredCoverage.toNumber(),
+        totalAccepted: totalAccepted.toString(),
+        requiredCoverage: requiredCoverage.toString(),
       },
     });
   }
@@ -338,6 +363,7 @@ export class GuarantorExpiryConsumer extends WorkerHost {
         oldValue: data.oldValue ? (data.oldValue as Prisma.InputJsonValue) : Prisma.JsonNull,
         newValue: data.newValue ? (data.newValue as Prisma.InputJsonValue) : Prisma.JsonNull,
         metadata: data.metadata as Prisma.InputJsonValue,
+        payload: data.metadata as Prisma.InputJsonValue,
         timestamp,
         prevHash,
         entryHash,
