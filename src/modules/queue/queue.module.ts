@@ -7,6 +7,7 @@ import { QUEUE_NAMES } from './queue.constants';
 import { MpesaCallbackProcessor } from './processors/mpesa-callback.processor';
 import { GuarantorReminderProcessor } from './processors/guarantor-reminder.processor';
 import { GuarantorProcessor } from './processors/guarantor.processor';
+import { GuarantorExpiryConsumer } from './processors/guarantor-expiry.consumer';
 import { AuditLogProcessor } from './processors/audit-log.processor';
 import { LoanDisburseProcessor } from './processors/loan-disburse.processor';
 import { EmailProcessor } from './processors/email.processor';
@@ -30,6 +31,7 @@ import { FinancialModule } from '../financial/financial.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { ReportsModule } from '../reports/reports.module';
 import { StorageModule } from '../storage/storage.module';
+import { GuarantorValidationService } from '../loans/guarantor-validation.service';
 
 /**
  * Queue Module – BullMQ + Redis
@@ -94,6 +96,7 @@ import { StorageModule } from '../storage/storage.module';
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT },
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ },
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
+      { name: QUEUE_NAMES.LOAN_GUARANTOR_EXPIRY },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION_DLQ },
       { name: QUEUE_NAMES.AUDIT_LOG },
@@ -121,9 +124,11 @@ import { StorageModule } from '../storage/storage.module';
     // PlunkService is @Global but QueueModule is loaded before CommonServicesModule
     // resolves globally for processors — re-provide here to be explicit.
     PlunkService,
+    GuarantorValidationService,
     MpesaCallbackProcessor,
     GuarantorReminderProcessor,
     GuarantorProcessor,
+    GuarantorExpiryConsumer,
     AuditLogProcessor,
     LoanDisburseProcessor,
     EmailProcessor,

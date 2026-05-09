@@ -6,6 +6,7 @@ import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-valida
  */
 export enum GuarantorConsentAction {
   ACCEPT = 'ACCEPT',
+  DECLINE = 'DECLINE',
   REJECT = 'REJECT',
 }
 
@@ -16,7 +17,7 @@ export enum GuarantorConsentAction {
 export class GuarantorConsentResponseDto {
   @ApiProperty({
     enum: GuarantorConsentAction,
-    description: 'Explicit action: ACCEPT or REJECT the guarantee request',
+    description: 'Explicit action: ACCEPT or DECLINE the guarantee request',
     example: 'ACCEPT',
   })
   @IsEnum(GuarantorConsentAction)

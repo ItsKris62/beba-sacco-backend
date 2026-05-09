@@ -4,14 +4,18 @@ import {
 } from '@nestjs/common';
 import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
-  ApiResponse, ApiHeader, ApiParam, ApiQuery,
+  ApiResponse, ApiHeader, ApiParam, ApiQuery, ApiBody, ApiProperty, ApiPropertyOptional,
 } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
+import { IsEnum, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { Decimal } from 'decimal.js';
 import { Request } from 'express';
 import { LoanApplicationService } from './loan-application.service';
 import { LoansService } from './loans.service';
 import { LoanAdminService } from './loan-admin.service';
 import { LoanReviewService } from './loan-review.service';
+import { LoanRecoveryService } from './loan-recovery.service';
+import { GuarantorResponseService, GuarantorWorkflowAction } from '../../loans/guarantor-response.service';
 import { UpdateLoanStatusDto, AdminLoanStatus } from './dto/update-loan-status.dto';
 import { GetAdminLoansQueryDto } from './dto/get-admin-loans-query.dto';
 import { ReviewLoanDto } from './dto/review-loan.dto';
@@ -20,6 +24,36 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
+
+export class RecoverLoanDto {
+  @ApiProperty({ description: 'Default amount to recover from accepted guarantors', example: 10000 })
+  @IsNumber()
+  @Min(1)
+  defaultAmount!: number;
+
+  @ApiPropertyOptional({ description: 'Recovery notes for audit context', example: '90-day default recovery' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  notes?: string;
+}
+
+enum AdminGuarantorDecision {
+  ACCEPT = 'ACCEPT',
+  DECLINE = 'DECLINE',
+}
+
+class AdminGuarantorStatusDto {
+  @ApiProperty({ enum: AdminGuarantorDecision, example: AdminGuarantorDecision.ACCEPT })
+  @IsEnum(AdminGuarantorDecision)
+  action!: AdminGuarantorDecision;
+
+  @ApiPropertyOptional({ description: 'Decision note for audit trail', example: 'Confirmed by phone' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  notes?: string;
+}
 
 /**
  * Admin Loan Controller
@@ -43,6 +77,8 @@ export class LoanAdminController {
     private readonly loans: LoansService,
     private readonly loanAdmin: LoanAdminService,
     private readonly loanReview: LoanReviewService,
+    private readonly loanRecovery: LoanRecoveryService,
+    private readonly guarantorResponses: GuarantorResponseService,
   ) {}
 
   // ─── LOAN LIST ───────────────────────────────────────────────────────────────
@@ -212,5 +248,102 @@ export class LoanAdminController {
   ) {
     const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
     return this.loanReview.process(loanId, dto, tenant.id, actor.id, req.ip, idempotencyKey);
+  }
+
+  @Patch('loans/:loanId/guarantors/:guarantorId/status')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'Accept or decline a pending guarantor on behalf of a member',
+    description: 'Manager-only override. Applies the same loan state transitions and writes chained audit logs.',
+  })
+  @ApiParam({ name: 'loanId', description: 'Loan UUID' })
+  @ApiParam({ name: 'guarantorId', description: 'LoanGuarantor UUID or guarantor member UUID' })
+  @ApiBody({ type: AdminGuarantorStatusDto })
+  @ApiResponse({ status: 200, description: 'Guarantor decision applied' })
+  @ApiResponse({ status: 403, description: 'Manager role required' })
+  async updateGuarantorStatus(
+    @Param('loanId', ParseUUIDPipe) loanId: string,
+    @Param('guarantorId', ParseUUIDPipe) guarantorId: string,
+    @Body() dto: AdminGuarantorStatusDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.guarantorResponses.adminOverride(
+      loanId,
+      guarantorId,
+      { action: dto.action as GuarantorWorkflowAction, notes: dto.notes },
+      tenant.id,
+      actor.id,
+      req,
+    );
+  }
+
+  @Patch('loans/:id/recover')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.MANAGER)
+  @ApiOperation({
+    summary: 'Recover defaulted loan amount from accepted guarantors',
+    description:
+      'Deducts proportionally from accepted guarantor savings holds, updates recoveredAmount, and writes chained SASRA audit logs.',
+  })
+  @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+  @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiBody({
+    type: RecoverLoanDto,
+    examples: {
+      recovery: {
+        summary: 'Recover KES 10000 from guarantor holds',
+        value: { defaultAmount: 10000, notes: '90-day default recovery' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Recovery summary',
+    schema: {
+      example: {
+        recoverySummary: {
+          totalRecovered: '10000',
+          remainingDebt: '0',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid recovery request',
+    schema: {
+      examples: {
+        invalidAmount: {
+          value: {
+            statusCode: 400,
+            message: 'INVALID_DEFAULT_AMOUNT: defaultAmount must be greater than zero',
+          },
+        },
+        noAcceptedGuarantors: {
+          value: {
+            statusCode: 400,
+            message: 'NO_ACCEPTED_GUARANTORS: loan has no accepted guarantors for recovery',
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 403, description: 'Only managers can perform guarantor recovery' })
+  @ApiResponse({ status: 404, description: 'Loan not found' })
+  async recoverLoan(
+    @Param('id', ParseUUIDPipe) loanId: string,
+    @Body() dto: RecoverLoanDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.loanRecovery.recoverFromGuarantors(
+      loanId,
+      tenant.id,
+      new Decimal(dto.defaultAmount),
+      actor.id,
+    );
   }
 }

@@ -14,7 +14,7 @@
  */
 import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
-import * as request from 'supertest';
+import request from 'supertest';
 import { AppModule } from '../../src/app.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { RedisService } from '../../src/common/services/redis.service';
@@ -308,7 +308,7 @@ export class TestAppFactory {
     });
 
     // Pending guarantor for loan
-    await prisma.guarantor.create({
+    await prisma.loanGuarantor.create({
       data: {
         id: uuidv4(),
         tenantId,

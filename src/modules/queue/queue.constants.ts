@@ -9,6 +9,7 @@ export const QUEUE_NAMES = {
   MPESA_DISBURSEMENT_DLQ: 'mpesa.disbursement.dlq', // Dead-letter queue for B2C failures
   MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq', // Dead-letter queue for callback failures
   LOAN_GUARANTOR_REMINDER: 'loan.guarantor.reminder',
+  LOAN_GUARANTOR_EXPIRY: 'loan.guarantor.expiry',
   GUARANTOR_VALIDATION: 'loan.guarantor.validation',
   GUARANTOR_VALIDATION_DLQ: 'loan.guarantor.validation.dlq',
   AUDIT_LOG: 'audit.log',
@@ -47,6 +48,7 @@ export const QUEUE_NAMES = {
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 export const GUARANTOR_VALIDATION_QUEUE_JOB = 'validate';
+export const GUARANTOR_EXPIRY_CHECK_JOB = 'guarantor-expiry-check';
 
 // ─── Job payload types ────────────────────────────────────────────────────────
 
@@ -85,6 +87,13 @@ export interface GuarantorValidationJobPayload {
   tenantId: string;
   memberId: string;
   status: 'ACCEPTED' | 'REJECTED' | 'EXPIRED';
+}
+
+export interface GuarantorExpiryJobPayload {
+  tenantId?: string;
+  loanId?: string;
+  guarantorId?: string;
+  cutoffIso?: string;
 }
 
 export interface ReportGenerationJobPayload {

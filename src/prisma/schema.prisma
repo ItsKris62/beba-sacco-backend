@@ -55,10 +55,12 @@ enum AccountType {
 enum LoanStatus {
   DRAFT
   PENDING_GUARANTORS // Waiting for guarantors to accept
+  PENDING_REVIEW // Guarantor criteria met; awaiting manager review
   UNDER_REVIEW // Guarantors confirmed; awaiting manager review
   PENDING_APPROVAL // Legacy / direct-approval path (no guarantors required)
   APPROVED
   REJECTED
+  REJECTED_GUARANTOR_DECLINE // Terminal rejection caused by guarantor decline/timeout/coverage failure
   DISBURSED
   ACTIVE
   FULLY_PAID
@@ -439,6 +441,7 @@ model AuditLog {
   oldValue  Json? // Previous state (sanitized, no passwords)
   newValue  Json? // New state (sanitized, no passwords)
   metadata  Json? // Additional context (IP, userAgent, reason, etc.)
+  payload   Json? // Canonical event payload used for chained audit verification
   ipAddress String?
   userAgent String?
   requestId String? @unique
@@ -544,9 +547,16 @@ model LoanProduct {
   // All monetary limits in KES, stored as Decimal(18,4)
   minAmount Decimal @db.Decimal(18, 4)
   maxAmount Decimal @db.Decimal(18, 4)
-  
-  savingsMultiplier Decimal? @db.Decimal(7, 4)
-  minActiveMonths   Int      @default(0)
+
+  // Rules Engine Fields
+  requiredAccountType    AccountType? // null = combined, otherwise restrict to BOSA or FOSA
+  savingsMultiplier      Decimal      @default(3.0000) @db.Decimal(7, 4)
+  minGuarantors          Int          @default(0)
+  maxGuarantors          Int          @default(5)
+  guarantorCoverageRatio Decimal      @default(1.0) @db.Decimal(7, 4)
+  requiresPayslip        Boolean      @default(false)
+
+  minActiveMonths Int @default(0)
 
   // e.g., 0.1200 = 12.00 % per annum
   interestRate      Decimal      @db.Decimal(7, 4)
@@ -566,6 +576,7 @@ model LoanProduct {
   loans Loan[]
 
   @@unique([tenantId, name])
+  @@index([tenantId])
   @@index([tenantId, isActive])
   @@schema("public")
 }
@@ -638,9 +649,16 @@ model LoanGuarantor {
 
   status           GuarantorStatus @default(PENDING)
   guaranteedAmount Decimal         @db.Decimal(18, 4)
+  recoveredAmount  Decimal         @default(0) @db.Decimal(18, 4)
+  recoveryDate     DateTime?
 
   invitedAt     DateTime  @default(now())
+  expiresAt     DateTime?
   respondedAt   DateTime?
+  holdPlacedAt  DateTime?
+  holdReleasedAt DateTime?
+  decidedByUserId String?
+  decisionSource String?
   notes         String?   @db.Text // Reason for decline, etc.
   auditMetadata Json?
 
@@ -649,6 +667,7 @@ model LoanGuarantor {
 
   @@unique([loanId, memberId]) // A member can only guarantee a loan once
   @@unique([tenantId, loanId, memberId])
+  @@index([tenantId, status])
   @@index([tenantId, memberId])
   @@index([tenantId, loanId, status])
   @@index([loanId])

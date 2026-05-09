@@ -57,6 +57,17 @@ export class CreateLoanProductDto {
 
   @ApiPropertyOptional({
     example: 1,
+    description: 'Minimum guarantor coverage ratio. 1.0 means guarantors must cover 100% of the loan amount.',
+    default: 1,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(5)
+  guarantorCoverageRatio?: number;
+
+  @ApiPropertyOptional({
+    example: 1,
     description:
       'Months after disbursement before first repayment is due (grace period). ' +
       'Interest accrues during this window but no cash collection occurs. ' +

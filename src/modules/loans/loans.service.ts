@@ -3,7 +3,7 @@ import {
   ConflictException, ForbiddenException, UnprocessableEntityException,
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
-import { GuarantorStatus, LoanStatus, TransactionType, TransactionStatus, InterestType } from '@prisma/client';
+import { AccountType, GuarantorStatus, LoanStatus, Prisma, TransactionType, TransactionStatus, InterestType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -95,6 +95,7 @@ export class LoansService {
         interestType: dto.interestType,
         maxTenureMonths: dto.maxTenureMonths,
         processingFeeRate: new Decimal(dto.processingFeeRate ?? 0).toDecimalPlaces(4).toString(),
+        guarantorCoverageRatio: new Decimal(dto.guarantorCoverageRatio ?? 1).toDecimalPlaces(4).toString(),
         gracePeriodMonths: dto.gracePeriodMonths ?? 0,
       },
     });
@@ -371,6 +372,7 @@ export class LoansService {
     if (!loan) throw new NotFoundException('Loan not found');
 
     const approvableStatuses: LoanStatus[] = [
+      LoanStatus.PENDING_REVIEW,
       LoanStatus.UNDER_REVIEW,
       LoanStatus.PENDING_APPROVAL,
     ];
@@ -380,6 +382,8 @@ export class LoansService {
         `Expected one of: ${approvableStatuses.join(', ')}.`,
       );
     }
+
+    await this.assertGuarantorDisbursementGate(this.prisma, tenantId, id);
 
     const updated = await this.prisma.loan.update({
       where: { id },
@@ -516,6 +520,8 @@ export class LoansService {
             `Cannot disburse a loan in "${lockedLoan.status}" status. Expected APPROVED.`,
           );
         }
+
+        await this.assertGuarantorDisbursementGate(tx, tenantId, id);
 
         const txPrincipal = new Decimal(lockedLoan.principalAmount.toString());
 
@@ -982,7 +988,7 @@ export class LoansService {
     if (!loan) throw new NotFoundException('Loan not found');
 
     return this.prisma.loanGuarantor.findMany({
-      where: { loanId },
+      where: { loanId, tenantId },
       include: {
         member: {
           select: {
@@ -1160,6 +1166,10 @@ export class LoansService {
           },
         });
 
+        if (newStatus === LoanStatus.FULLY_PAID) {
+          await this.releaseGuarantorHoldsOnFullRepayment(tx, tenantId, loanId, processedBy);
+        }
+
         await this.audit.create({
           tenantId,
           userId: processedBy,
@@ -1213,6 +1223,98 @@ export class LoansService {
   }
 
   // ─── HELPERS ─────────────────────────────────────────────────
+
+  private async assertGuarantorDisbursementGate(
+    client: Prisma.TransactionClient | PrismaService,
+    tenantId: string,
+    loanId: string,
+  ): Promise<void> {
+    const loan = await client.loan.findFirst({
+      where: { id: loanId, tenantId },
+      select: {
+        principalAmount: true,
+        loanProduct: { select: { minGuarantors: true, guarantorCoverageRatio: true } },
+        guarantors: {
+          where: { tenantId },
+          select: { status: true, guaranteedAmount: true },
+        },
+      },
+    });
+    if (!loan) throw new NotFoundException('Loan not found');
+    if (loan.loanProduct.minGuarantors === 0) return;
+
+    const allAccepted = loan.guarantors.length > 0 && loan.guarantors.every((item) => item.status === GuarantorStatus.ACCEPTED);
+    const totalAccepted = loan.guarantors
+      .filter((item) => item.status === GuarantorStatus.ACCEPTED)
+      .reduce((sum, item) => sum.plus(new Decimal(item.guaranteedAmount.toString())), new Decimal(0));
+    const requiredCoverage = new Decimal(loan.principalAmount.toString()).times(
+      new Decimal(loan.loanProduct.guarantorCoverageRatio?.toString() ?? '1.0'),
+    );
+
+    if (!allAccepted) {
+      throw new BadRequestException('DISBURSEMENT_BLOCKED_GUARANTORS_PENDING: all guarantors must accept before approval/disbursement');
+    }
+    if (loan.guarantors.length < loan.loanProduct.minGuarantors) {
+      throw new BadRequestException('DISBURSEMENT_BLOCKED_MIN_GUARANTORS: minimum guarantor count not met');
+    }
+    if (totalAccepted.lessThan(requiredCoverage)) {
+      throw new BadRequestException('DISBURSEMENT_BLOCKED_COVERAGE: accepted guarantor coverage is below product requirement');
+    }
+  }
+
+  private async releaseGuarantorHoldsOnFullRepayment(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    loanId: string,
+    actorId: string,
+  ): Promise<void> {
+    const loan = await tx.loan.findFirst({
+      where: { id: loanId, tenantId },
+      select: {
+        loanProduct: { select: { requiredAccountType: true } },
+        guarantors: {
+          where: { tenantId, status: GuarantorStatus.ACCEPTED, holdReleasedAt: null },
+          select: { id: true, memberId: true, guaranteedAmount: true },
+        },
+      },
+    });
+    if (!loan || loan.guarantors.length === 0) return;
+
+    const accountType = loan.loanProduct.requiredAccountType ?? AccountType.FOSA;
+    for (const guarantor of loan.guarantors) {
+      const account = await tx.account.findFirst({
+        where: { tenantId, memberId: guarantor.memberId, accountType, isActive: true },
+        select: { id: true, lockedBalance: true },
+      });
+      if (!account) continue;
+
+      const releaseAmount = Decimal.min(
+        new Decimal(account.lockedBalance.toString()),
+        new Decimal(guarantor.guaranteedAmount.toString()),
+      ).toDecimalPlaces(4);
+      if (releaseAmount.lessThanOrEqualTo(0)) continue;
+
+      await tx.account.updateMany({
+        where: { id: account.id, tenantId, isActive: true },
+        data: { lockedBalance: { decrement: releaseAmount.toString() }, version: { increment: 1 } },
+      });
+      await tx.loanGuarantor.updateMany({
+        where: { id: guarantor.id, tenantId },
+        data: { holdReleasedAt: new Date() },
+      });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          actorId,
+          action: 'GUARANTOR.HOLD_RELEASED_LOAN_REPAID',
+          entityType: 'LoanGuarantor',
+          entityId: guarantor.id,
+          metadata: { loanId, guarantorMemberId: guarantor.memberId, releasedAmount: releaseAmount.toNumber() },
+          payload: { loanId, guarantorMemberId: guarantor.memberId, releasedAmount: releaseAmount.toString() },
+        },
+      });
+    }
+  }
 
   /**
    * Calculate monthly instalment using Decimal arithmetic.

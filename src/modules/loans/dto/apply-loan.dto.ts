@@ -1,5 +1,16 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsInt, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsArray,
+  IsInt,
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+import { GuarantorNominationDto } from './member-apply-loan.dto';
 
 /**
  * Used by both staff (POST /loans/apply) and members (POST /members/loans/apply).
@@ -33,6 +44,17 @@ export class ApplyLoanDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Proposed guarantors. Runtime product-rule validation enforces product.minGuarantors on the backend.',
+    type: [GuarantorNominationDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => GuarantorNominationDto)
+  guarantors?: GuarantorNominationDto[];
 }
 
 export class MemberApplyLoanDto {
@@ -58,4 +80,28 @@ export class MemberApplyLoanDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Proposed guarantors. Runtime product-rule validation enforces product.minGuarantors on the backend.',
+    type: [GuarantorNominationDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => GuarantorNominationDto)
+  guarantors?: GuarantorNominationDto[];
+}
+
+export function assertProductMinGuarantors(
+  guarantors: GuarantorNominationDto[] | undefined,
+  minGuarantors: number,
+  productName: string,
+): void {
+  const guarantorCount = guarantors?.length ?? 0;
+  if (guarantorCount < minGuarantors) {
+    throw new Error(
+      `${productName} requires at least ${minGuarantors} guarantor(s); received ${guarantorCount}.`,
+    );
+  }
 }

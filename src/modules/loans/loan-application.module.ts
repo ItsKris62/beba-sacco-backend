@@ -3,6 +3,9 @@ import { BullModule } from '@nestjs/bullmq';
 import { LoanApplicationService } from './loan-application.service';
 import { LoanAdminService } from './loan-admin.service';
 import { LoanReviewService } from './loan-review.service';
+import { GuarantorValidationService } from './guarantor-validation.service';
+import { LoanRecoveryService } from './loan-recovery.service';
+import { GuarantorResponseService } from '../../loans/guarantor-response.service';
 import { LoanAdminController } from './loan-admin.controller';
 import { LoansModule } from './loans.module';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -31,13 +34,24 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     LoansModule,
     BullModule.registerQueue(
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
+      { name: QUEUE_NAMES.LOAN_GUARANTOR_EXPIRY },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION },
       { name: QUEUE_NAMES.EMAIL },
       { name: QUEUE_NAMES.AUDIT_LOG },
     ),
   ],
   controllers: [LoanAdminController],
-  providers: [LoanApplicationService, LoanAdminService, LoanReviewService, PrismaService, RedisService, IdempotencyService],
-  exports: [LoanApplicationService],
+  providers: [
+    LoanApplicationService,
+    LoanAdminService,
+    LoanReviewService,
+    GuarantorResponseService,
+    GuarantorValidationService,
+    LoanRecoveryService,
+    PrismaService,
+    RedisService,
+    IdempotencyService,
+  ],
+  exports: [LoanApplicationService, GuarantorResponseService, GuarantorValidationService, LoanRecoveryService],
 })
 export class LoanApplicationModule {}

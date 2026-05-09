@@ -25,6 +25,8 @@ import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-resp
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
+import { GuarantorLookupService } from '../../guarantors/guarantor-lookup.service';
+import { GuarantorResponseService, GuarantorWorkflowAction } from '../../loans/guarantor-response.service';
 
 /**
  * Member Portal Controller
@@ -50,6 +52,8 @@ export class MemberPortalController {
     private readonly statements: StatementService,
     private readonly prisma: PrismaService,
     private readonly dashboardService: DashboardService,
+    private readonly guarantorLookup: GuarantorLookupService,
+    private readonly guarantorResponses: GuarantorResponseService,
   ) {}
 
   /** Resolve memberId from the authenticated user's id */
@@ -60,6 +64,24 @@ export class MemberPortalController {
     });
     if (!member) throw new Error('Member profile not found');
     return member.id;
+  }
+
+  // ─── GUARANTOR LOOKUP ───────────────────────────────────────────────────────
+
+  @Post('guarantors/lookup')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Lookup eligible guarantor by National ID',
+    description: 'Returns a safe, masked member profile for existing active SACCO members only.',
+  })
+  @ApiResponse({ status: 200, description: 'Eligible guarantor summary' })
+  async lookupGuarantor(
+    @Body() body: { idNumber: string },
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    const memberId = await this.resolveMemberId(user.id, tenant.id);
+    return this.guarantorLookup.lookupByNationalId(body.idNumber, tenant.id, memberId);
   }
 
   // ─── DASHBOARD ─────────────────────────────────────────────────────────────
@@ -142,7 +164,9 @@ export class MemberPortalController {
     @Req() req: Request,
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
-    const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
+    const idempotencyKey =
+      (req.headers['x-idempotency-key'] as string | undefined) ??
+      (req.headers['idempotency-key'] as string | undefined);
     return this.loanApp.memberApply(dto, tenant.id, memberId, user.id, req, idempotencyKey);
   }
 
@@ -217,6 +241,18 @@ export class MemberPortalController {
 
   // ─── GUARANTOR CONSENT RESPONSE ────────────────────────────────────────────
 
+  @Get('guarantor/requests')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'List pending guarantor requests for the authenticated member' })
+  @ApiResponse({ status: 200, description: 'Pending guarantor requests' })
+  async getGuarantorRequests(
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    const memberId = await this.resolveMemberId(user.id, tenant.id);
+    return this.guarantorResponses.getPendingRequests(tenant.id, memberId);
+  }
+
   @Post('loans/:id/guarantor-response')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -244,10 +280,19 @@ export class MemberPortalController {
     @Req() req: Request,
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
-    const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
-    // Use the new LoanApplicationService for enhanced consent flow
-    // The service validates: JWT ownership, 72h expiry, digital ack, idempotency
-    return this.loanApp.guarantorResponse(loanId, memberId, dto, tenant.id, user.id, req, idempotencyKey);
+    const idempotencyKey =
+      (req.headers['x-idempotency-key'] as string | undefined) ??
+      (req.headers['idempotency-key'] as string | undefined);
+    const action = (dto.action === 'REJECT' ? 'DECLINE' : dto.action) as GuarantorWorkflowAction;
+    return this.guarantorResponses.respondAsMember(
+      loanId,
+      memberId,
+      { action, notes: dto.notes },
+      tenant.id,
+      user.id,
+      req,
+      idempotencyKey,
+    );
   }
 
   // ─── M-PESA DEPOSIT ────────────────────────────────────────────────────────

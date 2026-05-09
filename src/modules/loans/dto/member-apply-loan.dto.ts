@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsInt, IsNumber, IsOptional, IsString, IsUUID, Min, MaxLength } from 'class-validator';
+import { IsInt, IsNumber, IsOptional, IsString, IsUUID, Min, MaxLength, IsArray, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 
 /**
  * LoanGuarantor nomination DTO — included in the loan application
@@ -37,9 +38,10 @@ export class MemberApplyLoanDto {
   tenureMonths!: number;
 
   @ApiProperty({ description: 'Purpose of the loan', example: 'School fees for children' })
+  @IsOptional()
   @IsString()
   @MaxLength(500)
-  purpose!: string;
+  purpose?: string;
 
   @ApiPropertyOptional({ description: 'Additional notes or context for the loan officer' })
   @IsOptional()
@@ -49,7 +51,19 @@ export class MemberApplyLoanDto {
 
   @ApiPropertyOptional({ description: 'Proposed guarantors', type: [GuarantorNominationDto] })
   @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => GuarantorNominationDto)
   guarantors?: GuarantorNominationDto[];
+
+  @ApiPropertyOptional({
+    description: 'Guarantor member IDs resolved from POST /members/guarantors/lookup. Amount is split equally against required coverage.',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  guarantorIds?: string[];
 }
 
 /**

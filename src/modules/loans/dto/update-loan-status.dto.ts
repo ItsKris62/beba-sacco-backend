@@ -3,9 +3,11 @@ import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export enum AdminLoanStatus {
   PENDING_GUARANTORS = 'PENDING_GUARANTORS',
+  PENDING_REVIEW = 'PENDING_REVIEW',
   UNDER_REVIEW = 'UNDER_REVIEW',
   APPROVED = 'APPROVED',
   REJECTED = 'REJECTED',
+  REJECTED_GUARANTOR_DECLINE = 'REJECTED_GUARANTOR_DECLINE',
   // DISBURSED is routed to LoansService.disburse() at the controller level — it triggers the
   // full financial disbursement (FOSA credit + Serializable transaction), not a status-only update.
   DISBURSED = 'DISBURSED',

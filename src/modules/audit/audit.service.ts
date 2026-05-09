@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export interface CreateAuditLogDto {
@@ -14,6 +15,7 @@ export interface CreateAuditLogDto {
   oldValue?: Record<string, unknown>;
   newValue?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  payload?: Record<string, unknown>;
   ipAddress?: string;
   userAgent?: string;
   requestId?: string;
@@ -57,6 +59,18 @@ export class AuditService {
       ...(requestedActorId === 'SYSTEM' && { actorId: 'SYSTEM' }),
     };
 
+    const prevEntry = await this.prisma.auditLog.findFirst({
+      where: { tenantId: dto.tenantId },
+      orderBy: { timestamp: 'desc' },
+      select: { entryHash: true },
+    });
+    const prevHash = prevEntry?.entryHash ?? null;
+    const timestamp = new Date();
+    const payload = dto.payload ?? metadata;
+    const entryHash = createHash('sha256')
+      .update(JSON.stringify({ tenantId: dto.tenantId, actorId, action: dto.action, entityType, entityId, payload, prevHash, timestamp }), 'utf8')
+      .digest('hex');
+
     await this.prisma.auditLog.create({
       data: {
         tenantId: dto.tenantId,
@@ -67,9 +81,13 @@ export class AuditService {
         oldValue: dto.oldValue ? (dto.oldValue as Prisma.InputJsonValue) : Prisma.JsonNull,
         newValue: dto.newValue ? (dto.newValue as Prisma.InputJsonValue) : Prisma.JsonNull,
         metadata: metadata as Prisma.InputJsonValue,
+        payload: payload as Prisma.InputJsonValue,
         ipAddress: dto.ipAddress ?? null,
         userAgent: dto.userAgent ?? null,
         requestId: dto.requestId ?? null,
+        prevHash,
+        entryHash,
+        timestamp,
       },
     });
   }
