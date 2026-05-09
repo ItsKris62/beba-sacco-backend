@@ -7,12 +7,14 @@ async function main() {
 
   // Create a mock tenant
   const tenant = await prisma.tenant.upsert({
-    where: { subdomain: 'test-sacco' },
+    where: { slug: 'test-sacco' },
     update: {},
     create: {
       name: 'Test SACCO',
-      subdomain: 'test-sacco',
-      schemaMode: 'SHARED',
+      slug: 'test-sacco',
+      schemaName: 'test_sacco_schema',
+      contactEmail: 'test@sacco.com',
+      contactPhone: '+254700000000'
     },
   });
 
@@ -43,7 +45,7 @@ async function main() {
       firstName: 'Alice',
       lastName: 'Borrower',
       role: UserRole.MEMBER,
-      status: 'ACTIVE',
+      status: 'APPROVED',
     },
   });
 
@@ -71,7 +73,7 @@ async function main() {
       firstName: 'Bob',
       lastName: 'Guarantor',
       role: UserRole.MEMBER,
-      status: 'ACTIVE',
+      status: 'APPROVED',
     },
   });
 
