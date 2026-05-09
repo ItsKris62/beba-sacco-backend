@@ -129,16 +129,18 @@ export class AuthService {
    * Returns access + refresh token pair on success.
    */
   async login(loginDto: LoginDto, tenantId: string, ipAddress?: string): Promise<LoginResponseDto> {
-    if (!loginDto.email && !loginDto.phone) {
+    const normalizedEmail =
+      typeof loginDto.email === 'string' ? loginDto.email.trim().toLowerCase() : undefined;
+    const normalizedPhone =
+      typeof loginDto.phone === 'string' ? loginDto.phone.trim() : undefined;
+    const identifier = normalizedEmail || normalizedPhone;
+
+    if (!identifier) {
       throw new UnauthorizedException('Provide email or phone');
     }
 
-    const identifier = loginDto.email
-      ? loginDto.email.trim().toLowerCase()
-      : loginDto.phone?.trim();
-
-    const credentialWhere = loginDto.email
-      ? { email: identifier }
+    const credentialWhere = normalizedEmail
+      ? { email: normalizedEmail }
       : { phone: identifier };
 
     // Find by credentials without tenant scope first so SUPER_ADMIN

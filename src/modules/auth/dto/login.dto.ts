@@ -12,7 +12,8 @@ import { UserRole } from '@prisma/client';
 export class LoginDto {
   @ApiPropertyOptional({
     example: 'admin@kcboda.co.ke or member.12345678@586c1886.beba.local',
-    description: 'User email address, including system-generated internal email (provide email OR phone)',
+    description:
+      'User email address, including system-generated emails such as @import.local or @beba.local (provide email OR phone)',
   })
   @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   @ValidateIf((o: LoginDto) => !o.phone)

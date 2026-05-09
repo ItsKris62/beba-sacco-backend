@@ -18,16 +18,16 @@ describe('LoginDto', () => {
     expect(errors).toHaveLength(0);
   });
 
-  it('accepts an imported system-generated email', async () => {
-    const { errors } = await validateLogin('john.doe.123456@import.local');
+  it('accepts an imported member email', async () => {
+    const { errors } = await validateLogin('user.name.123456@import.local');
 
     expect(errors).toHaveLength(0);
   });
 
   it('accepts and normalizes an onboarding system-generated email', async () => {
-    const { dto, errors } = await validateLogin(' Member.12345678@586C1886.beba.local ');
+    const { dto, errors } = await validateLogin(' Member.12345678@Tenant.beba.local ');
 
     expect(errors).toHaveLength(0);
-    expect(dto.email).toBe('member.12345678@586c1886.beba.local');
+    expect(dto.email).toBe('member.12345678@tenant.beba.local');
   });
 });
