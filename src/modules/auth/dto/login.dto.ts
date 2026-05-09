@@ -1,27 +1,32 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsEmail,
   IsString,
   MinLength,
-  IsOptional,
   Matches,
   ValidateIf,
+  IsEmail,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { UserRole } from '@prisma/client';
 
 export class LoginDto {
   @ApiPropertyOptional({
-    example: 'admin@kcboda.co.ke',
-    description: 'User email address (provide email OR phone)',
+    example: 'admin@kcboda.co.ke or member.12345678@586c1886.beba.local',
+    description: 'User email address, including system-generated internal email (provide email OR phone)',
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   @ValidateIf((o: LoginDto) => !o.phone)
-  @IsEmail({}, { message: 'Provide a valid email address' })
+  @IsEmail(
+    { require_tld: false },
+    { message: 'Provide a valid email address or system-generated email' },
+  )
   email?: string;
 
   @ApiPropertyOptional({
     example: '+254712345678',
     description: 'Phone number (provide email OR phone)',
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @ValidateIf((o: LoginDto) => !o.email)
   @IsString()
   @Matches(/^\+?[1-9]\d{7,14}$/, { message: 'Provide a valid phone number' })

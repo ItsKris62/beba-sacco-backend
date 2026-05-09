@@ -133,9 +133,13 @@ export class AuthService {
       throw new UnauthorizedException('Provide email or phone');
     }
 
-    const whereClause = loginDto.email
-      ? { email: loginDto.email.toLowerCase() }
-      : { phone: loginDto.phone };
+    const identifier = loginDto.email
+      ? loginDto.email.trim().toLowerCase()
+      : loginDto.phone?.trim();
+
+    const credentialWhere = loginDto.email
+      ? { email: identifier }
+      : { phone: identifier };
 
     // Find by credentials without tenant scope first so SUPER_ADMIN
     // (who belongs to the platform tenant) can log in from any tenant context.
@@ -143,7 +147,10 @@ export class AuthService {
     // locate SUPER_ADMIN users regardless of which tenant's login page they use.
     const candidate = await tenantAsyncStorage.run(undefined, () =>
       this.prisma.user.findFirst({
-        where: whereClause,
+        where: {
+          ...credentialWhere,
+          OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }],
+        },
         select: {
           id: true,
           email: true,
@@ -158,13 +165,7 @@ export class AuthService {
       }),
     );
 
-    // Enforce tenant scope for all roles except SUPER_ADMIN
-    const user =
-      candidate?.role === UserRole.SUPER_ADMIN
-        ? candidate
-        : candidate?.tenantId === tenantId
-          ? candidate
-          : null;
+    const user = candidate ?? null;
 
     // Generic message to prevent user enumeration
     if (!user) {
@@ -172,10 +173,10 @@ export class AuthService {
         tenantId,
         action: 'AUTH.LOGIN.FAILED',
         resource: 'User',
-        metadata: { reason: 'user_not_found', identifier: loginDto.email ?? loginDto.phone },
+        metadata: { reason: 'user_not_found', identifier },
         ipAddress,
       });
-      this.trackFailedAttemptAsync(tenantId, loginDto.email ?? loginDto.phone ?? 'unknown', ipAddress);
+      this.trackFailedAttemptAsync(tenantId, identifier ?? 'unknown', ipAddress);
       throw new UnauthorizedException('Invalid credentials');
     }
 
