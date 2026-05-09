@@ -16,6 +16,10 @@ async function main() {
   console.log('  SUPER_ADMIN → Staff Users Tab  |  401 Diagnosis');
   console.log('========================================================\n');
 
+  const tenants = await prisma.tenant.findMany({
+    select: { id: true, name: true, slug: true, status: true },
+  });
+
   // ── 1. Find all SUPER_ADMIN users ──────────────────────────────────────────
   const superAdmins = await prisma.user.findMany({
     where: { role: 'SUPER_ADMIN' },
@@ -84,7 +88,15 @@ async function main() {
   }
 
   // ── 2. Check the Beba SACCO tenant (the one the frontend uses) ─────────────
-  const FRONTEND_TENANT_ID = 'b2ae96e2-2ad4-491a-8808-42152e2462a6';
+  const FRONTEND_TENANT_ID =
+    process.env.NEXT_PUBLIC_TENANT_ID ??
+    process.env.SMOKE_TENANT_ID ??
+    tenants.find((tenant) => tenant.slug === 'beba-sacco')?.id;
+
+  if (!FRONTEND_TENANT_ID) {
+    console.log('No frontend tenant ID configured and no beba-sacco tenant found.');
+    return;
+  }
   const bebaTenant = await prisma.tenant.findUnique({
     where: { id: FRONTEND_TENANT_ID },
     select: { id: true, name: true, slug: true, status: true },

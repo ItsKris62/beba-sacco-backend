@@ -1,5 +1,5 @@
 @baseUrl = http://localhost:3001/api/v1
-@tenantId = test-sacco
+@tenantId = 586c1886-09aa-4496-8447-0e1f6cf8d200
 
 # Variables (to be filled during testing)
 @member1Token = <MEMBER_1_TOKEN>
