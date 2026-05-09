@@ -7,6 +7,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "seed:locations": "node scripts/seed-locations.js",
+    "seed:clean-demo": "node scripts/reset-clean-demo.js --yes",
     "sprint1:migrate": "node scripts/sprint1-migrate.js",
     "build": "nest build && npm run sentry:sourcemaps",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
