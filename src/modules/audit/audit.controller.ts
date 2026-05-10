@@ -12,13 +12,15 @@ import { SasraValidatorService } from './sasra-validator.service';
 import { SasraAuditQueryDto, SasraAuditReport } from './dto/sasra-audit.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 
 @ApiTags('Audit')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
+@Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
 @Controller('audit')
 export class AuditController {
   constructor(
@@ -36,6 +38,8 @@ export class AuditController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
   @ApiQuery({ name: 'action', required: false, type: String, example: 'AUTH.LOGIN' })
+  @ApiQuery({ name: 'entityType', required: false, type: String, example: 'Loan' })
+  @ApiQuery({ name: 'actorId', required: false, type: String })
   @ApiQuery({ name: 'from', required: false, type: String, description: 'ISO date (YYYY-MM-DD)' })
   @ApiQuery({ name: 'to', required: false, type: String, description: 'ISO date (YYYY-MM-DD)' })
   @ApiResponse({ status: 200, description: 'Paginated audit log entries' })
@@ -46,6 +50,8 @@ export class AuditController {
     @Query('page') page = 1,
     @Query('limit') limit = 50,
     @Query('action') action?: string,
+    @Query('entityType') entityType?: string,
+    @Query('actorId') actorId?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
@@ -62,7 +68,9 @@ export class AuditController {
 
     return this.auditService.findAll({
       tenantId: tenant.id,
+      actorId,
       action,
+      entityType,
       fromDate,
       toDate,
       limit: safeLimit,
@@ -78,6 +86,70 @@ export class AuditController {
       },
       error: null,
     }));
+  }
+
+  @Get('export')
+  @ApiOperation({
+    summary: 'Export audit logs',
+    description:
+      'Exports the filtered tenant audit trail as CSV or PDF. SUPER_ADMIN, TENANT_ADMIN, MANAGER, and AUDITOR have full tenant audit access.',
+  })
+  @ApiQuery({ name: 'format', required: false, enum: ['csv', 'pdf'] })
+  @ApiQuery({ name: 'action', required: false, type: String })
+  @ApiQuery({ name: 'entityType', required: false, type: String })
+  @ApiQuery({ name: 'actorId', required: false, type: String })
+  @ApiQuery({ name: 'from', required: false, type: String })
+  @ApiQuery({ name: 'to', required: false, type: String })
+  async exportAuditLogs(
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+    @Res() res: Response,
+    @Query('format') format: 'csv' | 'pdf' = 'csv',
+    @Query('action') action?: string,
+    @Query('entityType') entityType?: string,
+    @Query('actorId') actorId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ): Promise<void> {
+    const fromDate = from ? new Date(from) : undefined;
+    let toDate: Date | undefined;
+    if (to) {
+      toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+    }
+
+    const entries = await this.auditService.findForExport({
+      tenantId: tenant.id,
+      actorId,
+      action,
+      entityType,
+      fromDate,
+      toDate,
+      limit: 5000,
+    });
+
+    await this.auditService.create({
+      tenantId: tenant.id,
+      actorId: user.id,
+      action: 'AUDIT.EXPORT',
+      entityType: 'AuditLog',
+      metadata: { format, filters: { action, entityType, actorId, from, to }, rowCount: entries.length },
+    });
+
+    const suffix = `${from ?? 'start'}-to-${to ?? 'now'}`;
+    if (format === 'pdf') {
+      const pdf = await this.auditService.exportAsPdf(entries);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="audit-trail-${suffix}.pdf"`);
+      res.setHeader('Content-Length', pdf.length);
+      res.end(pdf);
+      return;
+    }
+
+    const csv = this.auditService.exportAsCsv(entries);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-trail-${suffix}.csv"`);
+    res.send(csv);
   }
 
 

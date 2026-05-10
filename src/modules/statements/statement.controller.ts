@@ -1,12 +1,21 @@
-import { Controller, Get, Query, Req, Res, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Query,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Response } from 'express';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse, ApiQuery } from '@nestjs/swagger';
-import { IsOptional, IsString, IsEnum } from 'class-validator';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { UserRole } from '@prisma/client';
 import { JwtAuthGuard } from '../../common/guards/jwt.guard';
 import { StatementService, FosaStatement, BosaStatement } from './statement.service';
 import type { AuthenticatedRequest } from '../../common/types/request.types';
-
-type RequestUser = AuthenticatedRequest['user'] & { memberId?: string };
 
 class StatementQueryDto {
   @IsOptional()
@@ -22,10 +31,17 @@ class StatementQueryDto {
   periodTo?: string;
 }
 
-class PdfExportQueryDto extends StatementQueryDto {
+class StatementExportQueryDto extends StatementQueryDto {
   @IsEnum(['FOSA', 'BOSA'])
   type!: 'FOSA' | 'BOSA';
 }
+
+const STAFF_STATEMENT_ROLES = new Set<UserRole>([
+  UserRole.SUPER_ADMIN,
+  UserRole.TENANT_ADMIN,
+  UserRole.MANAGER,
+  UserRole.AUDITOR,
+]);
 
 @ApiTags('Statements')
 @ApiBearerAuth()
@@ -39,24 +55,25 @@ export class StatementController {
   @ApiOperation({
     summary: 'Get FOSA statement',
     description:
-      'Returns loan disbursements and repayments for the member. Requires STATEMENT_EXPORT consent.',
+      'Returns loan disbursements and repayments for the member. Member self-service requires STATEMENT_EXPORT consent; admin, manager, super admin, and auditor may generate tenant-scoped member statements.',
   })
   @ApiQuery({ name: 'memberId', required: false })
   @ApiQuery({ name: 'periodFrom', required: false, example: '2024-01-01' })
   @ApiQuery({ name: 'periodTo', required: false, example: '2024-12-31' })
   @ApiResponse({ status: 200, description: 'FOSA statement data' })
-  @ApiResponse({ status: 403, description: 'STATEMENT_EXPORT consent required' })
+  @ApiResponse({ status: 403, description: 'STATEMENT_EXPORT consent required or forbidden member scope' })
   async getFosaStatement(
     @Query() query: StatementQueryDto,
     @Req() req: AuthenticatedRequest,
   ): Promise<FosaStatement> {
-    const memberId = query.memberId ?? (req.user as RequestUser).memberId ?? '';
+    const { memberId, skipConsent } = await this.resolveStatementScope(req, query.memberId);
     return this.statementService.getFosaStatement(
       req.tenant.id,
       req.user.id,
       memberId,
       query.periodFrom,
       query.periodTo,
+      { skipConsent, exportFormat: 'VIEW', ipAddress: req.ip },
     );
   }
 
@@ -65,7 +82,7 @@ export class StatementController {
   @ApiOperation({
     summary: 'Get BOSA statement',
     description:
-      'Returns savings and welfare contributions for the member. Requires STATEMENT_EXPORT consent.',
+      'Returns savings and welfare contributions for the member. Member self-service requires STATEMENT_EXPORT consent; admin, manager, super admin, and auditor may generate tenant-scoped member statements.',
   })
   @ApiQuery({ name: 'memberId', required: false })
   @ApiQuery({ name: 'periodFrom', required: false })
@@ -75,13 +92,14 @@ export class StatementController {
     @Query() query: StatementQueryDto,
     @Req() req: AuthenticatedRequest,
   ): Promise<BosaStatement> {
-    const memberId = query.memberId ?? (req.user as RequestUser).memberId ?? '';
+    const { memberId, skipConsent } = await this.resolveStatementScope(req, query.memberId);
     return this.statementService.getBosaStatement(
       req.tenant.id,
       req.user.id,
       memberId,
       query.periodFrom,
       query.periodTo,
+      { skipConsent, exportFormat: 'VIEW', ipAddress: req.ip },
     );
   }
 
@@ -97,35 +115,14 @@ export class StatementController {
   @ApiQuery({ name: 'periodTo', required: false })
   @ApiResponse({ status: 200, description: 'PDF file stream' })
   async exportPdf(
-    @Query() query: PdfExportQueryDto,
+    @Query() query: StatementExportQueryDto,
     @Req() req: AuthenticatedRequest,
     @Res() res: Response,
   ): Promise<void> {
-    const memberId = query.memberId ?? (req.user as RequestUser).memberId ?? '';
+    const statement = await this.buildStatement(req, query, 'PDF');
     const saccoName = req.tenant.name;
-
-    let statement: FosaStatement | BosaStatement;
-
-    if (query.type === 'FOSA') {
-      statement = await this.statementService.getFosaStatement(
-        req.tenant.id,
-        req.user.id,
-        memberId,
-        query.periodFrom,
-        query.periodTo,
-      );
-    } else {
-      statement = await this.statementService.getBosaStatement(
-        req.tenant.id,
-        req.user.id,
-        memberId,
-        query.periodFrom,
-        query.periodTo,
-      );
-    }
-
     const pdfBuffer = await this.statementService.generatePdf(statement, saccoName, query.type);
-    const filename = `${saccoName.replace(/\s+/g, '_')}_${query.type}_${statement.memberNumber}_${statement.periodFrom}_${statement.periodTo}.pdf`;
+    const filename = this.statementFilename(saccoName, query.type, statement, 'pdf');
 
     res.set({
       'Content-Type': 'application/pdf',
@@ -134,7 +131,81 @@ export class StatementController {
       'X-Audit-Hash': statement.auditHash,
       'Cache-Control': 'no-store, no-cache, must-revalidate',
     });
-
     res.end(pdfBuffer);
+  }
+
+  @Get('statements/export/csv')
+  @ApiOperation({ summary: 'Export statement as CSV' })
+  @ApiQuery({ name: 'type', enum: ['FOSA', 'BOSA'], required: true })
+  @ApiQuery({ name: 'memberId', required: false })
+  @ApiQuery({ name: 'periodFrom', required: false })
+  @ApiQuery({ name: 'periodTo', required: false })
+  @ApiResponse({ status: 200, description: 'CSV file stream' })
+  async exportCsv(
+    @Query() query: StatementExportQueryDto,
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+  ): Promise<void> {
+    const statement = await this.buildStatement(req, query, 'CSV');
+    const csv = this.statementService.exportAsCsv(statement);
+    const filename = this.statementFilename(req.tenant.name, query.type, statement, 'csv');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('X-Audit-Hash', statement.auditHash);
+    res.send(csv);
+  }
+
+  private async buildStatement(
+    req: AuthenticatedRequest,
+    query: StatementExportQueryDto,
+    exportFormat: 'PDF' | 'CSV',
+  ): Promise<FosaStatement | BosaStatement> {
+    const { memberId, skipConsent } = await this.resolveStatementScope(req, query.memberId);
+    if (query.type === 'FOSA') {
+      return this.statementService.getFosaStatement(
+        req.tenant.id,
+        req.user.id,
+        memberId,
+        query.periodFrom,
+        query.periodTo,
+        { skipConsent, exportFormat, ipAddress: req.ip },
+      );
+    }
+
+    return this.statementService.getBosaStatement(
+      req.tenant.id,
+      req.user.id,
+      memberId,
+      query.periodFrom,
+      query.periodTo,
+      { skipConsent, exportFormat, ipAddress: req.ip },
+    );
+  }
+
+  private async resolveStatementScope(
+    req: AuthenticatedRequest,
+    requestedMemberId?: string,
+  ): Promise<{ memberId: string; skipConsent: boolean }> {
+    const isStaff = STAFF_STATEMENT_ROLES.has(req.user.role);
+    if (isStaff && requestedMemberId) {
+      return { memberId: requestedMemberId, skipConsent: true };
+    }
+
+    const ownMemberId = await this.statementService.resolveMemberIdForUser(req.tenant.id, req.user.id);
+    if (requestedMemberId && requestedMemberId !== ownMemberId) {
+      throw new ForbiddenException('You can only generate statements for your own member profile');
+    }
+
+    return { memberId: ownMemberId, skipConsent: false };
+  }
+
+  private statementFilename(
+    saccoName: string,
+    type: 'FOSA' | 'BOSA',
+    statement: FosaStatement | BosaStatement,
+    extension: 'pdf' | 'csv',
+  ): string {
+    return `${saccoName.replace(/\s+/g, '_')}_${type}_${statement.memberNumber}_${statement.periodFrom}_${statement.periodTo}.${extension}`;
   }
 }

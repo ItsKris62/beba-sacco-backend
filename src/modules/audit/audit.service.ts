@@ -21,6 +21,40 @@ export interface CreateAuditLogDto {
   requestId?: string;
 }
 
+export interface AuditLogFilters {
+  tenantId: string;
+  actorId?: string;
+  action?: string;
+  entityType?: string;
+  fromDate?: Date;
+  toDate?: Date;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  tenantId: string;
+  actorId: string | null;
+  userId: string | null;
+  action: string;
+  entityType: string;
+  entityId: string | null;
+  resource: string;
+  resourceId: string | null;
+  oldValue: Prisma.JsonValue | null;
+  newValue: Prisma.JsonValue | null;
+  metadata: Prisma.JsonValue | null;
+  payload: Prisma.JsonValue | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  requestId: string | null;
+  prevHash: string | null;
+  entryHash: string | null;
+  timestamp: Date;
+  user: { firstName: string; lastName: string; email: string } | null;
+}
+
 /**
  * Audit Service
  *
@@ -95,33 +129,11 @@ export class AuditService {
   /**
    * Query audit logs with filters and pagination.
    */
-  async findAll(filters: {
-    tenantId: string;
-    actorId?: string;
-    action?: string;
-    entityType?: string;
-    fromDate?: Date;
-    toDate?: Date;
-    limit?: number;
-    offset?: number;
-  }): Promise<{ data: unknown[]; total: number }> {
+  async findAll(filters: AuditLogFilters): Promise<{ data: AuditLogEntry[]; total: number }> {
     const safeLimit = Math.min(200, Math.max(1, filters.limit ?? 50));
     const safeOffset = Math.max(0, filters.offset ?? 0);
 
-    const where: Prisma.AuditLogWhereInput = {
-      tenantId: filters.tenantId,
-      ...(filters.actorId && { actorId: filters.actorId }),
-      ...(filters.action && { action: { contains: filters.action, mode: 'insensitive' } }),
-      ...(filters.entityType && {
-        entityType: { contains: filters.entityType, mode: 'insensitive' },
-      }),
-      ...((filters.fromDate || filters.toDate) && {
-        timestamp: {
-          ...(filters.fromDate && { gte: filters.fromDate }),
-          ...(filters.toDate && { lte: filters.toDate }),
-        },
-      }),
-    };
+    const where = this.buildWhere(filters);
 
     const [data, total] = await this.prisma.$transaction([
       this.prisma.auditLog.findMany({
@@ -138,7 +150,99 @@ export class AuditService {
       this.prisma.auditLog.count({ where }),
     ]);
 
-    return { data, total };
+    return { data: data.map((entry) => this.serializeEntry(entry)), total };
+  }
+
+  async findForExport(filters: AuditLogFilters): Promise<AuditLogEntry[]> {
+    const data = await this.prisma.auditLog.findMany({
+      where: this.buildWhere(filters),
+      orderBy: { timestamp: 'desc' },
+      take: Math.min(5000, Math.max(1, filters.limit ?? 5000)),
+      include: {
+        user: {
+          select: { firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+    return data.map((entry) => this.serializeEntry(entry));
+  }
+
+  exportAsCsv(entries: AuditLogEntry[]): string {
+    const headers = [
+      'timestamp',
+      'actor',
+      'actorEmail',
+      'action',
+      'resource',
+      'resourceId',
+      'ipAddress',
+      'requestId',
+      'entryHash',
+      'metadata',
+    ];
+    const rows = entries.map((entry) => [
+      entry.timestamp.toISOString(),
+      entry.user ? `${entry.user.firstName} ${entry.user.lastName}` : 'System',
+      entry.user?.email ?? '',
+      entry.action,
+      entry.resource,
+      entry.resourceId ?? '',
+      entry.ipAddress ?? '',
+      entry.requestId ?? '',
+      entry.entryHash ?? '',
+      JSON.stringify(entry.metadata ?? {}),
+    ]);
+
+    return [
+      headers.join(','),
+      ...rows.map((row) => row.map((value) => this.csvCell(value)).join(',')),
+    ].join('\n');
+  }
+
+  async exportAsPdf(entries: AuditLogEntry[], title = 'Audit Trail Export'): Promise<Buffer> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const PDFDocument = require('pdfkit') as typeof import('pdfkit');
+
+    return new Promise<Buffer>((resolve, reject) => {
+      const doc = new PDFDocument({ margin: 40, size: 'A4' });
+      const chunks: Buffer[] = [];
+
+      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      doc.fontSize(16).fillColor('#111827').text(title, { align: 'center' });
+      doc.moveDown(0.25);
+      doc.fontSize(9).fillColor('#6b7280').text(`Generated: ${new Date().toISOString()}`, {
+        align: 'center',
+      });
+      doc.moveDown();
+
+      doc.fontSize(8).fillColor('#111827');
+      entries.forEach((entry, index) => {
+        if (doc.y > 735) doc.addPage();
+        const actor = entry.user ? `${entry.user.firstName} ${entry.user.lastName}` : 'System';
+        doc
+          .font('Helvetica-Bold')
+          .text(`${index + 1}. ${entry.timestamp.toISOString()} | ${entry.action}`, {
+            continued: false,
+          });
+        doc
+          .font('Helvetica')
+          .text(
+            `Actor: ${actor} | Resource: ${entry.resource}${entry.resourceId ? `/${entry.resourceId}` : ''}`,
+          );
+        doc.text(`IP: ${entry.ipAddress ?? '-'} | Request: ${entry.requestId ?? '-'}`);
+        if (entry.entryHash) doc.text(`Hash: ${entry.entryHash}`);
+        doc.moveDown(0.35);
+      });
+
+      if (entries.length === 0) {
+        doc.text('No audit log entries matched the selected filters.');
+      }
+
+      doc.end();
+    });
   }
 
   /**
@@ -154,5 +258,38 @@ export class AuditService {
         },
       },
     });
+  }
+
+  private serializeEntry(entry: Prisma.AuditLogGetPayload<{
+    include: { user: { select: { firstName: true; lastName: true; email: true } } };
+  }>): AuditLogEntry {
+    return {
+      ...entry,
+      userId: entry.actorId,
+      resource: entry.entityType,
+      resourceId: entry.entityId,
+    };
+  }
+
+  private buildWhere(filters: AuditLogFilters): Prisma.AuditLogWhereInput {
+    return {
+      tenantId: filters.tenantId,
+      ...(filters.actorId && { actorId: filters.actorId }),
+      ...(filters.action && { action: { contains: filters.action, mode: 'insensitive' } }),
+      ...(filters.entityType && {
+        entityType: { contains: filters.entityType, mode: 'insensitive' },
+      }),
+      ...((filters.fromDate || filters.toDate) && {
+        timestamp: {
+          ...(filters.fromDate && { gte: filters.fromDate }),
+          ...(filters.toDate && { lte: filters.toDate }),
+        },
+      }),
+    };
+  }
+
+  private csvCell(value: unknown): string {
+    const text = value == null ? '' : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 }

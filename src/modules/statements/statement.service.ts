@@ -1,7 +1,14 @@
-import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { createHash } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ConsentService } from '../compliance/consent.service';
+import { AuditService } from '../audit/audit.service';
 
 export interface StatementTransaction {
   date: string;
@@ -34,10 +41,18 @@ export interface BosaStatement {
   generatedAt: string;
   periodFrom: string;
   periodTo: string;
+  openingBalance: number;
+  closingBalance: number;
   totalSavings: number;
   welfareContributions: number;
   transactions: StatementTransaction[];
   auditHash: string;
+}
+
+export interface StatementOptions {
+  skipConsent?: boolean;
+  exportFormat?: 'VIEW' | 'PDF' | 'CSV';
+  ipAddress?: string;
 }
 
 @Injectable()
@@ -47,9 +62,17 @@ export class StatementService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly consentService: ConsentService,
+    private readonly audit: AuditService,
   ) {}
 
-  // ─── FOSA Statement ────────────────────────────────────────────────────────
+  async resolveMemberIdForUser(tenantId: string, userId: string): Promise<string> {
+    const member = await this.prisma.member.findFirst({
+      where: { tenantId, userId },
+      select: { id: true },
+    });
+    if (!member) throw new NotFoundException('Member profile not found');
+    return member.id;
+  }
 
   async getFosaStatement(
     tenantId: string,
@@ -57,102 +80,126 @@ export class StatementService {
     memberId: string,
     periodFrom?: string,
     periodTo?: string,
+    options: StatementOptions = {},
   ): Promise<FosaStatement> {
-    const hasConsent = await this.consentService.hasConsent(userId, 'STATEMENT_EXPORT');
-    if (!hasConsent) {
-      throw new ForbiddenException(
-        'STATEMENT_EXPORT consent required. Please accept the consent in your profile.',
-      );
-    }
+    if (!memberId) throw new BadRequestException('memberId is required to generate a statement');
+    await this.ensureConsent(userId, options);
 
     const member = await this.prisma.member.findFirst({
       where: { id: memberId, tenantId },
       include: { user: { select: { firstName: true, lastName: true } } },
     });
-
     if (!member) throw new NotFoundException('Member not found');
 
     const from = periodFrom
       ? new Date(periodFrom)
       : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
     const to = periodTo ? new Date(periodTo) : new Date();
+    to.setHours(23, 59, 59, 999);
 
     const loans = await this.prisma.loan.findMany({
-      where: { tenantId, memberId, disbursedAt: { gte: from, lte: to } },
+      where: { tenantId, memberId, disbursedAt: { lte: to } },
       orderBy: { disbursedAt: 'asc' },
     });
+    const loanIds = loans.map((loan) => loan.id);
 
-    const loanIds = loans.map((l) => l.id);
-    const repayments =
+    const [periodRepayments, openingRepayments] =
       loanIds.length > 0
-        ? await this.prisma.loanRepayment.findMany({
-            where: { loanId: { in: loanIds }, tenantId, paymentDate: { gte: from, lte: to } },
-            orderBy: { paymentDate: 'asc' },
-          })
-        : [];
+        ? await Promise.all([
+            this.prisma.loanRepayment.findMany({
+              where: {
+                loanId: { in: loanIds },
+                tenantId,
+                status: 'CONFIRMED',
+                paymentDate: { gte: from, lte: to },
+              },
+              orderBy: { paymentDate: 'asc' },
+            }),
+            this.prisma.loanRepayment.findMany({
+              where: {
+                loanId: { in: loanIds },
+                tenantId,
+                status: 'CONFIRMED',
+                paymentDate: { lt: from },
+              },
+            }),
+          ])
+        : [[], []];
 
-    const repaymentsByLoan = new Map<string, typeof repayments>();
-    for (const r of repayments) {
-      const list = repaymentsByLoan.get(r.loanId) ?? [];
-      list.push(r);
-      repaymentsByLoan.set(r.loanId, list);
-    }
+    const openingDisbursed = loans
+      .filter((loan) => loan.disbursedAt && loan.disbursedAt < from)
+      .reduce((sum, loan) => sum + Number(loan.principalAmount), 0);
+    const openingRepaid = openingRepayments.reduce(
+      (sum, repayment) => sum + Number(repayment.amountPaid),
+      0,
+    );
 
-    const transactions: StatementTransaction[] = [];
-    let runningBalance = 0;
+    const datedEntries: Array<StatementTransaction & { sortDate: Date; order: number }> = [];
     let totalDisbursed = 0;
     let totalRepaid = 0;
 
-    for (const loan of loans) {
+    loans.forEach((loan, index) => {
+      if (!loan.disbursedAt || loan.disbursedAt < from || loan.disbursedAt > to) return;
       const principal = Number(loan.principalAmount);
       totalDisbursed += principal;
-      runningBalance += principal;
-
-      transactions.push({
-        date: loan.disbursedAt?.toISOString().split('T')[0] ?? '',
-        description: `Loan Disbursement – ${loan.loanNumber}`,
+      datedEntries.push({
+        date: loan.disbursedAt.toISOString().split('T')[0],
+        description: `Loan Disbursement - ${loan.loanNumber}`,
         debit: principal,
         credit: 0,
-        balance: runningBalance,
+        balance: 0,
         reference: loan.loanNumber,
+        sortDate: loan.disbursedAt,
+        order: index,
+      });
+    });
+
+    const loanNumberById = new Map(loans.map((loan) => [loan.id, loan.loanNumber]));
+    periodRepayments.forEach((repayment, index) => {
+      const amount = Number(repayment.amountPaid);
+      totalRepaid += amount;
+      datedEntries.push({
+        date: repayment.paymentDate.toISOString().split('T')[0],
+        description: `Repayment Day ${repayment.dayNumber} - ${loanNumberById.get(repayment.loanId) ?? repayment.loanId}`,
+        debit: 0,
+        credit: amount,
+        balance: 0,
+        reference: repayment.id,
+        sortDate: repayment.paymentDate,
+        order: loans.length + index,
+      });
+    });
+
+    let runningBalance = openingDisbursed - openingRepaid;
+    const openingBalance = runningBalance;
+    const transactions = datedEntries
+      .sort((a, b) => a.sortDate.getTime() - b.sortDate.getTime() || a.order - b.order)
+      .map(({ sortDate: _sortDate, order: _order, ...tx }) => {
+        runningBalance += tx.debit;
+        runningBalance -= tx.credit;
+        return { ...tx, balance: runningBalance };
       });
 
-      for (const repayment of repaymentsByLoan.get(loan.id) ?? []) {
-        const amount = Number(repayment.amountPaid);
-        totalRepaid += amount;
-        runningBalance -= amount;
-
-        transactions.push({
-          date: repayment.paymentDate.toISOString().split('T')[0],
-          description: `Repayment Day ${repayment.dayNumber} – ${loan.loanNumber}`,
-          debit: 0,
-          credit: amount,
-          balance: runningBalance,
-          reference: repayment.id,
-        });
-      }
-    }
-
-    const content = JSON.stringify({ memberId, transactions, totalDisbursed, totalRepaid });
+    const content = JSON.stringify({ memberId, openingBalance, transactions, totalDisbursed, totalRepaid });
     const auditHash = createHash('sha256').update(content).digest('hex');
-
-    return {
+    const statement: FosaStatement = {
       memberId,
       memberNumber: member.memberNumber,
       memberName: `${member.user.firstName} ${member.user.lastName}`,
       generatedAt: new Date().toISOString(),
       periodFrom: from.toISOString().split('T')[0],
       periodTo: to.toISOString().split('T')[0],
-      openingBalance: 0,
+      openingBalance,
       closingBalance: runningBalance,
       totalDisbursed,
       totalRepaid,
       transactions,
       auditHash,
     };
-  }
 
-  // ─── BOSA Statement ────────────────────────────────────────────────────────
+    await this.auditStatement(tenantId, userId, 'FOSA', statement, options);
+    return statement;
+  }
 
   async getBosaStatement(
     tenantId: string,
@@ -160,31 +207,37 @@ export class StatementService {
     memberId: string,
     periodFrom?: string,
     periodTo?: string,
+    options: StatementOptions = {},
   ): Promise<BosaStatement> {
-    const hasConsent = await this.consentService.hasConsent(userId, 'STATEMENT_EXPORT');
-    if (!hasConsent) {
-      throw new ForbiddenException('STATEMENT_EXPORT consent required.');
-    }
+    if (!memberId) throw new BadRequestException('memberId is required to generate a statement');
+    await this.ensureConsent(userId, options);
 
     const member = await this.prisma.member.findFirst({
       where: { id: memberId, tenantId },
       include: { user: { select: { firstName: true, lastName: true } } },
     });
-
     if (!member) throw new NotFoundException('Member not found');
 
     const from = periodFrom
       ? new Date(periodFrom)
       : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
     const to = periodTo ? new Date(periodTo) : new Date();
+    to.setHours(23, 59, 59, 999);
 
-    const savings = await this.prisma.savingsRecord.findMany({
-      where: { tenantId, memberId, periodDate: { gte: from, lte: to } },
-      orderBy: { periodDate: 'asc' },
-    });
+    const [savings, openingSavings] = await Promise.all([
+      this.prisma.savingsRecord.findMany({
+        where: { tenantId, memberId, periodDate: { gte: from, lte: to } },
+        orderBy: { periodDate: 'asc' },
+      }),
+      this.prisma.savingsRecord.aggregate({
+        where: { tenantId, memberId, periodDate: { lt: from } },
+        _sum: { amount: true },
+      }),
+    ]);
 
     const transactions: StatementTransaction[] = [];
-    let runningBalance = 0;
+    let runningBalance = Number(openingSavings._sum.amount ?? 0);
+    const openingBalance = runningBalance;
     let totalSavings = 0;
     let welfareContributions = 0;
 
@@ -196,7 +249,7 @@ export class StatementService {
 
       transactions.push({
         date: record.periodDate.toISOString().split('T')[0],
-        description: `${record.recordType === 'INDIVIDUAL' ? 'Savings' : 'Welfare'} – Week ${record.weekNumber}`,
+        description: `${record.recordType === 'INDIVIDUAL' ? 'Savings' : 'Welfare'} - Week ${record.weekNumber}`,
         debit: 0,
         credit: amount,
         balance: runningBalance,
@@ -204,24 +257,32 @@ export class StatementService {
       });
     }
 
-    const content = JSON.stringify({ memberId, transactions, totalSavings, welfareContributions });
+    const content = JSON.stringify({
+      memberId,
+      openingBalance,
+      transactions,
+      totalSavings,
+      welfareContributions,
+    });
     const auditHash = createHash('sha256').update(content).digest('hex');
-
-    return {
+    const statement: BosaStatement = {
       memberId,
       memberNumber: member.memberNumber,
       memberName: `${member.user.firstName} ${member.user.lastName}`,
       generatedAt: new Date().toISOString(),
       periodFrom: from.toISOString().split('T')[0],
       periodTo: to.toISOString().split('T')[0],
+      openingBalance,
+      closingBalance: runningBalance,
       totalSavings,
       welfareContributions,
       transactions,
       auditHash,
     };
-  }
 
-  // ─── PDF Generation ────────────────────────────────────────────────────────
+    await this.auditStatement(tenantId, userId, 'BOSA', statement, options);
+    return statement;
+  }
 
   async generatePdf(
     statement: FosaStatement | BosaStatement,
@@ -239,14 +300,12 @@ export class StatementService {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      // Watermark
       doc.save();
       doc.rotate(45, { origin: [300, 400] });
       doc.fontSize(80).fillColor('#e0e0e0').opacity(0.3).text('CONFIDENTIAL', 50, 300);
       doc.restore();
       doc.opacity(1);
 
-      // Header
       doc.fontSize(20).fillColor('#1a1a2e').text(saccoName, { align: 'center' });
       doc.fontSize(14).fillColor('#333').text(`${statementType} Statement`, { align: 'center' });
       doc.moveDown(0.5);
@@ -254,34 +313,34 @@ export class StatementService {
       doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#ccc');
       doc.moveDown();
 
-      // Member Details
       doc.fontSize(11).fillColor('#333');
       doc.text(`Member: ${statement.memberName}`);
       doc.text(`Member No: ${statement.memberNumber}`);
       doc.text(`Period: ${statement.periodFrom} to ${statement.periodTo}`);
       doc.moveDown();
 
-      // Summary
       doc.fontSize(12).fillColor('#1a1a2e').text('Summary', { underline: true });
       doc.fontSize(10).fillColor('#333');
 
       if (statementType === 'FOSA') {
         const fosa = statement as FosaStatement;
+        doc.text(`Opening Balance: KES ${fosa.openingBalance.toLocaleString()}`);
         doc.text(`Total Disbursed: KES ${fosa.totalDisbursed.toLocaleString()}`);
         doc.text(`Total Repaid: KES ${fosa.totalRepaid.toLocaleString()}`);
         doc.text(`Closing Balance: KES ${fosa.closingBalance.toLocaleString()}`);
       } else {
         const bosa = statement as BosaStatement;
+        doc.text(`Opening Balance: KES ${bosa.openingBalance.toLocaleString()}`);
         doc.text(`Total Savings: KES ${bosa.totalSavings.toLocaleString()}`);
         doc.text(`Welfare Contributions: KES ${bosa.welfareContributions.toLocaleString()}`);
+        doc.text(`Closing Balance: KES ${bosa.closingBalance.toLocaleString()}`);
       }
       doc.moveDown();
 
-      // Transaction Table
       doc.fontSize(12).fillColor('#1a1a2e').text('Transactions', { underline: true });
       doc.moveDown(0.5);
 
-      const colX = [50, 120, 280, 360, 430, 490];
+      const colX = [50, 120, 280, 360, 430];
       doc.fontSize(9).fillColor('#fff');
       doc.rect(50, doc.y, 495, 18).fill('#1a1a2e');
       const headerY = doc.y - 14;
@@ -305,24 +364,111 @@ export class StatementService {
         doc.text(tx.balance.toLocaleString(), colX[4], rowY + 3, { width: 65 });
         doc.moveDown(0.8);
         rowIndex++;
-        if (doc.y > 720) { doc.addPage(); rowIndex = 0; }
+        if (doc.y > 720) {
+          doc.addPage();
+          rowIndex = 0;
+        }
       }
 
       doc.moveDown();
-
-      // Audit Footer
       doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#ccc');
       doc.moveDown(0.5);
       doc.fontSize(8).fillColor('#999');
       doc.text(`Audit Hash: ${statement.auditHash}`, { align: 'left' });
       doc.moveDown(0.3);
       doc.text(
-        'ODPC Disclaimer: This statement contains personal data processed under the Kenya Data Protection Act 2019. ' +
-          'Unauthorized disclosure is prohibited. Retain for 7 years per SACCO regulations.',
+        'ODPC Disclaimer: This statement contains personal data processed under the Kenya Data Protection Act 2019. Unauthorized disclosure is prohibited. Retain for 7 years per SACCO regulations.',
         { align: 'left', width: 495 },
       );
 
       doc.end();
     });
+  }
+
+  exportAsCsv(statement: FosaStatement | BosaStatement): string {
+    const isFosa = 'totalDisbursed' in statement;
+    const summaryRows = isFosa
+      ? [
+          ['Opening Balance', String((statement as FosaStatement).openingBalance)],
+          ['Total Disbursed', String((statement as FosaStatement).totalDisbursed)],
+          ['Total Repaid', String((statement as FosaStatement).totalRepaid)],
+          ['Closing Balance', String((statement as FosaStatement).closingBalance)],
+        ]
+      : [
+          ['Opening Balance', String((statement as BosaStatement).openingBalance)],
+          ['Total Savings', String((statement as BosaStatement).totalSavings)],
+          ['Welfare Contributions', String((statement as BosaStatement).welfareContributions)],
+          ['Closing Balance', String((statement as BosaStatement).closingBalance)],
+        ];
+
+    const rows = [
+      ['Member', statement.memberName],
+      ['Member Number', statement.memberNumber],
+      ['Period From', statement.periodFrom],
+      ['Period To', statement.periodTo],
+      ['Audit Hash', statement.auditHash],
+      [],
+      ...summaryRows,
+      [],
+      ['Date', 'Description', 'Debit', 'Credit', 'Balance', 'Reference'],
+      ...statement.transactions.map((tx) => [
+        tx.date,
+        tx.description,
+        String(tx.debit),
+        String(tx.credit),
+        String(tx.balance),
+        tx.reference,
+      ]),
+    ];
+
+    return rows.map((row) => row.map((value) => this.csvCell(value)).join(',')).join('\n');
+  }
+
+  private async ensureConsent(userId: string, options: StatementOptions): Promise<void> {
+    if (options.skipConsent) return;
+    const hasConsent = await this.consentService.hasConsent(userId, 'STATEMENT_EXPORT');
+    if (!hasConsent) {
+      throw new ForbiddenException(
+        'STATEMENT_EXPORT consent required. Please accept the consent in your profile.',
+      );
+    }
+  }
+
+  private async auditStatement(
+    tenantId: string,
+    actorId: string,
+    statementType: 'FOSA' | 'BOSA',
+    statement: FosaStatement | BosaStatement,
+    options: StatementOptions,
+  ): Promise<void> {
+    const format = options.exportFormat ?? 'VIEW';
+    await this.audit
+      .create({
+        tenantId,
+        actorId,
+        action: format === 'VIEW' ? 'STATEMENT.VIEW' : 'STATEMENT.EXPORT',
+        entityType: 'Statement',
+        entityId: statement.memberId,
+        metadata: {
+          statementType,
+          format,
+          memberNumber: statement.memberNumber,
+          periodFrom: statement.periodFrom,
+          periodTo: statement.periodTo,
+          transactionCount: statement.transactions.length,
+          auditHash: statement.auditHash,
+        },
+        ipAddress: options.ipAddress,
+      })
+      .catch((err: unknown) =>
+        this.logger.warn(
+          `Statement audit write failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+  }
+
+  private csvCell(value: unknown): string {
+    const text = value == null ? '' : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 }

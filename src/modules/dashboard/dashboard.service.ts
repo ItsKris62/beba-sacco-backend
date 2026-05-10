@@ -6,6 +6,7 @@ import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
 export interface DashboardStats {
   totalMembers: number;
   activeMembers: number;
+  pendingKyc: number;
   totalLoansCount: number;
   activeLoansCount: number;
   totalDisbursed: number;
@@ -54,7 +55,7 @@ export interface DashboardReports {
 }
 
 const CACHE_TTL_SECONDS = 15 * 60;
-const CACHE_KEY = (tenantId: string) => `DASH:STATS:${tenantId}:v1`;
+const CACHE_KEY = (tenantId: string) => `DASH:STATS:${tenantId}:v2`;
 const MEMBER_DASH_CACHE_KEY = (tenantId: string, userId: string) =>
   `DASH:MEMBER:${tenantId}:${userId}:v3`;
 const MEMBER_DASH_STALE_KEY = (tenantId: string, userId: string) =>
@@ -302,6 +303,7 @@ export class DashboardService {
     return {
       totalMembers: memberStats.total,
       activeMembers: memberStats.active,
+      pendingKyc: memberStats.pendingKyc,
       totalLoansCount,
       activeLoansCount,
       totalDisbursed,
@@ -321,12 +323,15 @@ export class DashboardService {
     };
   }
 
-  private async getMemberStats(tenantId: string): Promise<{ total: number; active: number }> {
-    const [total, active] = await Promise.all([
+  private async getMemberStats(
+    tenantId: string,
+  ): Promise<{ total: number; active: number; pendingKyc: number }> {
+    const [total, active, pendingKyc] = await Promise.all([
       this.prisma.member.count({ where: { tenantId } }),
       this.prisma.member.count({ where: { tenantId, isActive: true } }),
+      this.prisma.member.count({ where: { tenantId, kycStatus: 'PENDING_REVIEW' } }),
     ]);
-    return { total, active };
+    return { total, active, pendingKyc };
   }
 
   private async getLoanAggregates(tenantId: string) {

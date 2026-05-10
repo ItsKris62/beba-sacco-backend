@@ -87,6 +87,10 @@ export class ConsentService {
   }
 
   async hasRequiredConsents(userId: string): Promise<boolean> {
-    return this.hasConsent(userId, 'DATA_PROCESSING', '1.0');
+    const [dataProcessing, statementExport] = await Promise.all([
+      this.hasConsent(userId, 'DATA_PROCESSING', '1.0'),
+      this.hasConsent(userId, 'STATEMENT_EXPORT', '1.0'),
+    ]);
+    return dataProcessing && statementExport;
   }
 }
