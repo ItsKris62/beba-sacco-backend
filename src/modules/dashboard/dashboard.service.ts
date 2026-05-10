@@ -56,9 +56,9 @@ export interface DashboardReports {
 const CACHE_TTL_SECONDS = 15 * 60;
 const CACHE_KEY = (tenantId: string) => `DASH:STATS:${tenantId}:v1`;
 const MEMBER_DASH_CACHE_KEY = (tenantId: string, userId: string) =>
-  `DASH:MEMBER:${tenantId}:${userId}:v2`;
+  `DASH:MEMBER:${tenantId}:${userId}:v3`;
 const MEMBER_DASH_STALE_KEY = (tenantId: string, userId: string) =>
-  `DASH:MEMBER:${tenantId}:${userId}:stale:v2`;
+  `DASH:MEMBER:${tenantId}:${userId}:stale:v3`;
 
 @Injectable()
 export class DashboardService {
@@ -118,6 +118,8 @@ export class DashboardService {
       select: {
         id: true,
         memberNumber: true,
+        kycStatus: true,
+        kycRejectionReason: true,
         user: { select: { firstName: true, lastName: true, email: true } },
       },
     });
@@ -216,6 +218,8 @@ export class DashboardService {
         memberNumber: member.memberNumber,
         name: `${member.user.firstName} ${member.user.lastName}`,
         email: member.user.email,
+        kycStatus: member.kycStatus,
+        kycRejectionReason: member.kycRejectionReason,
       },
       balances: {
         fosa: Number(fosa?.balance ?? 0),

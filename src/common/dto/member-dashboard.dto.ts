@@ -12,6 +12,12 @@ export class MemberIdentityDto {
 
   @ApiProperty()
   email!: string;
+
+  @ApiProperty()
+  kycStatus!: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  kycRejectionReason?: string | null;
 }
 
 export class MemberDashboardBalancesDto {
