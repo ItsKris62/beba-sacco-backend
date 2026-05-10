@@ -293,10 +293,20 @@ export class LoanApplicationService {
 
     const guarantor = await this.prisma.member.findFirst({
       where: { id: guarantorMemberId, tenantId, isActive: true },
-      select: { id: true, user: { select: { firstName: true, lastName: true } } },
+      select: {
+        id: true,
+        kycStatus: true,
+        user: { select: { firstName: true, lastName: true, role: true, isActive: true, status: true } },
+      },
     });
     if (!guarantor) {
       return { eligible: false, reason: 'Guarantor not found or inactive' };
+    }
+    if (guarantor.user.role !== UserRole.MEMBER || !guarantor.user.isActive || guarantor.user.status !== 'APPROVED') {
+      return { eligible: false, reason: 'Guarantor must be an active approved member' };
+    }
+    if (guarantor.kycStatus !== 'APPROVED') {
+      return { eligible: false, reason: 'Guarantor KYC is not approved' };
     }
 
     // Check FOSA
@@ -731,10 +741,20 @@ export class LoanApplicationService {
 
     const guarantor = await tx.member.findFirst({
       where: { id: guarantorMemberId, tenantId, isActive: true },
-      select: { id: true },
+      select: {
+        id: true,
+        kycStatus: true,
+        user: { select: { role: true, isActive: true, status: true } },
+      },
     });
     if (!guarantor) {
       return { eligible: false, reason: 'Guarantor not found or inactive' };
+    }
+    if (guarantor.user.role !== UserRole.MEMBER || !guarantor.user.isActive || guarantor.user.status !== 'APPROVED') {
+      return { eligible: false, reason: 'Guarantor must be an active approved member' };
+    }
+    if (guarantor.kycStatus !== 'APPROVED') {
+      return { eligible: false, reason: 'Guarantor KYC is not approved' };
     }
 
     const fosaAccount = await tx.account.findFirst({
