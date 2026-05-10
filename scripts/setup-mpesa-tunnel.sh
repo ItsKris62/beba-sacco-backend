@@ -35,7 +35,10 @@ MAX_WAIT_SECS=90
 POLL_INTERVAL=3
 PATCH_B2C=true
 
-# Daraja callback path – must match your NestJS @Post() controller route
+# Daraja callback paths – must match your NestJS @Post() controller routes.
+# MPESA_CALLBACK_URL is the public API base URL; MpesaService appends
+# /mpesa/callback when it starts an STK Push.
+API_BASE_PATH="/api"
 STK_CALLBACK_PATH="/api/mpesa/callback"
 B2C_RESULT_PATH="/api/mpesa/webhooks/b2c-result"
 B2C_TIMEOUT_PATH="/api/mpesa/webhooks/b2c-timeout"
@@ -164,6 +167,7 @@ fi
 log "Tunnel established → ${PUBLIC_URL}"
 
 # ── Build callback URLs ───────────────────────────────────────────────────────
+API_BASE_URL="${PUBLIC_URL}${API_BASE_PATH}"
 STK_CALLBACK_URL="${PUBLIC_URL}${STK_CALLBACK_PATH}"
 B2C_RESULT_URL="${PUBLIC_URL}${B2C_RESULT_PATH}"
 B2C_TIMEOUT_URL="${PUBLIC_URL}${B2C_TIMEOUT_PATH}"
@@ -198,8 +202,8 @@ patch_env() {
   fi
 }
 
-# Patch primary STK/C2B callback
-patch_env "MPESA_CALLBACK_URL" "${STK_CALLBACK_URL}"
+# Patch primary STK/C2B callback base URL
+patch_env "MPESA_CALLBACK_URL" "${API_BASE_URL}"
 
 # Patch B2C URLs (present in .env — skip with --no-b2c if not needed)
 if [[ "$PATCH_B2C" == "true" ]]; then
