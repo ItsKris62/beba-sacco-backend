@@ -371,10 +371,18 @@ export class MemberPortalService {
         skip,
         take: safeLimit,
         include: {
-          loanProduct: { select: { name: true, interestType: true } },
+          loanProduct: {
+            select: {
+              name: true,
+              interestType: true,
+              minGuarantors: true,
+              guarantorCoverageRatio: true,
+            },
+          },
           guarantors: {
             select: {
               id: true,
+              memberId: true,
               status: true,
               guaranteedAmount: true,
               invitedAt: true,

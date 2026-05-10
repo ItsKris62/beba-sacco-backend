@@ -1,12 +1,13 @@
 import {
   Controller, Get, Post, Patch, Body, Param, Query, ParseUUIDPipe,
-  HttpCode, HttpStatus, Req, UseGuards, ForbiddenException, Res,
+  BadRequestException, HttpCode, HttpStatus, Req, UseGuards, ForbiddenException, Res,
 } from '@nestjs/common';
 import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader, ApiParam,
 } from '@nestjs/swagger';
-import { UserRole } from '@prisma/client';
+import { GuarantorStatus, LoanStatus, UserRole } from '@prisma/client';
+import { Decimal } from 'decimal.js';
 import { Request, Response } from 'express';
 import { MembersService } from './members.service';
 import { MemberPortalService } from './member-portal.service';
@@ -20,7 +21,7 @@ import { CurrentTenant } from '../../common/decorators/current-tenant.decorator'
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { MemberDepositDto } from '../mpesa/dto/deposit-request.dto';
-import { MemberApplyLoanDto } from '../loans/dto/member-apply-loan.dto';
+import { MemberApplyLoanDto, MemberRequestGuarantorsDto } from '../loans/dto/member-apply-loan.dto';
 import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
@@ -218,6 +219,107 @@ export class MemberPortalController {
   }
 
   // ─── M-PESA DEPOSIT ────────────────────────────────────────────────────────
+
+  @Post('loans/:id/guarantors/request')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Request guarantors for my loan',
+    description:
+      'Allows a member to nominate one or more guarantors for their own DRAFT or PENDING_GUARANTORS loan application. ' +
+      'When only guarantorIds are supplied, remaining coverage is split equally.',
+  })
+  @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiResponse({ status: 200, description: 'Guarantor requests created' })
+  @ApiResponse({ status: 400, description: 'Loan status is not eligible or no guarantors were supplied' })
+  @ApiResponse({ status: 403, description: 'Loan does not belong to authenticated member' })
+  async requestGuarantors(
+    @Param('id', ParseUUIDPipe) loanId: string,
+    @Body() dto: MemberRequestGuarantorsDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    const memberId = await this.resolveMemberId(user.id, tenant.id);
+    const loan = await this.prisma.loan.findFirst({
+      where: { id: loanId, tenantId: tenant.id, memberId },
+      select: {
+        id: true,
+        status: true,
+        principalAmount: true,
+        loanProduct: {
+          select: {
+            minGuarantors: true,
+            guarantorCoverageRatio: true,
+          },
+        },
+        guarantors: {
+          select: {
+            memberId: true,
+            status: true,
+            guaranteedAmount: true,
+          },
+        },
+      },
+    });
+    if (!loan) throw new ForbiddenException('Loan not found or does not belong to you');
+    if (loan.status !== LoanStatus.DRAFT && loan.status !== LoanStatus.PENDING_GUARANTORS) {
+      throw new BadRequestException(`Cannot request guarantors for a loan in "${loan.status}" status`);
+    }
+
+    const requestedGuarantors = dto.guarantors?.length
+      ? dto.guarantors
+      : this.buildGuarantorNominationsFromIds(dto.guarantorIds ?? [], loan);
+
+    if (requestedGuarantors.length === 0) {
+      throw new BadRequestException('At least one guarantor is required');
+    }
+
+    const activeExisting = new Set(
+      loan.guarantors
+        .filter((guarantor) => guarantor.status === GuarantorStatus.PENDING || guarantor.status === GuarantorStatus.ACCEPTED)
+        .map((guarantor) => guarantor.memberId),
+    );
+    const duplicate = requestedGuarantors.find((guarantor) => activeExisting.has(guarantor.memberId));
+    if (duplicate) {
+      throw new BadRequestException('This member has already been requested or has already accepted.');
+    }
+
+    return this.loanApp.inviteGuarantors(loanId, requestedGuarantors, tenant.id, user.id, req);
+  }
+
+  private buildGuarantorNominationsFromIds(
+    guarantorIds: string[],
+    loan: {
+      principalAmount: unknown;
+      loanProduct: { minGuarantors: number; guarantorCoverageRatio: unknown };
+      guarantors: Array<{ memberId: string; status: GuarantorStatus; guaranteedAmount: unknown }>;
+    },
+  ) {
+    const uniqueIds = Array.from(new Set(guarantorIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return [];
+
+    const principal = new Decimal(String(loan.principalAmount));
+    const coverageRatio = new Decimal(String(loan.loanProduct.guarantorCoverageRatio ?? '1'));
+    const requiredCoverage = principal.times(coverageRatio);
+    const activeCoverage = loan.guarantors
+      .filter((guarantor) => guarantor.status === GuarantorStatus.PENDING || guarantor.status === GuarantorStatus.ACCEPTED)
+      .reduce((sum, guarantor) => sum.plus(new Decimal(String(guarantor.guaranteedAmount))), new Decimal(0));
+    const remainingCoverage = Decimal.max(requiredCoverage.minus(activeCoverage), 0);
+    const fallbackShare = loan.loanProduct.minGuarantors > 0
+      ? requiredCoverage.div(loan.loanProduct.minGuarantors)
+      : principal.div(uniqueIds.length);
+    const amountToSplit = remainingCoverage.greaterThan(0)
+      ? remainingCoverage
+      : fallbackShare.times(uniqueIds.length);
+    const equalShare = amountToSplit.div(uniqueIds.length).toDecimalPlaces(4, Decimal.ROUND_DOWN);
+
+    return uniqueIds.map((memberId, index) => ({
+      memberId,
+      guaranteedAmount: index === uniqueIds.length - 1
+        ? amountToSplit.minus(equalShare.times(uniqueIds.length - 1)).toDecimalPlaces(4).toNumber()
+        : equalShare.toNumber(),
+    }));
+  }
 
   @Post('deposit/mpesa')
   @HttpCode(HttpStatus.OK)

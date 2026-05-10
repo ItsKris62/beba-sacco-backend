@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsInt, IsNumber, IsOptional, IsString, IsUUID, Min, MaxLength, IsArray, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsInt, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 /**
@@ -62,6 +62,31 @@ export class MemberApplyLoanDto {
   })
   @IsOptional()
   @IsArray()
+  @IsUUID('4', { each: true })
+  guarantorIds?: string[];
+}
+
+/**
+ * Member-owned guarantor request DTO.
+ * Used by POST /members/loans/:id/guarantors/request for existing DRAFT or
+ * PENDING_GUARANTORS applications.
+ */
+export class MemberRequestGuarantorsDto {
+  @ApiPropertyOptional({ description: 'Guarantors with explicit pledged amounts', type: [GuarantorNominationDto] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => GuarantorNominationDto)
+  guarantors?: GuarantorNominationDto[];
+
+  @ApiPropertyOptional({
+    description: 'Guarantor member IDs resolved from POST /members/guarantors/lookup. Remaining coverage is split equally.',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
   @IsUUID('4', { each: true })
   guarantorIds?: string[];
 }

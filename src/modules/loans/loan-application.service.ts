@@ -984,7 +984,7 @@ export class LoanApplicationService {
       expiresAt.setHours(expiresAt.getHours() + consentExpiryHours);
 
       // Upsert GuarantorRequest (idempotent re-invite)
-      await this.prisma.loanGuarantor.upsert({
+      const createdGuarantor = await this.prisma.loanGuarantor.upsert({
         where: { loanId_memberId: { loanId, memberId: item.memberId } },
         create: {
           tenantId,
@@ -992,10 +992,14 @@ export class LoanApplicationService {
           memberId: item.memberId,
           guaranteedAmount: new Decimal(item.guaranteedAmount).toDecimalPlaces(4).toString(),
           status: GuarantorStatus.PENDING,
+          invitedAt,
+          expiresAt,
         },
         update: {
           guaranteedAmount: new Decimal(item.guaranteedAmount).toDecimalPlaces(4).toString(),
           status: GuarantorStatus.PENDING,
+          invitedAt,
+          expiresAt,
           respondedAt: null,
         },
       });
@@ -1041,6 +1045,14 @@ export class LoanApplicationService {
           { delay: 24 * 60 * 60 * 1000, attempts: 2 },
         )
         .catch((e: unknown) => this.logger.error('Failed to enqueue guarantor reminder', e));
+
+      this.guarantorExpiryQueue
+        .add(
+          'guarantor-expiry-check',
+          { tenantId, loanId, guarantorId: createdGuarantor.id },
+          { delay: consentExpiryHours * 60 * 60 * 1000, attempts: 3, removeOnComplete: 1000, removeOnFail: false },
+        )
+        .catch((e: unknown) => this.logger.error('Failed to enqueue guarantor expiry', e));
     }
 
     // Update loan status

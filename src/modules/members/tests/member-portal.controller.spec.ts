@@ -10,6 +10,7 @@ import { MpesaService } from '../../mpesa/mpesa.service';
 import { StatementService } from '../../statements/statement.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { MemberApplyLoanDto } from '../../loans/dto/member-apply-loan.dto';
+import { DashboardService } from '../../dashboard/dashboard.service';
 
 // ─── Minimal stubs for module providers ──────────────────────────────────────
 
@@ -29,6 +30,7 @@ const mockLoansService = {
 
 const mockLoanAppService = {
   memberApply: jest.fn(),
+  inviteGuarantors: jest.fn(),
   getGuarantorStatus: jest.fn(),
   guarantorResponse: jest.fn(),
 };
@@ -37,6 +39,7 @@ const mockMpesaService = { initiateDeposit: jest.fn() };
 const mockStatementService = { getFosaStatement: jest.fn() };
 const mockMembersService = {};
 const mockPortalService = { getLoanDetail: jest.fn() };
+const mockDashboardService = { getMemberDashboard: jest.fn() };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -74,6 +77,7 @@ describe('MemberPortalController — POST /members/loans/apply', () => {
         { provide: MpesaService, useValue: mockMpesaService },
         { provide: StatementService, useValue: mockStatementService },
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: DashboardService, useValue: mockDashboardService },
       ],
     }).compile();
 
@@ -190,5 +194,37 @@ describe('MemberPortalController — POST /members/loans/apply', () => {
     await expect(
       controller.applyLoan(dto, buildUser() as any, buildTenant() as any, buildRequest()),
     ).rejects.toThrow(NotFoundException);
+  });
+
+  it('should let a member request guarantors for their own pending loan', async () => {
+    mockPrisma.member.findFirst.mockResolvedValueOnce({ id: 'member-uuid-1' });
+    mockPrisma.loan.findFirst.mockResolvedValueOnce({
+      id: 'loan-uuid-1',
+      status: 'DRAFT',
+      principalAmount: '90000',
+      loanProduct: { minGuarantors: 3, guarantorCoverageRatio: '1.0' },
+      guarantors: [],
+    });
+    mockLoanAppService.inviteGuarantors.mockResolvedValueOnce({ loanId: 'loan-uuid-1', invitedCount: 3 });
+
+    await controller.requestGuarantors(
+      'loan-uuid-1',
+      { guarantorIds: ['guarantor-uuid-1', 'guarantor-uuid-2', 'guarantor-uuid-3'] },
+      buildUser() as any,
+      buildTenant() as any,
+      buildRequest(),
+    );
+
+    expect(mockLoanAppService.inviteGuarantors).toHaveBeenCalledWith(
+      'loan-uuid-1',
+      [
+        { memberId: 'guarantor-uuid-1', guaranteedAmount: 30000 },
+        { memberId: 'guarantor-uuid-2', guaranteedAmount: 30000 },
+        { memberId: 'guarantor-uuid-3', guaranteedAmount: 30000 },
+      ],
+      'tenant-uuid-1',
+      'user-uuid-1',
+      expect.any(Object),
+    );
   });
 });
