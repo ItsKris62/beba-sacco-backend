@@ -9,6 +9,6 @@ export class MemberStkPushDto {
 
   @ApiProperty({ example: 500, description: 'Amount in KES to deposit' })
   @IsNumber()
-  @Min(1)
+  @Min(10, { message: 'Minimum deposit amount is KES 10' })
   amount!: number;
 }

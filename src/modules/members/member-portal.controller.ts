@@ -6,7 +6,7 @@ import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader, ApiParam,
 } from '@nestjs/swagger';
-import { GuarantorStatus, LoanStatus, MpesaTriggerSource, UserRole } from '@prisma/client';
+import { GuarantorStatus, LoanStatus, UserRole } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { Request, Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
@@ -14,16 +14,15 @@ import { MembersService } from './members.service';
 import { MemberPortalService } from './member-portal.service';
 import { LoansService } from '../loans/loans.service';
 import { LoanApplicationService } from '../loans/loan-application.service';
-import { MpesaService } from '../mpesa/mpesa.service';
 import { StatementService } from '../statements/statement.service';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
-import { MemberDepositDto } from '../mpesa/dto/deposit-request.dto';
 import { MemberApplyLoanDto, MemberRequestGuarantorsDto } from '../loans/dto/member-apply-loan.dto';
 import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
+import { MemberStkPushDto } from './dto/member-stk-push.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
@@ -48,7 +47,6 @@ export class MemberPortalController {
     private readonly portal: MemberPortalService,
     private readonly loans: LoansService,
     private readonly loanApp: LoanApplicationService,
-    private readonly mpesa: MpesaService,
     private readonly statements: StatementService,
     private readonly prisma: PrismaService,
     private readonly dashboardService: DashboardService,
@@ -341,15 +339,21 @@ export class MemberPortalController {
   })
   @ApiResponse({ status: 200, description: 'STK Push initiated' })
   async depositMpesa(
-    @Body() dto: MemberDepositDto,
+    @Body() dto: MemberStkPushDto,
     @CurrentUser() user: AuthenticatedUser,
     @CurrentTenant() tenant: Tenant,
     @Req() req: Request,
   ) {
-    await this.resolveMemberId(user.id, tenant.id);
     const idempotencyKey =
       (req.headers['x-idempotency-key'] as string | undefined) ??
       (req.headers['idempotency-key'] as string | undefined);
-    return this.mpesa.initiateDeposit(dto, tenant.id, user.id, user.id, MpesaTriggerSource.MEMBER, idempotencyKey);
+    return this.portal.initiateDeposit(
+      user.id,
+      dto.phone,
+      dto.amount,
+      tenant.id,
+      req.ip,
+      idempotencyKey,
+    );
   }
 }

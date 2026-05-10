@@ -285,6 +285,7 @@ export class MemberPortalService {
     amount: number,
     tenantId: string,
     ipAddress?: string,
+    idempotencyKey?: string,
   ) {
     const member = await this.resolveMember(userId, tenantId);
 
@@ -316,6 +317,7 @@ export class MemberPortalService {
       userId,
       userId,
       MpesaTriggerSource.MEMBER,
+      idempotencyKey,
     );
   }
 
