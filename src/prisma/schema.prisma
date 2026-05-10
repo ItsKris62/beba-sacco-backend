@@ -56,7 +56,6 @@ enum LoanStatus {
   DRAFT
   PENDING_GUARANTORS // Waiting for guarantors to accept
   PENDING_REVIEW // Guarantor criteria met; awaiting manager review
-  UNDER_REVIEW // Guarantors confirmed; awaiting manager review
   PENDING_APPROVAL // Legacy / direct-approval path (no guarantors required)
   APPROVED
   REJECTED
@@ -488,6 +487,9 @@ model Member {
   kycReviewedAt       DateTime?
   kycReviewedByUserId String? // userId of staff who reviewed
   kycRejectionReason  String?   @db.Text
+  kycDocumentUrls     Json?
+  kycChecklist        Json?
+  kycReviewNotes      String?   @db.Text
 
   // Phase 4 – privacy & consent (Kenya Data Protection Act)
   consentDataSharing Boolean   @default(false)

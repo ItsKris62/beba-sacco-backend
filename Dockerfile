@@ -56,7 +56,8 @@ COPY --from=builder --chown=nestjs:nodejs /app/src/prisma ./src/prisma
 
 # Runtime environment defaults (override via docker compose / Kubernetes secrets)
 ENV NODE_ENV=production \
-    PORT=3000
+    PORT=3000 \
+    ENABLE_PRODUCT_RULES=true
 
 EXPOSE 3000
 

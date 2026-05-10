@@ -120,7 +120,7 @@ describe('LoanAdminController — PATCH /admin/loans/:id/status', () => {
 
   it.each([
     AdminLoanStatus.PENDING_GUARANTORS,
-    AdminLoanStatus.UNDER_REVIEW,
+    AdminLoanStatus.PENDING_REVIEW,
     AdminLoanStatus.APPROVED,
     AdminLoanStatus.REJECTED,
   ])('routes %s to loanApp.updateStatus() — NOT loans.disburse()', async (status) => {

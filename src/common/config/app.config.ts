@@ -86,6 +86,9 @@ export default registerAs('app', () => ({
     ttl: parseInt(process.env.RATE_LIMIT_TTL || '60', 10),
     limit: parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
   },
+  productRules: {
+    enabled: process.env.ENABLE_PRODUCT_RULES === 'true',
+  },
 
   // Multi-Tenancy
   defaultTenantId: process.env.DEFAULT_TENANT_ID,

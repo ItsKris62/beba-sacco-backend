@@ -138,6 +138,7 @@ services:
       PORT: 3000
       API_PREFIX: ${API_PREFIX:-api}
       APP_NAME: ${APP_NAME:-Beba SACCO Backend}
+      ENABLE_PRODUCT_RULES: "true"
 
       # Database – use local postgres in Docker; override with Neon URL externally
       DATABASE_URL: postgresql://${POSTGRES_USER:-beba}:${POSTGRES_PASSWORD:-beba_dev_secret}@postgres:5432/${POSTGRES_DB:-bebadb}?schema=public

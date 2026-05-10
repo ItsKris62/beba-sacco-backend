@@ -4,7 +4,6 @@ export const LOAN_TRANSITIONS: Record<LoanStatus, readonly LoanStatus[]> = {
   DRAFT: [LoanStatus.PENDING_GUARANTORS, LoanStatus.PENDING_APPROVAL, LoanStatus.REJECTED],
   PENDING_GUARANTORS: [LoanStatus.PENDING_REVIEW, LoanStatus.REJECTED_GUARANTOR_DECLINE, LoanStatus.REJECTED],
   PENDING_REVIEW: [LoanStatus.APPROVED, LoanStatus.REJECTED],
-  UNDER_REVIEW: [LoanStatus.APPROVED, LoanStatus.REJECTED],
   PENDING_APPROVAL: [LoanStatus.APPROVED, LoanStatus.REJECTED],
   APPROVED: [LoanStatus.DISBURSED, LoanStatus.ACTIVE],
   DISBURSED: [LoanStatus.ACTIVE],

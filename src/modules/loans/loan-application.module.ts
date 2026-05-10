@@ -14,6 +14,8 @@ import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { ProductRuleService } from './product-rule.service';
+import { LoanStateTransitionGuard } from './guards/loan-state-transition.guard';
 
 /**
  * Loan Application & LoanGuarantor Workflow Module (MVP)
@@ -49,10 +51,12 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     GuarantorResponseService,
     GuarantorValidationService,
     LoanRecoveryService,
+    ProductRuleService,
+    LoanStateTransitionGuard,
     PrismaService,
     RedisService,
     IdempotencyService,
   ],
-  exports: [LoanApplicationService, GuarantorResponseService, GuarantorValidationService, LoanRecoveryService],
+  exports: [LoanApplicationService, GuarantorResponseService, GuarantorValidationService, LoanRecoveryService, ProductRuleService],
 })
 export class LoanApplicationModule {}

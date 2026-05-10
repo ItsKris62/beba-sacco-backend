@@ -6,9 +6,10 @@ import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader, ApiParam,
 } from '@nestjs/swagger';
-import { GuarantorStatus, LoanStatus, UserRole } from '@prisma/client';
+import { GuarantorStatus, LoanStatus, MpesaTriggerSource, UserRole } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { Request, Response } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { MembersService } from './members.service';
 import { MemberPortalService } from './member-portal.service';
 import { LoansService } from '../loans/loans.service';
@@ -117,6 +118,7 @@ export class MemberPortalController {
   // ─── LOAN SELF-APPLICATION ─────────────────────────────────────────────────
 
   @Post('loans/apply')
+  @Throttle({ global: { limit: 10, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Apply for a loan (member self-service)',
@@ -249,6 +251,7 @@ export class MemberPortalController {
         loanProduct: {
           select: {
             minGuarantors: true,
+            maxGuarantors: true,
             guarantorCoverageRatio: true,
           },
         },
@@ -272,6 +275,15 @@ export class MemberPortalController {
 
     if (requestedGuarantors.length === 0) {
       throw new BadRequestException('At least one guarantor is required');
+    }
+
+    const activeCount = loan.guarantors.filter(
+      (guarantor) => guarantor.status === GuarantorStatus.PENDING || guarantor.status === GuarantorStatus.ACCEPTED,
+    ).length;
+    if (loan.loanProduct.maxGuarantors > 0 && activeCount + requestedGuarantors.length > loan.loanProduct.maxGuarantors) {
+      throw new BadRequestException(
+        `This product allows at most ${loan.loanProduct.maxGuarantors} guarantor(s).`,
+      );
     }
 
     const activeExisting = new Set(
@@ -332,8 +344,12 @@ export class MemberPortalController {
     @Body() dto: MemberDepositDto,
     @CurrentUser() user: AuthenticatedUser,
     @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
   ) {
-    const memberId = await this.resolveMemberId(user.id, tenant.id);
-    return this.mpesa.initiateDeposit(dto, tenant.id, user.id, user.id);
+    await this.resolveMemberId(user.id, tenant.id);
+    const idempotencyKey =
+      (req.headers['x-idempotency-key'] as string | undefined) ??
+      (req.headers['idempotency-key'] as string | undefined);
+    return this.mpesa.initiateDeposit(dto, tenant.id, user.id, user.id, MpesaTriggerSource.MEMBER, idempotencyKey);
   }
 }

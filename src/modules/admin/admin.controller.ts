@@ -87,7 +87,9 @@ export class AdminController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Approve or reject a member KYC submission',
+    deprecated: true,
     description:
+      'Deprecated: use PATCH /admin/members/:id/kyc with verified, documentUrls, notes, and checklist. ' +
       'APPROVE: atomically sets kycStatus = APPROVED and creates FOSA + BOSA accounts. ' +
       'REJECT: sets kycStatus = REJECTED and stores the rejection reason. ' +
       'Both actions send an email notification and audit log.',
@@ -116,7 +118,9 @@ export class AdminController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Update member KYC information',
-    description: 'Updates national ID, KRA PIN, phone, address, employer, and date of birth. Audit logged.',
+    description:
+      'Authoritative existing-member KYC endpoint. Updates identity fields and, when verified is supplied, ' +
+      'approves or rejects KYC using documentUrls, notes, and a boolean checklist. Approval creates missing FOSA/BOSA accounts.',
   })
   @ApiResponse({ status: 200, description: 'KYC updated' })
   @ApiResponse({ status: 404, description: 'Member not found' })

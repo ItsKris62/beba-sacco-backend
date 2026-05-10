@@ -30,8 +30,8 @@ import { IdempotencyService } from '../../common/services/idempotency.service';
 import { MemberApplyLoanDto, GuarantorNominationDto } from './dto/member-apply-loan.dto';
 import { GuarantorConsentResponseDto, GuarantorConsentAction } from './dto/guarantor-consent-response.dto';
 import { AdminLoanStatus } from './dto/update-loan-status.dto';
-import { ENABLE_PRODUCT_RULES_ENGINE } from '../../config/feature-flags';
 import { GuarantorValidationService } from './guarantor-validation.service';
+import { ProductRuleService } from './product-rule.service';
 import {
   QUEUE_NAMES,
   GuarantorExpiryJobPayload,
@@ -116,6 +116,7 @@ export class LoanApplicationService {
     private readonly redis: RedisService,
     private readonly idempotency: IdempotencyService,
     private readonly guarantorValidation: GuarantorValidationService,
+    private readonly productRules: ProductRuleService,
     @InjectQueue(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER)
     private readonly guarantorReminderQueue: Queue<GuarantorReminderJobPayload>,
     @InjectQueue(QUEUE_NAMES.LOAN_GUARANTOR_EXPIRY)
@@ -483,31 +484,13 @@ export class LoanApplicationService {
           throw new BadRequestException('No active FOSA or BOSA account found');
         }
 
-        const rules = this.resolveProductRules(product, fosaBalance, bosaBalance);
-        if (rules.eligibleSavings.equals(0)) {
-          throw new BadRequestException(
-            `This product requires ${rules.requiredAccountLabel} savings, but none are available.`,
-          );
-        }
-
-        if (guarantors.length < rules.minGuarantors) {
-          throw new BadRequestException(
-            `${product.name} requires minGuarantors=${rules.minGuarantors}; received ${guarantors.length}.`,
-          );
-        }
-        if (rules.maxGuarantors > 0 && guarantors.length > rules.maxGuarantors) {
-          throw new BadRequestException(
-            `${product.name} allows at most ${rules.maxGuarantors} guarantor(s); received ${guarantors.length}.`,
-          );
-        }
-
-        const maxLoanLimit = rules.eligibleSavings.times(rules.savingsMultiplier);
-        if (principal.greaterThan(maxLoanLimit)) {
-          throw new BadRequestException(
-            `Loan amount exceeds your maximum eligible limit of KES ${maxLoanLimit.toFixed(2)} ` +
-              `(${rules.savingsMultiplier.toFixed(2)}x ${rules.requiredAccountLabel} savings of KES ${rules.eligibleSavings.toFixed(2)})`,
-          );
-        }
+        const rules = this.productRules.assertLoanApplicationRules({
+          product,
+          principal,
+          guarantorCount: guarantors.length,
+          fosaBalance,
+          bosaBalance,
+        });
 
         const requiresGuarantors = rules.minGuarantors > 0 || guarantors.length > 0;
         const guarantorAccountType = this.guarantorValidation.resolveAccountType(product);
@@ -733,49 +716,6 @@ export class LoanApplicationService {
       }, new Decimal(0));
   }
 
-  private resolveProductRules(
-    product: {
-      requiredAccountType: AccountType | null;
-      savingsMultiplier: { toString(): string } | null;
-      minGuarantors: number;
-      maxGuarantors: number;
-    },
-    fosaBalance: Decimal,
-    bosaBalance: Decimal,
-  ): {
-    eligibleSavings: Decimal;
-    savingsMultiplier: Decimal;
-    requiredAccountLabel: string;
-    minGuarantors: number;
-    maxGuarantors: number;
-  } {
-    if (!ENABLE_PRODUCT_RULES_ENGINE) {
-      return {
-        eligibleSavings: fosaBalance.plus(bosaBalance),
-        savingsMultiplier: new Decimal(3),
-        requiredAccountLabel: 'combined FOSA+BOSA',
-        minGuarantors: 0,
-        maxGuarantors: Number.MAX_SAFE_INTEGER,
-      };
-    }
-
-    const requiredAccountType = product.requiredAccountType;
-    const eligibleSavings =
-      requiredAccountType === AccountType.BOSA
-        ? bosaBalance
-        : requiredAccountType === AccountType.FOSA
-          ? fosaBalance
-          : fosaBalance.plus(bosaBalance);
-
-    return {
-      eligibleSavings,
-      savingsMultiplier: new Decimal(product.savingsMultiplier?.toString() ?? '3'),
-      requiredAccountLabel: requiredAccountType ?? 'combined FOSA+BOSA',
-      minGuarantors: product.minGuarantors,
-      maxGuarantors: product.maxGuarantors,
-    };
-  }
-
   private async validateGuarantorEligibilityInTransaction(
     tx: Prisma.TransactionClient,
     guarantorMemberId: string,
@@ -938,6 +878,7 @@ export class LoanApplicationService {
         loanNumber: true,
         memberId: true,
         principalAmount: true,
+        loanProduct: { select: { requiredAccountType: true, guarantorCoverageRatio: true, maxGuarantors: true } },
         member: { select: { user: { select: { firstName: true, lastName: true } } } },
       },
     });
@@ -947,10 +888,22 @@ export class LoanApplicationService {
     }
 
     const principal = new Decimal(loan.principalAmount.toString());
-    // TODO: Replace with TenantGuaranteeConfig after schema migration
-    const minCoverageRatio = new Decimal('1.00');
+    const minCoverageRatio = new Decimal(loan.loanProduct.guarantorCoverageRatio?.toString() ?? '1.00');
     const consentExpiryHours = 72;
     const minCoverageRequired = principal.times(minCoverageRatio);
+    const existingActiveGuarantors = await this.prisma.loanGuarantor.count({
+      where: {
+        tenantId,
+        loanId,
+        status: { in: [GuarantorStatus.PENDING, GuarantorStatus.ACCEPTED] },
+      },
+    });
+    if (loan.loanProduct.maxGuarantors > 0 && existingActiveGuarantors + guarantors.length > loan.loanProduct.maxGuarantors) {
+      throw new BadRequestException(
+        `This product allows at most ${loan.loanProduct.maxGuarantors} guarantor(s).`,
+      );
+    }
+    const accountType = this.guarantorValidation.resolveAccountType(loan.loanProduct);
 
     const results: Array<{
       memberId: string;
@@ -966,6 +919,7 @@ export class LoanApplicationService {
         tenantId,
         new Decimal(item.guaranteedAmount),
         loan.memberId,
+        accountType,
       );
 
       if (!eligibility.eligible) {
@@ -1547,9 +1501,8 @@ export class LoanApplicationService {
     // Validate state transitions (workflow-only — no financial operations)
     const validTransitions: Record<string, string[]> = {
       [LoanStatus.DRAFT]: [LoanStatus.PENDING_GUARANTORS, LoanStatus.REJECTED],
-      [LoanStatus.PENDING_GUARANTORS]: [LoanStatus.PENDING_REVIEW, LoanStatus.UNDER_REVIEW, LoanStatus.REJECTED, LoanStatus.REJECTED_GUARANTOR_DECLINE],
+      [LoanStatus.PENDING_GUARANTORS]: [LoanStatus.PENDING_REVIEW, LoanStatus.REJECTED, LoanStatus.REJECTED_GUARANTOR_DECLINE],
       [LoanStatus.PENDING_REVIEW]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
-      [LoanStatus.UNDER_REVIEW]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
       [LoanStatus.PENDING_APPROVAL]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
       // APPROVED → DISBURSED is intentionally absent: handled by LoansService.disburse()
     };
@@ -1657,7 +1610,7 @@ export class LoanApplicationService {
         memberId,
         tenantId,
         status: GuarantorStatus.ACCEPTED,
-        loan: { status: { in: [LoanStatus.ACTIVE, LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.PENDING_GUARANTORS, LoanStatus.PENDING_REVIEW, LoanStatus.UNDER_REVIEW] } },
+        loan: { status: { in: [LoanStatus.ACTIVE, LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.PENDING_GUARANTORS, LoanStatus.PENDING_REVIEW] } },
       },
       include: {
         loan: {

@@ -208,7 +208,7 @@ describe('LoanApplicationService', () => {
     });
 
     it('should require reason for rejection', async () => {
-      prisma.loan.findFirst.mockResolvedValue({ id: 'l1', status: LoanStatus.UNDER_REVIEW, loanNumber: 'LN-1', memberId: 'm1' } as any);
+      prisma.loan.findFirst.mockResolvedValue({ id: 'l1', status: LoanStatus.PENDING_REVIEW, loanNumber: 'LN-1', memberId: 'm1' } as any);
 
       await expect(
         service.updateStatus('l1', { status: 'REJECTED' as any }, 't1', { id: 'u1', role: UserRole.MANAGER, tenantId: 't1' } as any, mockReq),

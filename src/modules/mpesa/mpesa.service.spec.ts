@@ -2,6 +2,7 @@ import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MpesaService } from './mpesa.service';
 import { RedisService } from '../../common/services/redis.service';
+import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MpesaTriggerSource } from '@prisma/client';
@@ -46,6 +47,11 @@ const mockDaraja = {
 const mockCallbackQueue = { add: jest.fn().mockResolvedValue({ id: 'job-1' }) };
 const mockDisbursementQueue = { add: jest.fn() };
 const mockDlqQueue = { add: jest.fn() };
+const mockIdempotency = {
+  checkAndReserve: jest.fn().mockResolvedValue({ status: 'RESERVED' }),
+  complete: jest.fn().mockResolvedValue(undefined),
+  release: jest.fn().mockResolvedValue(undefined),
+} as unknown as IdempotencyService;
 
 function makeRedis(incrResult: number): RedisService {
   return {
@@ -64,6 +70,7 @@ function makeService(incrResult = 1): MpesaService {
     mockConfig,
     mockPrisma,
     makeRedis(incrResult),
+    mockIdempotency,
     mockDaraja,
     mockCallbackQueue as never,
     mockDisbursementQueue as never,
@@ -91,6 +98,9 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       MerchantRequestID: 'mr-001',
       CustomerMessage: 'Success',
     });
+    (mockIdempotency.checkAndReserve as jest.Mock).mockResolvedValue({ status: 'RESERVED' });
+    (mockIdempotency.complete as jest.Mock).mockResolvedValue(undefined);
+    (mockIdempotency.release as jest.Mock).mockResolvedValue(undefined);
   });
 
   // ── [M-6] Math.round not Math.ceil ──────────────────────────────────────
@@ -98,7 +108,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
   it('[M-6] rounds fractional amounts (x.5 rounds up, not always ceil)', async () => {
     const service = makeService(1);
     const dto = { ...BASE_DTO, amount: 100.5 };
-    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER);
+    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
 
     const stkCall = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
     expect(stkCall.amount).toBe(101); // Math.round(100.5) = 101
@@ -107,7 +117,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
   it('[M-6] rounds 100.4 down to 100, not up to 101 (Math.ceil would give 101)', async () => {
     const service = makeService(1);
     const dto = { ...BASE_DTO, amount: 100.4 };
-    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER);
+    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
 
     const stkCall = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
     // Math.ceil(100.4) = 101 (WRONG — overcharges member)
@@ -117,7 +127,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
 
   it('[M-6] passes integer amounts through unchanged', async () => {
     const service = makeService(1);
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER);
+    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
 
     const stkCall = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
     expect(stkCall.amount).toBe(1000);
@@ -131,13 +141,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       mockConfig,
       mockPrisma,
       redis,
+      mockIdempotency,
       mockDaraja,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
       mockDlqQueue as never,
     );
 
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER);
+    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
 
     expect(redis.incrWithExpireAt).toHaveBeenCalledTimes(1);
     expect(redis.incr).not.toHaveBeenCalled();
@@ -150,6 +161,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       mockConfig,
       mockPrisma,
       redis,
+      mockIdempotency,
       mockDaraja,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
@@ -157,7 +169,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
     );
 
     const before = Date.now();
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER);
+    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
     const after = Date.now();
 
     const [, expireAtMs] = (redis.incrWithExpireAt as jest.Mock).mock.calls[0];
@@ -173,7 +185,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
     const service = makeService(4); // maxPerDay = 3, currentCount = 4
 
     await expect(
-      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER),
+      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1'),
     ).rejects.toThrow(BadRequestException);
   });
 
@@ -181,7 +193,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
     const service = makeService(3); // count === limit → allowed
 
     await expect(
-      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER),
+      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1'),
     ).resolves.toBeDefined();
   });
 });

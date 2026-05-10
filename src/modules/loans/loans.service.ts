@@ -34,7 +34,7 @@ import { DisbursementGateService } from '../../loans/disbursement-gate.service';
  * All monetary arithmetic uses Decimal — never native number.
  *
  * Loan lifecycle (guarantor path):
- *   DRAFT → PENDING_GUARANTORS → UNDER_REVIEW → APPROVED → ACTIVE → FULLY_PAID | DEFAULTED
+ *   DRAFT → PENDING_GUARANTORS → PENDING_REVIEW → APPROVED → ACTIVE → FULLY_PAID | DEFAULTED
  * Loan lifecycle (direct-approval path, no guarantors):
  *   DRAFT → PENDING_APPROVAL → APPROVED → ACTIVE → FULLY_PAID | DEFAULTED
  * Either path can transition to REJECTED before APPROVED.
@@ -364,7 +364,7 @@ export class LoansService {
    * Approve a loan application.
    *
    * Approvable states:
-   *   UNDER_REVIEW     – normal guarantor workflow path
+   *   PENDING_REVIEW     – normal guarantor workflow path
    *   PENDING_APPROVAL – legacy / direct-approval path (no guarantors required)
    *
    * An optional review comment is stored in `notes` and surfaced in audit metadata.
@@ -382,7 +382,6 @@ export class LoansService {
 
     const approvableStatuses: LoanStatus[] = [
       LoanStatus.PENDING_REVIEW,
-      LoanStatus.UNDER_REVIEW,
       LoanStatus.PENDING_APPROVAL,
     ];
     if (!approvableStatuses.includes(loan.status)) {
@@ -682,6 +681,7 @@ export class LoansService {
       where: { id, tenantId },
       select: {
         id: true, status: true, loanNumber: true, memberId: true,
+        loanProduct: { select: { requiredAccountType: true } },
         member: { select: { user: { select: { email: true, firstName: true } } } },
       },
     });
@@ -690,7 +690,7 @@ export class LoansService {
     const rejectableStatuses: LoanStatus[] = [
       LoanStatus.PENDING_APPROVAL,
       LoanStatus.PENDING_GUARANTORS,
-      LoanStatus.UNDER_REVIEW,
+      LoanStatus.PENDING_REVIEW,
     ];
     if (!rejectableStatuses.includes(loan.status)) {
       throw new BadRequestException(
@@ -698,20 +698,104 @@ export class LoansService {
       );
     }
 
-    const updated = await this.prisma.loan.update({
-      where: { id },
-      data: { status: LoanStatus.REJECTED, notes: dto.reason },
-    });
+    const txClient = this.prisma.direct ?? this.prisma;
+    const updated = await txClient.$transaction(async (tx) => {
+      const lockedLoans = await tx.$queryRaw<Array<{ id: string; status: LoanStatus }>>`
+        SELECT id, status
+        FROM "Loan"
+        WHERE id = ${id} AND "tenantId" = ${tenantId}
+        FOR UPDATE
+      `;
+      const lockedLoan = lockedLoans[0];
+      if (!lockedLoan) throw new NotFoundException('Loan not found');
+      if (!rejectableStatuses.includes(lockedLoan.status)) {
+        throw new BadRequestException(`Cannot reject a loan in "${lockedLoan.status}" status`);
+      }
 
-    await this.audit.create({
-      tenantId,
-      userId: rejectedBy,
-      action: 'LOAN.REJECT',
-      resource: 'Loan',
-      resourceId: id,
-      metadata: { loanNumber: loan.loanNumber, reason: dto.reason },
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+      const acceptedGuarantors = await tx.loanGuarantor.findMany({
+        where: { tenantId, loanId: id, status: GuarantorStatus.ACCEPTED, holdReleasedAt: null },
+        select: { id: true, memberId: true, guaranteedAmount: true },
+      });
+      const accountType = loan.loanProduct.requiredAccountType ?? AccountType.FOSA;
+      const releasedHolds: Array<{ guarantorId: string; memberId: string; releasedAmount: string }> = [];
+
+      for (const guarantor of acceptedGuarantors) {
+        const accounts = await tx.$queryRaw<Array<{ id: string; lockedBalance: string }>>`
+          SELECT id, "lockedBalance"
+          FROM "Account"
+          WHERE "tenantId" = ${tenantId}
+            AND "memberId" = ${guarantor.memberId}
+            AND "accountType"::text = ${accountType}
+            AND "isActive" = true
+          FOR UPDATE
+        `;
+        const account = accounts[0];
+        if (!account) continue;
+
+        const releaseAmount = Decimal.min(
+          new Decimal(account.lockedBalance.toString()),
+          new Decimal(guarantor.guaranteedAmount.toString()),
+        ).toDecimalPlaces(4);
+        if (releaseAmount.lessThanOrEqualTo(0)) continue;
+
+        await tx.account.updateMany({
+          where: { id: account.id, tenantId, isActive: true },
+          data: { lockedBalance: { decrement: releaseAmount.toString() }, version: { increment: 1 } },
+        });
+        await tx.loanGuarantor.updateMany({
+          where: { id: guarantor.id, tenantId },
+          data: { holdReleasedAt: new Date(), notes: dto.reason },
+        });
+        releasedHolds.push({
+          guarantorId: guarantor.id,
+          memberId: guarantor.memberId,
+          releasedAmount: releaseAmount.toString(),
+        });
+      }
+
+      const rejectedLoan = await tx.loan.update({
+        where: { id },
+        data: { status: LoanStatus.REJECTED, notes: dto.reason },
+      });
+
+      const timestamp = new Date();
+      const prev = await tx.auditLog.findFirst({
+        where: { tenantId },
+        orderBy: { timestamp: 'desc' },
+        select: { entryHash: true },
+      });
+      const payload = {
+        loanNumber: loan.loanNumber,
+        reason: dto.reason,
+        releasedHolds,
+        oldStatus: lockedLoan.status,
+        newStatus: LoanStatus.REJECTED,
+      };
+      const prevHash = prev?.entryHash ?? null;
+      const entryHash = createHash('sha256')
+        .update(JSON.stringify({ tenantId, actorId: rejectedBy, action: 'LOAN.REJECT', entityType: 'Loan', entityId: id, payload, prevHash, timestamp: timestamp.toISOString() }), 'utf8')
+        .digest('hex');
+
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          actorId: rejectedBy,
+          action: 'LOAN.REJECT',
+          entityType: 'Loan',
+          entityId: id,
+          oldValue: { status: lockedLoan.status },
+          newValue: { status: LoanStatus.REJECTED },
+          metadata: { ...payload, ipAddress },
+          payload,
+          ipAddress,
+          prevHash,
+          entryHash,
+          timestamp,
+        },
+      });
+
+      return rejectedLoan;
+    }, { isolationLevel: 'Serializable' as const });
 
     // Notify member of rejection
     const rejectMemberUser = loan.member?.user;
@@ -911,7 +995,7 @@ export class LoansService {
 
   /**
    * A guarantor member responds to their guarantee request.
-   * After all guarantors have responded (or threshold met), loan moves to UNDER_REVIEW.
+   * After all guarantors have responded (or threshold met), loan moves to PENDING_REVIEW.
    */
   async respondAsGuarantor(
     loanId: string,
@@ -950,14 +1034,14 @@ export class LoansService {
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-    // Check if minimum coverage is now met to auto-advance to UNDER_REVIEW
+    // Check if minimum coverage is now met to auto-advance to PENDING_REVIEW
     await this.checkAndAdvanceLoanStatus(loanId, tenantId);
 
     return { loanId, memberId, status: newStatus };
   }
 
   /**
-   * If accepted guarantors cover 100% of principal, advance loan to UNDER_REVIEW.
+   * If accepted guarantors cover 100% of principal, advance loan to PENDING_REVIEW.
    */
   private async checkAndAdvanceLoanStatus(loanId: string, tenantId: string) {
     const loan = await this.prisma.loan.findFirst({
@@ -982,9 +1066,9 @@ export class LoansService {
     if (totalAccepted.greaterThanOrEqualTo(minCoverage)) {
       await this.prisma.loan.update({
         where: { id: loanId },
-        data: { status: LoanStatus.UNDER_REVIEW },
+        data: { status: LoanStatus.PENDING_REVIEW },
       });
-      this.logger.log(`Loan ${loanId} advanced to UNDER_REVIEW — coverage ${totalAccepted.toNumber()} ≥ ${minCoverage.toNumber()}`);
+      this.logger.log(`Loan ${loanId} advanced to PENDING_REVIEW — coverage ${totalAccepted.toNumber()} ≥ ${minCoverage.toNumber()}`);
     }
   }
 

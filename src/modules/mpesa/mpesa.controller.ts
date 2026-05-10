@@ -21,7 +21,6 @@ import {
   ApiHeader,
   ApiParam,
 } from '@nestjs/swagger';
-import { SkipThrottle } from '@nestjs/throttler';
 import { RawBodyRequest } from '@nestjs/common';
 import { Request } from 'express';
 import * as crypto from 'crypto';
@@ -121,14 +120,16 @@ export class MpesaController implements OnModuleInit {
   @ApiResponse({ status: 400, description: 'Rate limit exceeded, invalid phone, or account not found' })
   @ApiResponse({ status: 401, description: 'Unauthenticated' })
   @ApiResponse({ status: 403, description: 'Insufficient role' })
+  @ApiHeader({ name: 'X-Idempotency-Key', required: true, description: 'Required to prevent duplicate STK prompts on retry' })
   async memberDeposit(
     @Body() dto: MemberDepositDto,
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
+    @Headers('x-idempotency-key') idempotencyKey?: string,
   ): Promise<DepositInitiatedResponse> {
     const triggerSource =
       actor.role === UserRole.MEMBER ? MpesaTriggerSource.MEMBER : MpesaTriggerSource.OFFICER;
-    return this.mpesaService.initiateDeposit(dto, tenant.id, actor.id, actor.id, triggerSource);
+    return this.mpesaService.initiateDeposit(dto, tenant.id, actor.id, actor.id, triggerSource, idempotencyKey);
   }
 
   // ─── Admin: queue B2C disbursement ──────────────────────────────────────
@@ -205,7 +206,6 @@ export class MpesaController implements OnModuleInit {
    * Real processing happens in MpesaCallbackProcessor via BullMQ.
    */
   @Public()
-  @SkipThrottle()
   @Post('callback')
   @UseGuards(MpesaIpGuard)
   @HttpCode(HttpStatus.OK)

@@ -87,7 +87,7 @@ export class AdminService {
       this.prisma.loan.count({
         where: {
           tenantId,
-          status: { in: [LoanStatus.PENDING_APPROVAL, LoanStatus.PENDING_GUARANTORS, LoanStatus.UNDER_REVIEW] },
+          status: { in: [LoanStatus.PENDING_APPROVAL, LoanStatus.PENDING_GUARANTORS, LoanStatus.PENDING_REVIEW] },
         },
       }),
       this.prisma.loan.count({ where: { tenantId, status: LoanStatus.DEFAULTED } }),
@@ -420,19 +420,77 @@ export class AdminService {
       select: { nationalId: true, kraPin: true, employer: true, occupation: true, dateOfBirth: true },
     });
 
-    // Update member fields
-    const updatedMember = await this.prisma.member.update({
-      where: { id: memberId },
-      data: {
-        ...(dto.nationalId !== undefined && { nationalId: dto.nationalId }),
-        ...(dto.kraPin !== undefined && { kraPin: dto.kraPin }),
-        ...(dto.employer !== undefined && { employer: dto.employer }),
-        ...(dto.occupation !== undefined && { occupation: dto.occupation }),
-        ...(dto.dateOfBirth !== undefined && { dateOfBirth: new Date(dto.dateOfBirth) }),
-      },
-      include: {
-        user: { select: { firstName: true, lastName: true, email: true } },
-      },
+    if (dto.verified === true) {
+      if (!dto.documentUrls?.length) {
+        throw new BadRequestException('At least one KYC document URL is required for approval');
+      }
+      this.assertKycChecklistComplete(dto.checklist);
+    }
+    if (dto.verified === false && !dto.notes?.trim()) {
+      throw new BadRequestException('Reviewer notes are required when rejecting KYC');
+    }
+
+    const updatedMember = await this.prisma.$transaction(async (tx) => {
+      const reviewedAt = dto.verified === undefined ? undefined : new Date();
+      const memberUpdate = await tx.member.update({
+        where: { id: memberId },
+        data: {
+          ...(dto.nationalId !== undefined && { nationalId: dto.nationalId }),
+          ...(dto.kraPin !== undefined && { kraPin: dto.kraPin }),
+          ...(dto.employer !== undefined && { employer: dto.employer }),
+          ...(dto.occupation !== undefined && { occupation: dto.occupation }),
+          ...(dto.dateOfBirth !== undefined && { dateOfBirth: new Date(dto.dateOfBirth) }),
+          ...(dto.documentUrls !== undefined && { kycDocumentUrls: dto.documentUrls }),
+          ...(dto.checklist !== undefined && { kycChecklist: dto.checklist }),
+          ...(dto.notes !== undefined && { kycReviewNotes: dto.notes.trim() }),
+          ...(dto.verified === true && {
+            kycStatus: KycStatus.APPROVED,
+            kycReviewedAt: reviewedAt,
+            kycReviewedByUserId: updatedBy,
+            kycRejectionReason: null,
+          }),
+          ...(dto.verified === false && {
+            kycStatus: KycStatus.REJECTED,
+            kycReviewedAt: reviewedAt,
+            kycReviewedByUserId: updatedBy,
+            kycRejectionReason: dto.notes?.trim(),
+          }),
+        },
+        include: {
+          user: { select: { firstName: true, lastName: true, email: true } },
+        },
+      });
+
+      if (dto.verified === true) {
+        const existingAccounts = await tx.account.findMany({
+          where: { tenantId, memberId, accountType: { in: [AccountType.FOSA, AccountType.BOSA] } },
+          select: { accountType: true },
+        });
+        const existingTypes = new Set(existingAccounts.map((account) => account.accountType));
+        const missingTypes = [AccountType.FOSA, AccountType.BOSA].filter((type) => !existingTypes.has(type));
+
+        if (missingTypes.length > 0) {
+          const counter = await tx.tenantCounter.upsert({
+            where: { tenantId },
+            update: { accountSeq: { increment: missingTypes.length } },
+            create: { tenantId, memberSeq: 0, accountSeq: missingTypes.length, loanSeq: 0 },
+            select: { accountSeq: true },
+          });
+          const firstSeq = counter.accountSeq - missingTypes.length + 1;
+          await Promise.all(missingTypes.map((accountType, index) =>
+            tx.account.create({
+              data: {
+                tenantId,
+                memberId,
+                accountNumber: `ACC-${accountType}-${String(firstSeq + index).padStart(6, '0')}`,
+                accountType,
+              },
+            }),
+          ));
+        }
+      }
+
+      return memberUpdate;
     });
 
     // Update phone on User record if provided
@@ -449,10 +507,29 @@ export class AdminService {
       action: 'MEMBER.KYC_UPDATE',
       resource: 'Member',
       resourceId: memberId,
-      metadata: { before, after: dto },
+      metadata: {
+        before,
+        after: {
+          ...dto,
+          documentUrls: dto.documentUrls?.map((url) => ({ url })),
+        },
+        kycDecision: dto.verified === undefined ? 'PROFILE_UPDATE' : dto.verified ? 'APPROVED' : 'REJECTED',
+      },
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 
     return updatedMember;
+  }
+
+  private assertKycChecklistComplete(checklist?: Record<string, boolean>): void {
+    if (!checklist || Object.keys(checklist).length === 0) {
+      throw new BadRequestException('KYC approval checklist is required');
+    }
+    const incomplete = Object.entries(checklist)
+      .filter(([, passed]) => passed !== true)
+      .map(([key]) => key);
+    if (incomplete.length > 0) {
+      throw new BadRequestException(`KYC checklist incomplete: ${incomplete.join(', ')}`);
+    }
   }
 }

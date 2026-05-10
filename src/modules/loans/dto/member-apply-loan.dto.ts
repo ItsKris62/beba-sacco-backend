@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ArrayMaxSize, IsArray, IsInt, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsInt, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 /**
@@ -52,6 +52,8 @@ export class MemberApplyLoanDto {
   @ApiPropertyOptional({ description: 'Proposed guarantors', type: [GuarantorNominationDto] })
   @IsOptional()
   @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
   @ValidateNested({ each: true })
   @Type(() => GuarantorNominationDto)
   guarantors?: GuarantorNominationDto[];
@@ -62,6 +64,8 @@ export class MemberApplyLoanDto {
   })
   @IsOptional()
   @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
   @IsUUID('4', { each: true })
   guarantorIds?: string[];
 }
@@ -75,7 +79,8 @@ export class MemberRequestGuarantorsDto {
   @ApiPropertyOptional({ description: 'Guarantors with explicit pledged amounts', type: [GuarantorNominationDto] })
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(10)
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
   @ValidateNested({ each: true })
   @Type(() => GuarantorNominationDto)
   guarantors?: GuarantorNominationDto[];
@@ -86,7 +91,8 @@ export class MemberRequestGuarantorsDto {
   })
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(10)
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
   @IsUUID('4', { each: true })
   guarantorIds?: string[];
 }

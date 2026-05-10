@@ -114,7 +114,7 @@ export class LoansController {
   @ApiOperation({
     summary: 'Approve a loan application',
     description:
-      'Approves a loan that is in UNDER_REVIEW or PENDING_APPROVAL status. ' +
+      'Approves a loan that is in PENDING_REVIEW or PENDING_APPROVAL status. ' +
       'An optional review comment is stored on the loan record and included in the audit trail.',
   })
   @ApiResponse({ status: 200, description: 'Loan approved' })

@@ -168,7 +168,7 @@ enum LoanApplicationStatus {
   SUBMITTED           // Member submitted; awaiting staff review
   PENDING_GUARANTORS  // Staff approved for guarantor solicitation
   PENDING_CONSENT     // Guarantors invited; awaiting responses
-  UNDER_REVIEW        // All guarantors responded; awaiting final approval
+  PENDING_REVIEW        // All guarantors responded; awaiting final approval
   APPROVED
   REJECTED
   CONVERTED_TO_LOAN   // Linked Loan created and disbursed

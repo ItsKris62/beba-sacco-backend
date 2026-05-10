@@ -12,6 +12,7 @@ import { Decimal } from 'decimal.js';
 import { MpesaTxType, MpesaTriggerSource, TransactionStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
+import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
 import { maskPhone, buildMpesaRef } from './utils/mpesa.utils';
@@ -46,6 +47,7 @@ export class MpesaService {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    private readonly idempotency: IdempotencyService,
     private readonly daraja: DarajaClientService,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK)
     private readonly callbackQueue: Queue<MpesaCallbackJobPayload>,
@@ -63,7 +65,11 @@ export class MpesaService {
     actorUserId: string,
     triggeredBy: string,
     triggerSource: MpesaTriggerSource = MpesaTriggerSource.MEMBER,
+    idempotencyKey?: string,
   ): Promise<{ checkoutRequestId: string; customerMessage: string; mpesaTxId: string }> {
+    if (!idempotencyKey?.trim()) {
+      throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
+    }
     const member = await this.prisma.member.findFirst({
       where: { userId: actorUserId, tenantId },
       select: { id: true },
@@ -72,65 +78,80 @@ export class MpesaService {
       throw new BadRequestException('No member profile found for this user in the current tenant');
     }
     const memberId = member.id;
-
-    const maxPerDay = this.config.get<number>('app.mpesa.stkRateLimitPerDay', 3);
-    const rlKey = stkRateLimitKey(tenantId, memberId);
-    const midnightEatMs = Date.now() + secondsUntilMidnightEAT() * 1000;
-    const currentCount = await this.redis.incrWithExpireAt(rlKey, midnightEatMs);
-    if (currentCount > maxPerDay) {
-      throw new BadRequestException(
-        `STK Push limit reached: ${maxPerDay} requests per day per member`,
-      );
+    const idemKey = `mpesa:stk:${tenantId}:${memberId}:${idempotencyKey.trim()}`;
+    const idem = await this.idempotency.checkAndReserve(idemKey, tenantId, 24 * 60 * 60);
+    if (idem.status === 'COMPLETED') {
+      return idem.result as { checkoutRequestId: string; customerMessage: string; mpesaTxId: string };
+    }
+    if (idem.status === 'PROCESSING') {
+      throw new BadRequestException('STK push request is already processing');
     }
 
-    const accountRef = this.buildAccountRef(dto);
-    await this.verifyAccountRef(dto.purpose, accountRef, tenantId);
+    try {
+      const maxPerDay = this.config.get<number>('app.mpesa.stkRateLimitPerDay', 3);
+      const rlKey = stkRateLimitKey(tenantId, memberId);
+      const midnightEatMs = Date.now() + secondsUntilMidnightEAT() * 1000;
+      const currentCount = await this.redis.incrWithExpireAt(rlKey, midnightEatMs);
+      if (currentCount > maxPerDay) {
+        throw new BadRequestException(
+          `STK Push limit reached: ${maxPerDay} requests per day per member`,
+        );
+      }
 
-    const baseUrl = this.config.get<string>('app.mpesa.callbackUrl', '');
-    const callbackUrl = `${baseUrl}/mpesa/callback`;
+      const accountRef = this.buildAccountRef(dto);
+      await this.verifyAccountRef(dto.purpose, accountRef, tenantId);
 
-    const amount = Math.round(dto.amount);
-    const transactionDesc =
-      dto.note ?? (dto.purpose === DepositPurpose.LOAN_REPAYMENT ? 'Loan repay' : 'Deposit');
+      const baseUrl = this.config.get<string>('app.mpesa.callbackUrl', '');
+      const callbackUrl = `${baseUrl}/mpesa/callback`;
 
-    const darajaResp = await this.daraja.initiateSTKPush({
-      phoneNumber: dto.phoneNumber,
-      amount,
-      accountReference: accountRef,
-      transactionDesc,
-      callbackUrl,
-    });
+      const amount = Math.round(dto.amount);
+      const transactionDesc =
+        dto.note ?? (dto.purpose === DepositPurpose.LOAN_REPAYMENT ? 'Loan repay' : 'Deposit');
 
-    const reference = buildMpesaRef.stk(darajaResp.CheckoutRequestID);
-
-    const mpesaTx = await this.prisma.mpesaTransaction.create({
-      data: {
-        tenantId,
-        memberId,
-        type: MpesaTxType.STK_PUSH,
-        triggerSource,
-        checkoutRequestId: darajaResp.CheckoutRequestID,
-        merchantRequestId: darajaResp.MerchantRequestID,
+      const darajaResp = await this.daraja.initiateSTKPush({
         phoneNumber: dto.phoneNumber,
-        amount: new Decimal(dto.amount).toDecimalPlaces(4).toString(),
+        amount,
         accountReference: accountRef,
-        description: transactionDesc,
-        reference,
-        status: TransactionStatus.PENDING,
-      },
-    });
+        transactionDesc,
+        callbackUrl,
+      });
 
-    this.logger.log(
-      `STK Push initiated | tenant=${tenantId} member=${memberId} ` +
-        `phone=${maskPhone(dto.phoneNumber)} amount=${amount} ` +
-        `checkout=${darajaResp.CheckoutRequestID}`,
-    );
+      const reference = buildMpesaRef.stk(darajaResp.CheckoutRequestID);
 
-    return {
-      checkoutRequestId: darajaResp.CheckoutRequestID,
-      customerMessage: darajaResp.CustomerMessage,
-      mpesaTxId: mpesaTx.id,
-    };
+      const mpesaTx = await this.prisma.mpesaTransaction.create({
+        data: {
+          tenantId,
+          memberId,
+          type: MpesaTxType.STK_PUSH,
+          triggerSource,
+          checkoutRequestId: darajaResp.CheckoutRequestID,
+          merchantRequestId: darajaResp.MerchantRequestID,
+          phoneNumber: dto.phoneNumber,
+          amount: new Decimal(dto.amount).toDecimalPlaces(4).toString(),
+          accountReference: accountRef,
+          description: transactionDesc,
+          reference,
+          status: TransactionStatus.PENDING,
+        },
+      });
+
+      this.logger.log(
+        `STK Push initiated | tenant=${tenantId} member=${memberId} ` +
+          `phone=${maskPhone(dto.phoneNumber)} amount=${amount} ` +
+          `checkout=${darajaResp.CheckoutRequestID}`,
+      );
+
+      const result = {
+        checkoutRequestId: darajaResp.CheckoutRequestID,
+        customerMessage: darajaResp.CustomerMessage,
+        mpesaTxId: mpesaTx.id,
+      };
+      await this.idempotency.complete(idemKey, tenantId, result, 24 * 60 * 60);
+      return result;
+    } catch (error) {
+      await this.idempotency.release(idemKey, tenantId);
+      throw error;
+    }
   }
 
   // ─── B2C Loan Disbursement (queue entry point) ──────────────────────────

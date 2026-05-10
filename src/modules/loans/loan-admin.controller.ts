@@ -1,6 +1,6 @@
 import {
   Controller, Get, Patch, Post, Body, Param, Query, Req,
-  HttpCode, HttpStatus, ParseUUIDPipe,
+  HttpCode, HttpStatus, ParseUUIDPipe, UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
@@ -19,6 +19,8 @@ import { UpdateLoanStatusDto, AdminLoanStatus } from './dto/update-loan-status.d
 import { GetAdminLoansQueryDto } from './dto/get-admin-loans-query.dto';
 import { ReviewLoanDto } from './dto/review-loan.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { LoanStateGuard } from './decorators/loan-state-guard.decorator';
+import { LoanStateTransitionGuard } from './guards/loan-state-transition.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -73,7 +75,7 @@ export class LoanAdminController {
       'Returns guarantor coverage (% of principal covered by accepted guarantors) and ' +
       'accruedInterest (stubbed at 0 until Tier 3 schema migration).',
   })
-  @ApiQuery({ name: 'status', required: false, enum: ['DRAFT','PENDING_GUARANTORS','UNDER_REVIEW','APPROVED','ACTIVE','FULLY_PAID','REJECTED','DEFAULTED'] })
+  @ApiQuery({ name: 'status', required: false, enum: ['DRAFT','PENDING_GUARANTORS','PENDING_REVIEW','APPROVED','ACTIVE','FULLY_PAID','REJECTED','DEFAULTED'] })
   @ApiQuery({ name: 'loanProductId', required: false, type: String })
   @ApiQuery({ name: 'memberId', required: false, type: String })
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
@@ -151,15 +153,15 @@ export class LoanAdminController {
   @ApiOperation({
     summary: 'Update loan application status',
     description:
-      '**Workflow transitions** (PENDING_GUARANTORS, UNDER_REVIEW, APPROVED, REJECTED): ' +
+      '**Workflow transitions** (PENDING_GUARANTORS, PENDING_REVIEW, APPROVED, REJECTED): ' +
       'update the loan status only, no financial operations.\n\n' +
       '**DISBURSED**: triggers real financial disbursement — credits the member\'s FOSA ' +
       'account with the principal amount inside a Serializable transaction. ' +
       'Idempotent: returns 409 if the loan is already ACTIVE (already disbursed).\n\n' +
       'Valid workflow transitions:\n' +
       '- `DRAFT → PENDING_GUARANTORS | REJECTED`\n' +
-      '- `PENDING_GUARANTORS → UNDER_REVIEW | REJECTED`\n' +
-      '- `UNDER_REVIEW → APPROVED | REJECTED`\n' +
+      '- `PENDING_GUARANTORS → PENDING_REVIEW | REJECTED`\n' +
+      '- `PENDING_REVIEW → APPROVED | REJECTED`\n' +
       '- `APPROVED → DISBURSED` (triggers FOSA credit → loan becomes ACTIVE)\n\n' +
       'Reason is required when transitioning to REJECTED.',
   })
@@ -187,6 +189,8 @@ export class LoanAdminController {
   @ApiResponse({ status: 404, description: 'Loan not found' })
   @ApiResponse({ status: 409, description: 'Loan already disbursed (idempotent DISBURSED call)' })
   @ApiResponse({ status: 422, description: 'Member has no active FOSA account or KYC not approved' })
+  @UseGuards(LoanStateTransitionGuard)
+  @LoanStateGuard({ loanIdParam: 'id', targetStatusBodyField: 'status' })
   async updateStatus(
     @Param('id', ParseUUIDPipe) loanId: string,
     @Body() dto: UpdateLoanStatusDto,

@@ -136,6 +136,18 @@ export const validationSchema = Joi.object({
   RATE_LIMIT_TTL: Joi.number().default(60),
   RATE_LIMIT_MAX: Joi.number().default(100),
 
+  // Product rules must be explicitly enabled so loan-product configuration
+  // controls guarantor counts, account type, coverage ratio, and savings limits.
+  ENABLE_PRODUCT_RULES: Joi.boolean()
+    .truthy('true')
+    .falsy('false')
+    .valid(true)
+    .required()
+    .messages({
+      'any.only': 'ENABLE_PRODUCT_RULES must be true for production loan-rule enforcement',
+      'any.required': 'ENABLE_PRODUCT_RULES is required and must be true',
+    }),
+
   // ── Multi-Tenancy ──────────────────────────────────────────────────────────
   DEFAULT_TENANT_ID: Joi.string().optional(),
 

@@ -1,6 +1,6 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { IsNumber, IsOptional, IsString, Matches, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsString, IsUUID, Matches, Min } from 'class-validator';
 import { UserRole } from '@prisma/client';
 import { GuarantorLookupService } from './guarantor-lookup.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -19,6 +19,10 @@ class GuarantorLookupDto {
   @IsNumber()
   @Min(0)
   requiredAmount?: number;
+
+  @IsOptional()
+  @IsUUID('4')
+  loanProductId?: string;
 }
 
 @ApiTags('Member Portal — Guarantors')
@@ -35,7 +39,12 @@ export class GuarantorLookupController {
 
   @Post('lookup')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Lookup an eligible guarantor by National ID only' })
+  @ApiOperation({
+    summary: 'Lookup an eligible guarantor by National ID only',
+    description:
+      'When loanProductId is supplied, the balance check uses the product requiredAccountType. ' +
+      'Products without a requiredAccountType fall back to FOSA because guarantor holds are placed on FOSA by default.',
+  })
   @ApiResponse({ status: 200, description: 'Masked guarantor eligibility result' })
   async lookup(
     @Body() dto: GuarantorLookupDto,
@@ -47,6 +56,6 @@ export class GuarantorLookupController {
       select: { id: true },
     });
     if (!member) throw new Error('Member profile not found');
-    return this.lookupService.lookupByNationalId(dto.idNumber, tenant.id, member.id, dto.requiredAmount ?? 0);
+    return this.lookupService.lookupByNationalId(dto.idNumber, tenant.id, member.id, dto.requiredAmount ?? 0, dto.loanProductId);
   }
 }

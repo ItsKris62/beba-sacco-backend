@@ -18,11 +18,11 @@ export class GuarantorItemDto {
 export class InviteGuarantorsDto {
   @ApiProperty({
     type: [GuarantorItemDto],
-    description: 'List of guarantors to invite. Minimum 3 required.',
+    description: 'List of guarantors to invite. Product rules may require 1-3 guarantors; MVP hard cap is 3.',
   })
   @IsArray()
-  @ArrayMinSize(3, { message: 'At least 3 guarantors are required' })
-  @ArrayMaxSize(10)
+  @ArrayMinSize(1, { message: 'At least 1 guarantor is required' })
+  @ArrayMaxSize(3, { message: 'At most 3 guarantors are allowed' })
   @ValidateNested({ each: true })
   @Type(() => GuarantorItemDto)
   guarantors!: GuarantorItemDto[];

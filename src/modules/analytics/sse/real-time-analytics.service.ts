@@ -92,7 +92,7 @@ export class RealTimeAnalyticsService implements OnModuleDestroy {
         this.prisma.loan.count({
           where: {
             tenantId,
-            status: { in: ['DRAFT', 'PENDING_GUARANTORS', 'UNDER_REVIEW', 'PENDING_APPROVAL'] },
+            status: { in: ['DRAFT', 'PENDING_GUARANTORS', 'PENDING_REVIEW', 'PENDING_APPROVAL'] },
           },
         }),
         this.prisma.member.count({ where: { tenantId, isActive: true } }),

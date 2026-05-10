@@ -20,6 +20,7 @@ export class GuarantorLookupService {
     tenantId: string,
     requesterMemberId: string,
     requiredAmount?: Decimal.Value,
+    loanProductId?: string,
   ): Promise<GuarantorLookupResult> {
     if (typeof idNumber !== 'string') {
       throw new BadRequestException('INVALID_ID_NUMBER: idNumber is required');
@@ -28,6 +29,14 @@ export class GuarantorLookupService {
     if (!/^[0-9]{7,8}$/.test(normalizedId)) {
       throw new BadRequestException('INVALID_ID_NUMBER: Kenyan National ID must be 7–8 digits');
     }
+
+    const product = loanProductId
+      ? await this.prisma.loanProduct.findFirst({
+          where: { id: loanProductId, tenantId, isActive: true },
+          select: { requiredAccountType: true },
+        })
+      : null;
+    const accountType = product?.requiredAccountType ?? AccountType.FOSA;
 
     const member = await this.prisma.member.findFirst({
       where: {
@@ -43,7 +52,7 @@ export class GuarantorLookupService {
         kycStatus: true,
         user: { select: { firstName: true, lastName: true } },
         accounts: {
-          where: { tenantId, isActive: true, accountType: AccountType.FOSA },
+          where: { tenantId, isActive: true, accountType },
           select: { balance: true, lockedBalance: true },
         },
       },
@@ -69,7 +78,7 @@ export class GuarantorLookupService {
       reason = 'GUARANTOR_KYC_NOT_VERIFIED';
     } else if (required.greaterThan(0) && availableBalance.lessThan(required)) {
       eligible = false;
-      reason = `GUARANTOR_INSUFFICIENT_FUNDS: available KES ${availableBalance.toFixed(2)} is below required KES ${required.toFixed(2)}`;
+      reason = `GUARANTOR_INSUFFICIENT_FUNDS: available ${accountType} KES ${availableBalance.toFixed(2)} is below required KES ${required.toFixed(2)}`;
     }
 
     return {
