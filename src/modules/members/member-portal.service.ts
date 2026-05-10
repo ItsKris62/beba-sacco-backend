@@ -378,6 +378,7 @@ export class MemberPortalService {
               name: true,
               interestType: true,
               minGuarantors: true,
+              maxGuarantors: true,
               guarantorCoverageRatio: true,
             },
           },

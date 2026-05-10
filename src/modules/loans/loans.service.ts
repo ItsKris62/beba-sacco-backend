@@ -13,6 +13,7 @@ import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { CreateLoanProductDto } from './dto/create-loan-product.dto';
+import { UpdateLoanProductDto } from './dto/update-loan-product.dto';
 import { ApplyLoanDto } from './dto/apply-loan.dto';
 import { InviteGuarantorsDto } from './dto/invite-guarantors.dto';
 import { GuarantorAction, GuarantorResponseDto } from './dto/guarantor-response.dto';
@@ -76,6 +77,13 @@ export class LoansService {
 
   // ─── LOAN PRODUCTS ───────────────────────────────────────────
 
+  private async invalidateProductCache(tenantId: string): Promise<void> {
+    await Promise.all([
+      this.redis.del(`loan:products:${tenantId}:true`),
+      this.redis.del(`loan:products:${tenantId}:false`),
+    ]);
+  }
+
   async createProduct(dto: CreateLoanProductDto, tenantId: string, createdBy: string, ipAddress?: string) {
     if (new Decimal(dto.minAmount).greaterThan(new Decimal(dto.maxAmount))) {
       throw new BadRequestException('minAmount must be less than or equal to maxAmount');
@@ -101,11 +109,12 @@ export class LoansService {
         requiredAccountType: dto.requiredAccountType ?? null,
         savingsMultiplier: new Decimal(dto.savingsMultiplier ?? 3).toDecimalPlaces(4).toString(),
         minGuarantors: dto.minGuarantors ?? 0,
-        maxGuarantors: dto.maxGuarantors ?? 5,
+        maxGuarantors: dto.maxGuarantors ?? 3,
         guarantorCoverageRatio: new Decimal(dto.guarantorCoverageRatio ?? 1).toDecimalPlaces(4).toString(),
         requiresPayslip: dto.requiresPayslip ?? false,
         minActiveMonths: dto.minActiveMonths ?? 0,
         gracePeriodMonths: dto.gracePeriodMonths ?? 0,
+        isActive: dto.isActive ?? true,
       },
     });
 
@@ -118,6 +127,8 @@ export class LoansService {
       metadata: { name: product.name },
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+    await this.invalidateProductCache(tenantId);
 
     return product;
   }
@@ -143,6 +154,70 @@ export class LoansService {
     });
     if (!product) throw new NotFoundException('Loan product not found');
     return product;
+  }
+
+  async updateProduct(id: string, dto: UpdateLoanProductDto, tenantId: string, updatedBy: string, ipAddress?: string) {
+    const existing = await this.prisma.loanProduct.findFirst({ where: { id, tenantId } });
+    if (!existing) throw new NotFoundException('Loan product not found');
+
+    const nextMin = dto.minAmount !== undefined ? new Decimal(dto.minAmount) : new Decimal(existing.minAmount.toString());
+    const nextMax = dto.maxAmount !== undefined ? new Decimal(dto.maxAmount) : new Decimal(existing.maxAmount.toString());
+    if (nextMin.greaterThan(nextMax)) {
+      throw new BadRequestException('minAmount must be less than or equal to maxAmount');
+    }
+
+    if (dto.name && dto.name !== existing.name) {
+      const duplicate = await this.prisma.loanProduct.findFirst({
+        where: { tenantId, name: dto.name, id: { not: id } },
+        select: { id: true },
+      });
+      if (duplicate) throw new ConflictException(`Loan product "${dto.name}" already exists`);
+    }
+
+    const product = await this.prisma.loanProduct.update({
+      where: { id },
+      data: {
+        ...(dto.name !== undefined && { name: dto.name }),
+        ...(dto.description !== undefined && { description: dto.description }),
+        ...(dto.minAmount !== undefined && { minAmount: new Decimal(dto.minAmount).toDecimalPlaces(4).toString() }),
+        ...(dto.maxAmount !== undefined && { maxAmount: new Decimal(dto.maxAmount).toDecimalPlaces(4).toString() }),
+        ...(dto.interestRate !== undefined && { interestRate: new Decimal(dto.interestRate).toDecimalPlaces(4).toString() }),
+        ...(dto.interestType !== undefined && { interestType: dto.interestType }),
+        ...(dto.maxTenureMonths !== undefined && { maxTenureMonths: dto.maxTenureMonths }),
+        ...(dto.processingFeeRate !== undefined && { processingFeeRate: new Decimal(dto.processingFeeRate).toDecimalPlaces(4).toString() }),
+        ...(dto.requiredAccountType !== undefined && { requiredAccountType: dto.requiredAccountType ?? null }),
+        ...(dto.savingsMultiplier !== undefined && { savingsMultiplier: new Decimal(dto.savingsMultiplier).toDecimalPlaces(4).toString() }),
+        ...(dto.minGuarantors !== undefined && { minGuarantors: dto.minGuarantors }),
+        ...(dto.maxGuarantors !== undefined && { maxGuarantors: dto.maxGuarantors }),
+        ...(dto.guarantorCoverageRatio !== undefined && {
+          guarantorCoverageRatio: new Decimal(dto.guarantorCoverageRatio).toDecimalPlaces(4).toString(),
+        }),
+        ...(dto.requiresPayslip !== undefined && { requiresPayslip: dto.requiresPayslip }),
+        ...(dto.minActiveMonths !== undefined && { minActiveMonths: dto.minActiveMonths }),
+        ...(dto.gracePeriodMonths !== undefined && { gracePeriodMonths: dto.gracePeriodMonths }),
+        ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+      },
+    });
+
+    await this.audit.create({
+      tenantId,
+      userId: updatedBy,
+      action: 'LOAN_PRODUCT.UPDATE',
+      resource: 'LoanProduct',
+      resourceId: product.id,
+      oldValue: { name: existing.name, isActive: existing.isActive },
+      newValue: { name: product.name, isActive: product.isActive },
+      metadata: { changedFields: Object.keys(dto) },
+      ipAddress,
+    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+    await this.invalidateProductCache(tenantId);
+
+    return product;
+  }
+
+  async deactivateProduct(id: string, tenantId: string, updatedBy: string, ipAddress?: string) {
+    return this.updateProduct(id, { isActive: false }, tenantId, updatedBy, ipAddress);
   }
 
   // ─── LOAN APPLICATION ────────────────────────────────────────

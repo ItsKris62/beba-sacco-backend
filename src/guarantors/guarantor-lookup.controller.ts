@@ -1,6 +1,7 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { IsNumber, IsOptional, IsString, IsUUID, Matches, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsString, IsUUID, Matches, MaxLength, Min } from 'class-validator';
+import { Throttle } from '@nestjs/throttler';
 import { UserRole } from '@prisma/client';
 import { GuarantorLookupService } from './guarantor-lookup.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -25,6 +26,21 @@ class GuarantorLookupDto {
   loanProductId?: string;
 }
 
+class GuarantorSearchDto {
+  @IsString()
+  @MaxLength(80)
+  query!: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  requiredAmount?: number;
+
+  @IsOptional()
+  @IsUUID('4')
+  loanProductId?: string;
+}
+
 @ApiTags('Member Portal — Guarantors')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
@@ -38,6 +54,7 @@ export class GuarantorLookupController {
   ) {}
 
   @Post('lookup')
+  @Throttle({ global: { limit: 20, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Lookup an eligible guarantor by National ID only',
@@ -57,5 +74,28 @@ export class GuarantorLookupController {
     });
     if (!member) throw new Error('Member profile not found');
     return this.lookupService.lookupByNationalId(dto.idNumber, tenant.id, member.id, dto.requiredAmount ?? 0, dto.loanProductId);
+  }
+
+  @Post('search')
+  @Throttle({ global: { limit: 20, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Search eligible guarantor candidates by National ID or name',
+    description:
+      'Returns at most 5 active approved users with MEMBER role. Names and member numbers are masked. ' +
+      'Search requires a 7-8 digit National ID or at least 3 characters of a name.',
+  })
+  @ApiResponse({ status: 200, description: 'Masked guarantor candidates with eligibility result' })
+  async search(
+    @Body() dto: GuarantorSearchDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    const member = await this.prisma.member.findFirst({
+      where: { tenantId: tenant.id, userId: user.id, isActive: true },
+      select: { id: true },
+    });
+    if (!member) throw new Error('Member profile not found');
+    return this.lookupService.searchMembers(dto.query, tenant.id, member.id, dto.requiredAmount ?? 0, dto.loanProductId);
   }
 }

@@ -71,14 +71,14 @@ export class CreateLoanProductDto {
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(20)
+  @Max(3)
   minGuarantors?: number;
 
-  @ApiPropertyOptional({ example: 5, description: 'Maximum guarantors a borrower may nominate' })
+  @ApiPropertyOptional({ example: 3, description: 'Maximum guarantors a borrower may nominate' })
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(50)
+  @Max(3)
   maxGuarantors?: number;
 
   @ApiPropertyOptional({
@@ -117,4 +117,9 @@ export class CreateLoanProductDto {
   @Min(0)
   @Max(12, { message: 'Grace period cannot exceed 12 months' })
   gracePeriodMonths?: number;
+
+  @ApiPropertyOptional({ example: true, description: 'Whether members can select this product' })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
 }

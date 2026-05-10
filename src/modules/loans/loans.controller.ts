@@ -10,6 +10,7 @@ import { LoanStatus, UserRole } from '@prisma/client';
 import { Request } from 'express';
 import { LoansService } from './loans.service';
 import { CreateLoanProductDto } from './dto/create-loan-product.dto';
+import { UpdateLoanProductDto } from './dto/update-loan-product.dto';
 import { ApplyLoanDto } from './dto/apply-loan.dto';
 import { ApproveLoanDto } from './dto/approve-loan.dto';
 import { InviteGuarantorsDto } from './dto/invite-guarantors.dto';
@@ -52,7 +53,7 @@ export class LoansController {
     @CurrentTenant() tenant: Tenant,
     @Query('includeInactive') includeInactive?: boolean,
   ) {
-    return this.loans.findAllProducts(tenant.id, includeInactive === true);
+    return this.loans.findAllProducts(tenant.id, includeInactive === true || String(includeInactive) === 'true');
   }
 
   @Get('products/:id')
@@ -63,6 +64,37 @@ export class LoansController {
     @CurrentTenant() tenant: Tenant,
   ) {
     return this.loans.findOneProduct(id, tenant.id);
+  }
+
+  @Patch('products/:id')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Update a loan product' })
+  @ApiResponse({ status: 200, description: 'Loan product updated' })
+  updateProduct(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateLoanProductDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.loans.updateProduct(id, dto, tenant.id, actor.id, req.ip);
+  }
+
+  @Delete('products/:id')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Deactivate a loan product',
+    description: 'Soft-deactivates the product so existing loans retain their historical product reference.',
+  })
+  @ApiResponse({ status: 200, description: 'Loan product deactivated' })
+  deactivateProduct(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.loans.deactivateProduct(id, tenant.id, actor.id, req.ip);
   }
 
   // ─── LOANS ───────────────────────────────────────────────────
