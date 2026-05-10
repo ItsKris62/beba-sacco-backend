@@ -4,6 +4,7 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import { RedisService } from '../../common/services/redis.service';
 
 // ─── Daraja API response types ────────────────────────────────────────────────
@@ -51,7 +52,6 @@ export interface B2cResult {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-const OAUTH_CACHE_KEY = 'mpesa:oauth:token';
 // Cache 55 minutes – Daraja tokens live 60 min; we refresh before expiry.
 const OAUTH_TTL_SEC = 3300;
 
@@ -64,7 +64,7 @@ export class DarajaClientService {
     private readonly config: ConfigService,
     private readonly redis: RedisService,
   ) {
-    const env = config.get<string>('app.mpesa.environment', 'sandbox');
+    const env = this.getConfigValue('app.mpesa.environment', 'sandbox');
     this.baseUrl =
       env === 'production'
         ? 'https://api.safaricom.co.ke'
@@ -81,17 +81,18 @@ export class DarajaClientService {
    * most (not a correctness issue).
    */
   async getAccessToken(): Promise<string> {
-    const cached = await this.redis.get(OAUTH_CACHE_KEY);
-    if (cached) return cached;
-
-    const key = this.config.get<string>('app.mpesa.consumerKey', '');
-    const secret = this.config.get<string>('app.mpesa.consumerSecret', '');
+    const key = this.getConfigValue('app.mpesa.consumerKey');
+    const secret = this.getConfigValue('app.mpesa.consumerSecret');
 
     if (!key || !secret) {
       throw new InternalServerErrorException(
         'MPESA_CONSUMER_KEY / MPESA_CONSUMER_SECRET not configured',
       );
     }
+
+    const cacheKey = this.oauthCacheKey(key);
+    const cached = await this.redis.get(cacheKey);
+    if (cached) return cached;
 
     const auth = Buffer.from(`${key}:${secret}`).toString('base64');
 
@@ -101,14 +102,15 @@ export class DarajaClientService {
       'OAuth token',
     );
 
-    await this.redis.set(OAUTH_CACHE_KEY, res.access_token, OAUTH_TTL_SEC);
+    await this.redis.set(cacheKey, res.access_token, OAUTH_TTL_SEC);
     this.logger.log('Daraja OAuth token refreshed and cached for 55 min');
     return res.access_token;
   }
 
   /** Force-clear the token cache (call after 401 from Daraja) */
   async invalidateTokenCache(): Promise<void> {
-    await this.redis.del(OAUTH_CACHE_KEY);
+    const key = this.getConfigValue('app.mpesa.consumerKey');
+    await this.redis.del(this.oauthCacheKey(key));
   }
 
   // ─── STK Push (Lipa Na M-Pesa Online) ────────────────────────────────────
@@ -123,8 +125,8 @@ export class DarajaClientService {
    * persisting the CheckoutRequestID before returning to the client.
    */
   async initiateSTKPush(params: StkPushParams): Promise<StkPushResult> {
-    const shortcode = this.config.get<string>('app.mpesa.shortcode', '174379');
-    const passkey = this.config.get<string>('app.mpesa.passkey', '');
+    const shortcode = this.getConfigValue('app.mpesa.shortcode', '174379');
+    const passkey = this.getConfigValue('app.mpesa.passkey');
 
     if (!passkey) {
       throw new InternalServerErrorException('MPESA_PASSKEY not configured');
@@ -265,5 +267,15 @@ export class DarajaClientService {
     }
 
     return data;
+  }
+
+  private getConfigValue(key: string, fallback = ''): string {
+    return (this.config.get<string>(key, fallback) ?? fallback).trim();
+  }
+
+  private oauthCacheKey(consumerKey: string): string {
+    const env = this.getConfigValue('app.mpesa.environment', 'sandbox');
+    const keyHash = createHash('sha256').update(consumerKey).digest('hex').slice(0, 12);
+    return `mpesa:oauth:token:${env}:${keyHash}`;
   }
 }
