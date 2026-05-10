@@ -37,6 +37,7 @@ async function run() {
     where: { slug: 'beba-sacco' },
     update: { status: 'ACTIVE' },
     create: {
+      id: '1011f6c3-5e43-4e59-affa-b7212d278688',
       name: 'Beba SACCO',
       slug: 'beba-sacco',
       schemaName: 'tenant_beba_sacco',
