@@ -209,4 +209,45 @@ export class UsersController {
   ) {
     return this.usersService.forcePasswordReset(id, tenant.id, actor, req.ip);
   }
+
+  @Patch(':id/generate-temporary-password')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Generate a new temporary password',
+    description:
+      'Generates a new server-side temporary password, stores only its Argon2id hash, ' +
+      'sets mustChangePassword = true, invalidates existing sessions, and returns the plaintext value once. ' +
+      'Use this when the original temporary password was lost before first login.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Temporary password generated and returned once',
+    schema: {
+      example: {
+        success: true,
+        temporaryPassword: 'Q8m#2tLk9@Pa',
+        user: {
+          id: '550e8400-e29b-41d4-a716-446655440000',
+          email: 'member@example.com',
+          firstName: 'Jane',
+          lastName: 'Doe',
+          role: 'MEMBER',
+        },
+        message:
+          'Temporary password generated. This value is shown once and the user must change it on next login.',
+      },
+    },
+  })
+  @ApiResponse({ status: 403, description: 'Cannot reset own password or higher-role account' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  generateTemporaryPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.usersService.generateTemporaryPassword(id, tenant.id, actor, req.ip);
+  }
 }

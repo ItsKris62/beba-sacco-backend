@@ -5,6 +5,7 @@ import {
 import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { randomInt } from 'crypto';
 import * as argon2 from 'argon2';
 import { UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -35,6 +36,13 @@ const MANAGER_MANAGEABLE_ROLES: UserRole[] = [
   UserRole.CHAIRMAN,
   UserRole.AUDITOR,
 ];
+
+const TEMP_PASSWORD_UPPER = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+const TEMP_PASSWORD_LOWER = 'abcdefghjkmnpqrstuvwxyz';
+const TEMP_PASSWORD_DIGITS = '23456789';
+const TEMP_PASSWORD_SYMBOLS = '@#$!';
+const TEMP_PASSWORD_ALL =
+  TEMP_PASSWORD_UPPER + TEMP_PASSWORD_LOWER + TEMP_PASSWORD_DIGITS + TEMP_PASSWORD_SYMBOLS;
 
 const USER_SELECT = {
   id: true,
@@ -470,6 +478,81 @@ export class UsersService {
    * Finds and automatically deletes any PENDING accounts that were
    * created more than 30 days ago and have not been approved.
    */
+  async generateTemporaryPassword(
+    id: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, email: true, firstName: true, lastName: true, role: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    if (id === actor.id) {
+      throw new ForbiddenException(
+        'Cannot generate a temporary password for your own account. Use PATCH /auth/change-password.',
+      );
+    }
+
+    if (
+      actor.role === UserRole.MANAGER &&
+      !MANAGER_MANAGEABLE_ROLES.includes(target.role)
+    ) {
+      throw new ForbiddenException(
+        `MANAGER cannot generate a temporary password for a ${target.role} account`,
+      );
+    }
+
+    const temporaryPassword = this.generateTempPassword();
+    const passwordHash = await argon2.hash(temporaryPassword, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 1,
+    });
+
+    await this.prisma.user.update({
+      where: { id },
+      data: {
+        passwordHash,
+        mustChangePassword: true,
+        refreshToken: null,
+      },
+    });
+
+    await this.auditSafe({
+      tenantId,
+      actorId: actor.id,
+      action: 'USER.TEMPORARY_PASSWORD_GENERATED',
+      entityType: 'User',
+      entityId: id,
+      metadata: {
+        targetEmail: target.email,
+        targetRole: target.role,
+        requestedBy: actor.id,
+        actorRole: actor.role,
+        ipAddress,
+      },
+      ipAddress,
+    });
+
+    return {
+      success: true,
+      temporaryPassword,
+      user: {
+        id: target.id,
+        email: target.email,
+        firstName: target.firstName,
+        lastName: target.lastName,
+        role: target.role,
+      },
+      message:
+        'Temporary password generated. This value is shown once and the user must change it on next login.',
+    };
+  }
+
   @Cron('0 2 * * *', { timeZone: 'Africa/Nairobi' })
   async cleanupStalePendingAccounts() {
     const thirtyDaysAgo = new Date();
@@ -554,5 +637,29 @@ export class UsersService {
       .catch((e: unknown) =>
         this.logger.error('Audit write failed (non-fatal)', e instanceof Error ? e.stack : e),
       );
+  }
+
+  private generateTempPassword(): string {
+    const chars = [
+      this.pickChar(TEMP_PASSWORD_UPPER),
+      this.pickChar(TEMP_PASSWORD_LOWER),
+      this.pickChar(TEMP_PASSWORD_DIGITS),
+      this.pickChar(TEMP_PASSWORD_SYMBOLS),
+    ];
+
+    while (chars.length < 12) {
+      chars.push(this.pickChar(TEMP_PASSWORD_ALL));
+    }
+
+    for (let i = chars.length - 1; i > 0; i -= 1) {
+      const j = randomInt(i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+
+    return chars.join('');
+  }
+
+  private pickChar(chars: string): string {
+    return chars[randomInt(chars.length)];
   }
 }
