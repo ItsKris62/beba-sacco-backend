@@ -444,6 +444,36 @@ export class LoanApplicationService {
         if (member.kycStatus !== 'APPROVED') {
           throw new BadRequestException('KYC verification required before applying for a loan');
         }
+        await tx.$queryRaw`
+          SELECT id FROM "Member"
+          WHERE id = ${memberId} AND "tenantId" = ${tenantId}
+          FOR UPDATE
+        `;
+
+        const existingOpenLoan = await tx.loan.findFirst({
+          where: {
+            memberId,
+            tenantId,
+            status: {
+              in: [
+                LoanStatus.DRAFT,
+                LoanStatus.PENDING_GUARANTORS,
+                LoanStatus.PENDING_REVIEW,
+                LoanStatus.PENDING_APPROVAL,
+                LoanStatus.APPROVED,
+                LoanStatus.DISBURSED,
+                LoanStatus.ACTIVE,
+                LoanStatus.DEFAULTED,
+              ],
+            },
+          },
+          select: { id: true, loanNumber: true, status: true },
+        });
+        if (existingOpenLoan) {
+          throw new BadRequestException(
+            `ONE_OPEN_LOAN_ONLY: You already have loan ${existingOpenLoan.loanNumber} in ${existingOpenLoan.status.replace(/_/g, ' ')} status. You can apply for another loan after it is fully paid.`,
+          );
+        }
 
         const product = await tx.loanProduct.findFirst({
           where: { id: dto.loanProductId, tenantId, isActive: true },

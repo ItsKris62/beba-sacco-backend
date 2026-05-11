@@ -74,6 +74,45 @@ export class StatementService {
     return member.id;
   }
 
+  private resolveStatementPeriod(
+    periodFrom: string | undefined,
+    periodTo: string | undefined,
+    defaultDays: number,
+  ): { from: Date; to: Date } {
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+
+    const from = periodFrom
+      ? this.parseStatementDate(periodFrom, 'periodFrom')
+      : new Date(Date.now() - defaultDays * 24 * 60 * 60 * 1000);
+    from.setHours(0, 0, 0, 0);
+
+    const to = periodTo ? this.parseStatementDate(periodTo, 'periodTo') : new Date();
+    to.setHours(23, 59, 59, 999);
+
+    if (from > today || to > today) {
+      throw new BadRequestException('Statement dates cannot be in the future');
+    }
+    if (from > to) {
+      throw new BadRequestException('periodFrom cannot be later than periodTo');
+    }
+
+    return { from, to };
+  }
+
+  private parseStatementDate(value: string, fieldName: string): Date {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw new BadRequestException(`${fieldName} must be in YYYY-MM-DD format`);
+    }
+
+    const date = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+      throw new BadRequestException(`${fieldName} is not a valid calendar date`);
+    }
+
+    return date;
+  }
+
   async getFosaStatement(
     tenantId: string,
     userId: string,
@@ -91,11 +130,7 @@ export class StatementService {
     });
     if (!member) throw new NotFoundException('Member not found');
 
-    const from = periodFrom
-      ? new Date(periodFrom)
-      : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-    const to = periodTo ? new Date(periodTo) : new Date();
-    to.setHours(23, 59, 59, 999);
+    const { from, to } = this.resolveStatementPeriod(periodFrom, periodTo, 90);
 
     const loans = await this.prisma.loan.findMany({
       where: { tenantId, memberId, disbursedAt: { lte: to } },
@@ -218,11 +253,7 @@ export class StatementService {
     });
     if (!member) throw new NotFoundException('Member not found');
 
-    const from = periodFrom
-      ? new Date(periodFrom)
-      : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-    const to = periodTo ? new Date(periodTo) : new Date();
-    to.setHours(23, 59, 59, 999);
+    const { from, to } = this.resolveStatementPeriod(periodFrom, periodTo, 365);
 
     const [savings, openingSavings] = await Promise.all([
       this.prisma.savingsRecord.findMany({
