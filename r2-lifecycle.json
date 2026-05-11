@@ -1,0 +1,17 @@
+{
+  "rules": [
+    {
+      "id": "cleanup-pending-uploads",
+      "status": "Enabled",
+      "filter": {
+        "prefix": "tenants/"
+      },
+      "expiration": {
+        "days": 1
+      },
+      "noncurrentVersionExpiration": {
+        "noncurrentDays": 1
+      }
+    }
+  ]
+}

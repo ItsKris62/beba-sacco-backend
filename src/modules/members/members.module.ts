@@ -12,6 +12,7 @@ import { LoanApplicationModule } from '../loans/loan-application.module';
 import { StatementsModule } from '../statements/statements.module';
 import { StorageModule } from '../storage/storage.module';
 import { DashboardModule } from '../dashboard/dashboard.module';
+import { DocumentsModule } from '../documents/documents.module';
 import { GuarantorLookupService } from '../../guarantors/guarantor-lookup.service';
 import { GuarantorLookupController } from '../../guarantors/guarantor-lookup.controller';
 import { QUEUE_NAMES } from '../queue/queue.constants';
@@ -25,6 +26,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     StatementsModule,
     StorageModule,
     DashboardModule,
+    DocumentsModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
   controllers: [MemberPortalController, MembersController, GuarantorLookupController],

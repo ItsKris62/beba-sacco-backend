@@ -14,6 +14,9 @@
  */
 import { Test } from '@nestjs/testing';
 import { getQueueToken } from '@nestjs/bullmq';
+// BullExplorer is not part of the public API — access via dist path
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { BullExplorer } = require('@nestjs/bullmq/dist/bull.explorer');
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../../src/app.module';
@@ -72,6 +75,7 @@ export class TestAppFactory {
     const moduleRef = await builder.compile();
 
     const app = moduleRef.createNestApplication();
+    app.setGlobalPrefix('api');
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -83,6 +87,11 @@ export class TestAppFactory {
 
     // Prevent pino from logging during tests
     app.useLogger({ log: () => {}, error: () => {}, warn: () => {}, debug: () => {} });
+
+    // BullExplorer.registerWorkers reads opts.connection from the mocked queue (which has none),
+    // causing every @Processor to throw "Worker requires a connection" on init.
+    // Tests don't consume jobs, so suppress all Worker creation entirely.
+    jest.spyOn(BullExplorer.prototype, 'registerWorkers').mockImplementation(() => {});
 
     await app.init();
 
@@ -117,6 +126,7 @@ export class TestAppFactory {
 
   private static async cleanDatabase(prisma: PrismaService): Promise<void> {
     const tables = [
+      'Document',
       'LoanRepayment', 'LoanGuarantor', 'Guarantor', 'Transaction', 'MpesaTransaction',
       'Loan', 'Account', 'Member', 'LoanProduct', 'AuditLog',
       'TenantCounter', 'ReportJob', 'StageAssignment', 'MemberStage', 'User', 'Tenant',
@@ -179,6 +189,11 @@ export class TestAppFactory {
       publish: async () => undefined,
       ping: async () => true,
       onModuleDestroy: () => undefined,
+      createSubscriber: () => ({
+        subscribe: (_channel: string, cb?: (err: Error | null) => void) => { cb?.(null); },
+        on: jest.fn(),
+        disconnect: jest.fn(),
+      }),
     } as unknown as RedisService;
   }
 

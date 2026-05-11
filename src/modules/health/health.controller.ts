@@ -13,6 +13,7 @@ import { PrismaClient } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
+import { StorageService } from '../storage/storage.service';
 
 /**
  * Health Check Controller
@@ -35,6 +36,7 @@ export class HealthController {
     private readonly disk: DiskHealthIndicator,
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    private readonly storage: StorageService,
   ) {}
 
   /** Custom Redis health check — uses PING command with a 2 s timeout guard */
@@ -46,6 +48,23 @@ export class HealthController {
     return {
       redis: ok ? { status: 'up' } : { status: 'down', message: 'Redis PING timed out or failed' },
     };
+  }
+
+  private async r2Check(): Promise<HealthIndicatorResult> {
+    try {
+      await Promise.race([
+        this.storage.healthCheck(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('R2 health check timed out')), 2000)),
+      ]);
+      return { r2: { status: 'up' } };
+    } catch (err) {
+      return {
+        r2: {
+          status: 'down',
+          message: err instanceof Error ? err.message : String(err),
+        },
+      };
+    }
   }
 
   @Public()
@@ -61,6 +80,9 @@ export class HealthController {
 
       // Redis connectivity
       () => this.redisCheck(),
+
+      // R2 / S3-compatible object storage connectivity
+      () => this.r2Check(),
 
       // Heap: alert above 150 MB
       () => this.memory.checkHeap('memory_heap', 150 * 1024 * 1024),

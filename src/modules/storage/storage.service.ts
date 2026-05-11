@@ -4,6 +4,7 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   DeleteObjectCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
@@ -95,6 +96,33 @@ export class StorageService {
   }
 
   /**
+   * Generate a pre-signed PUT URL for a caller-supplied object key.
+   * Used when the database creates a Document row before the browser upload.
+   */
+  async getUploadUrlForKey(params: {
+    objectKey: string;
+    contentType: string;
+    expiresIn?: number;
+  }): Promise<{ uploadUrl: string; objectKey: string; expiresIn: number }> {
+    if (!ALLOWED_CONTENT_TYPES.has(params.contentType)) {
+      throw new BadRequestException(
+        `Unsupported content type "${params.contentType}". ` +
+        `Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}`,
+      );
+    }
+
+    const expiresIn = params.expiresIn ?? UPLOAD_URL_TTL;
+    const command = new PutObjectCommand({
+      Bucket: this.bucketName,
+      Key: params.objectKey,
+      ContentType: params.contentType,
+    });
+
+    const uploadUrl = await getSignedUrl(this.s3Client, command, { expiresIn });
+    return { uploadUrl, objectKey: params.objectKey, expiresIn };
+  }
+
+  /**
    * Generate a pre-signed GET URL for secure file download.
    */
   async getDownloadUrl(key: string, expiresIn = 3600): Promise<string> {
@@ -126,6 +154,34 @@ export class StorageService {
     return (response.Contents ?? []).map((obj) => obj.Key ?? '').filter(Boolean);
   }
 
+  async healthCheck(): Promise<boolean> {
+    const command = new ListObjectsV2Command({
+      Bucket: this.bucketName,
+      MaxKeys: 1,
+    });
+    await this.s3Client.send(command);
+    return true;
+  }
+
+  /**
+   * Read object metadata without downloading the object body.
+   */
+  async headFile(key: string): Promise<{
+    contentLength: number;
+    contentType: string | null;
+    eTag: string | null;
+    lastModified: Date | null;
+  }> {
+    const command = new HeadObjectCommand({ Bucket: this.bucketName, Key: key });
+    const response = await this.s3Client.send(command);
+    return {
+      contentLength: response.ContentLength ?? 0,
+      contentType: response.ContentType ?? null,
+      eTag: response.ETag ?? null,
+      lastModified: response.LastModified ?? null,
+    };
+  }
+
   /**
    * Phase 6 – Upload a Buffer directly to storage (server-side upload).
    * Used by: FeatureStoreService (ML exports), DSARService (encrypted ZIPs).
@@ -146,4 +202,3 @@ export class StorageService {
     this.logger.log(`Uploaded buffer to ${key} (${body.length} bytes)`);
   }
 }
-

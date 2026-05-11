@@ -34,6 +34,7 @@ import { MpesaModule } from './modules/mpesa/mpesa.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { QueueModule } from './modules/queue/queue.module';
 import { StorageModule } from './modules/storage/storage.module';
+import { DocumentsModule } from './modules/documents/documents.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { HealthModule } from './modules/health/health.module';
 import { AdminModule } from './modules/admin/admin.module';
@@ -153,6 +154,7 @@ import { AuditService } from './modules/audit/audit.service';
     AuditModule,     // Must be imported so AuditService is resolvable by AuditInterceptor
     QueueModule,
     StorageModule,
+    DocumentsModule,
     AnalyticsModule,
     HealthModule,
     AdminModule,

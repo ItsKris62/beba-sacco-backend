@@ -26,6 +26,12 @@ import { MemberStkPushDto } from './dto/member-stk-push.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
+import { DocumentsService } from '../documents/documents.service';
+import {
+  ConfirmDocumentUploadDto,
+  DocumentUploadUrlResponseDto,
+  RequestDocumentUploadUrlDto,
+} from '../documents/dto/document.dto';
 
 /**
  * Member Portal Controller
@@ -50,6 +56,7 @@ export class MemberPortalController {
     private readonly statements: StatementService,
     private readonly prisma: PrismaService,
     private readonly dashboardService: DashboardService,
+    private readonly documents: DocumentsService,
   ) {}
 
   /** Resolve memberId from the authenticated user's id */
@@ -86,6 +93,85 @@ export class MemberPortalController {
     );
     if (result.partial) res.status(HttpStatus.PARTIAL_CONTENT);
     return result.data;
+  }
+
+  @Post('documents/upload-url')
+  @Throttle({ global: { limit: 12, ttl: 60_000 } })
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Request a pre-signed KYC document upload URL',
+    description: 'Creates a tenant-scoped Document upload intent and returns a short-lived R2/MinIO PUT URL.',
+  })
+  @ApiResponse({ status: 201, description: 'Pre-signed upload URL', type: DocumentUploadUrlResponseDto })
+  requestDocumentUploadUrl(
+    @Body() dto: RequestDocumentUploadUrlDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    return this.documents.requestMemberUploadUrl(tenant.id, user.id, dto, req.ip);
+  }
+
+  @Post('documents/confirm')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Confirm a direct-to-storage KYC document upload',
+    description: 'HEAD-checks the uploaded object, validates tenant/member key ownership, and moves the document to PENDING_REVIEW.',
+  })
+  @ApiResponse({ status: 200, description: 'Upload confirmed' })
+  confirmDocumentUpload(
+    @Body() dto: ConfirmDocumentUploadDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    return this.documents.confirmMemberUpload(tenant.id, user.id, dto, req.ip);
+  }
+
+  @Post('documents/:id/confirm')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Confirm a direct-to-storage KYC document upload by document ID',
+    description: 'Compatibility route for clients that pass the document ID in the path.',
+  })
+  @ApiResponse({ status: 200, description: 'Upload confirmed' })
+  confirmDocumentUploadById(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: Partial<ConfirmDocumentUploadDto> | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    return this.documents.confirmMemberUpload(
+      tenant.id,
+      user.id,
+      { documentId: id, checksum: dto?.checksum },
+      req.ip,
+    );
+  }
+
+  @Get('documents')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'List my KYC documents' })
+  @ApiResponse({ status: 200, description: 'Authenticated member documents' })
+  listMyDocuments(
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.documents.listMemberDocuments(tenant.id, user.id);
+  }
+
+  @Get('documents/:id/download')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Generate a short-lived download URL for my document' })
+  @ApiResponse({ status: 200, description: 'Pre-signed download URL' })
+  getMyDocumentDownloadUrl(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    return this.documents.getMemberDownloadUrl(tenant.id, user.id, id, req.ip);
   }
 
   // ─── FOSA STATEMENT ────────────────────────────────────────────────────────

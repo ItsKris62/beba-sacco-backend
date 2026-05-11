@@ -290,9 +290,30 @@ enum InterestType {
 }
 
 enum KycStatus {
+  PENDING_UPLOAD // Member exists, but required KYC documents are not ready for review
   PENDING_REVIEW // Submitted, awaiting staff review
   APPROVED // KYC cleared; FOSA + BOSA accounts created
   REJECTED // KYC rejected; reason stored on member record
+
+  @@schema("public")
+}
+
+enum DocumentStatus {
+  PENDING_UPLOAD
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  DELETED
+
+  @@schema("public")
+}
+
+enum DocumentType {
+  NATIONAL_ID_FRONT
+  NATIONAL_ID_BACK
+  KRA_PIN
+  MEMBER_FORM
+  OTHER
 
   @@schema("public")
 }
@@ -349,6 +370,7 @@ model Tenant {
   webhookSubscriptions WebhookSubscription[]
   dataImportLogs       DataImportLog[]
   reportJobs           ReportJob[]
+  documents            Document[]
 
   @@index([slug])
   @@index([status])
@@ -483,11 +505,10 @@ model Member {
   isActive Boolean  @default(true)
   joinedAt DateTime @default(now())
 
-  kycStatus           KycStatus @default(PENDING_REVIEW)
+  kycStatus           KycStatus @default(PENDING_UPLOAD)
   kycReviewedAt       DateTime?
   kycReviewedByUserId String? // userId of staff who reviewed
   kycRejectionReason  String?   @db.Text
-  kycDocumentUrls     Json?
   kycChecklist        Json?
   kycReviewNotes      String?   @db.Text
 
@@ -502,12 +523,46 @@ model Member {
   accounts         Account[]
   loans            Loan[]
   guarantors       LoanGuarantor[]
+  documents        Document[]
   stageAssignments MemberStage[] // MVP: many-to-many with Stage
 
   @@unique([tenantId, memberNumber])
   @@index([tenantId])
   @@index([tenantId, isActive])
   @@index([tenantId, kycStatus])
+  @@schema("public")
+}
+
+model Document {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  memberId String
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  uploadedById     String
+  objectKey        String
+  originalFileName String
+  mimeType         String
+  sizeBytes        Int
+  checksum         String?
+  type             DocumentType
+  status           DocumentStatus @default(PENDING_UPLOAD)
+  version          Int            @default(1)
+
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String? @db.Text
+  expiresAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, objectKey])
+  @@index([tenantId, memberId, status])
+  @@index([tenantId, memberId, type, status])
+  @@index([status, expiresAt])
   @@schema("public")
 }
 

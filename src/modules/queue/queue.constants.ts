@@ -43,12 +43,14 @@ export const QUEUE_NAMES = {
   EXECUTIVE_REPORT: 'reports.executive',
   REPORT_GENERATION: 'reports.generation',
   REPORT_GENERATION_DLQ: 'reports.generation.dlq',
+  DOCUMENT_CLEANUP: 'documents.cleanup',
   DR_DRILL: 'sre.dr-drill',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 export const GUARANTOR_VALIDATION_QUEUE_JOB = 'validate';
 export const GUARANTOR_EXPIRY_CHECK_JOB = 'guarantor-expiry-check';
+export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
 
 // ─── Job payload types ────────────────────────────────────────────────────────
 

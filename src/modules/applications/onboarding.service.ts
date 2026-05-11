@@ -23,7 +23,7 @@ import { ApproveApplicationDto, RejectApplicationDto } from './dto/review-applic
  *  2. Check for duplicate idNumber / phoneNumber on User table
  *  3. Generate role-prefixed random member number (retried on collision)
  *  4. Create User (mustChangePassword = true)
- *  5. Create Member profile (kycStatus = APPROVED)
+ *  5. Create Member profile (kycStatus = PENDING_UPLOAD)
  *  6. Create FOSA account
  *  7. Create BOSA account
  *  8. Find existing Stage by name+ward, then create StageAssignment
@@ -205,9 +205,7 @@ export class OnboardingService {
               userId: user.id,
               memberNumber,
               nationalId: app.idNumber,
-              kycStatus: KycStatus.APPROVED,
-              kycReviewedAt: new Date(),
-              kycReviewedByUserId: actorId,
+              kycStatus: KycStatus.PENDING_UPLOAD,
               isActive: true,
             },
             select: { id: true, memberNumber: true },

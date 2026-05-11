@@ -4,7 +4,7 @@ import {
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { AccountType, KycStatus, LoanStatus, UserRole } from '@prisma/client';
+import { AccountType, DocumentStatus, DocumentType, KycStatus, LoanStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
@@ -13,6 +13,12 @@ import { UpdateKycDto } from './dto/update-kyc.dto';
 import { ReviewMemberDto, ReviewAction } from './dto/review-member.dto';
 
 const STATS_CACHE_TTL = 60; // 60 seconds
+const REQUIRED_KYC_DOCUMENT_TYPES: DocumentType[] = [
+  DocumentType.NATIONAL_ID_FRONT,
+  DocumentType.NATIONAL_ID_BACK,
+  DocumentType.KRA_PIN,
+  DocumentType.MEMBER_FORM,
+];
 
 /**
  * Admin Service
@@ -298,6 +304,8 @@ export class AdminService {
     }
 
     if (dto.action === ReviewAction.APPROVE) {
+      await this.assertMemberHasApprovedKycDocuments(tenantId, memberId);
+
       await this.prisma.$transaction(async (tx) => {
         await tx.member.update({
           where: { id: memberId },
@@ -421,9 +429,10 @@ export class AdminService {
     });
 
     if (dto.verified === true) {
-      if (!dto.documentUrls?.length) {
-        throw new BadRequestException('At least one KYC document URL is required for approval');
+      if (!dto.documentIds?.length) {
+        throw new BadRequestException('Approved KYC document IDs are required for approval');
       }
+      await this.assertApprovedKycDocuments(tenantId, memberId, dto.documentIds);
       this.assertKycChecklistComplete(dto.checklist);
     }
     if (dto.verified === false && !dto.notes?.trim()) {
@@ -440,7 +449,6 @@ export class AdminService {
           ...(dto.employer !== undefined && { employer: dto.employer }),
           ...(dto.occupation !== undefined && { occupation: dto.occupation }),
           ...(dto.dateOfBirth !== undefined && { dateOfBirth: new Date(dto.dateOfBirth) }),
-          ...(dto.documentUrls !== undefined && { kycDocumentUrls: dto.documentUrls }),
           ...(dto.checklist !== undefined && { kycChecklist: dto.checklist }),
           ...(dto.notes !== undefined && { kycReviewNotes: dto.notes.trim() }),
           ...(dto.verified === true && {
@@ -511,7 +519,7 @@ export class AdminService {
         before,
         after: {
           ...dto,
-          documentUrls: dto.documentUrls?.map((url) => ({ url })),
+          documentIds: dto.documentIds?.map((id) => ({ id })),
         },
         kycDecision: dto.verified === undefined ? 'PROFILE_UPDATE' : dto.verified ? 'APPROVED' : 'REJECTED',
       },
@@ -530,6 +538,47 @@ export class AdminService {
       .map(([key]) => key);
     if (incomplete.length > 0) {
       throw new BadRequestException(`KYC checklist incomplete: ${incomplete.join(', ')}`);
+    }
+  }
+
+  private async assertApprovedKycDocuments(
+    tenantId: string,
+    memberId: string,
+    documentIds: string[],
+  ): Promise<void> {
+    const documents = await this.prisma.document.findMany({
+      where: {
+        tenantId,
+        memberId,
+        id: { in: [...new Set(documentIds)] },
+        status: DocumentStatus.APPROVED,
+        type: { in: REQUIRED_KYC_DOCUMENT_TYPES },
+      },
+      select: { id: true, type: true },
+    });
+
+    const approvedTypes = new Set(documents.map((document) => document.type));
+    const missing = REQUIRED_KYC_DOCUMENT_TYPES.filter((type) => !approvedTypes.has(type));
+    if (missing.length > 0) {
+      throw new BadRequestException(`Approved KYC documents missing: ${missing.join(', ')}`);
+    }
+  }
+
+  private async assertMemberHasApprovedKycDocuments(tenantId: string, memberId: string): Promise<void> {
+    const documents = await this.prisma.document.findMany({
+      where: {
+        tenantId,
+        memberId,
+        status: DocumentStatus.APPROVED,
+        type: { in: REQUIRED_KYC_DOCUMENT_TYPES },
+      },
+      distinct: ['type'],
+      select: { type: true },
+    });
+    const approvedTypes = new Set(documents.map((document) => document.type));
+    const missing = REQUIRED_KYC_DOCUMENT_TYPES.filter((type) => !approvedTypes.has(type));
+    if (missing.length > 0) {
+      throw new BadRequestException(`Cannot approve KYC until required documents are approved: ${missing.join(', ')}`);
     }
   }
 }

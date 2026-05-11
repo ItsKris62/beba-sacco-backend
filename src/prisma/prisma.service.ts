@@ -108,7 +108,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       'CbkReturn', 'ApiClient', 'NotificationLog', 'ComplianceAlert',
       'DataImportLog', 'TenantCounter', 'LoanRepayment', 'SavingsRecord',
       'GroupWelfare', 'GroupWelfareCollection',
-      'MemberApplication', 'Stage',
+      'MemberApplication', 'Stage', 'Document',
       'Partner', 'SlaIncident', 'ExecutiveReport',
       'RiskScore', 'FeatureSnapshot', 'TenantRegionConfig',
       'DataAccessLog', 'ConsentRegistry', 'ErasureRequest',
@@ -282,4 +282,3 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     return result[0]?.exists ?? false;
   }
 }
-

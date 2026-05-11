@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsBoolean, IsDateString, IsObject, IsOptional, IsString, IsUrl, Matches, MaxLength } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsObject, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
 
 export class UpdateKycDto {
   @ApiPropertyOptional({ description: 'National ID number', example: '12345678' })
@@ -44,13 +44,13 @@ export class UpdateKycDto {
   dateOfBirth?: string;
 
   @ApiPropertyOptional({
-    description: 'KYC document URLs reviewed by staff. Required when verified=true.',
+    description: 'Approved KYC document IDs reviewed by staff. Required when verified=true.',
     type: [String],
   })
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
-  documentUrls?: string[];
+  @IsUUID('4', { each: true })
+  documentIds?: string[];
 
   @ApiPropertyOptional({
     description: 'Final KYC decision. true approves, false rejects with notes, omitted updates profile fields only.',
