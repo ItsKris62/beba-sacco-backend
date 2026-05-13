@@ -405,6 +405,14 @@ export class DarajaClientService implements OnModuleInit {
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       this.logger.error(`Daraja ${label} HTTP ${res.status}`, text.slice(0, 200));
+      // 4xx from the OAuth endpoint means Safaricom rejected the credentials —
+      // the fix is to update MPESA_CONSUMER_KEY/SECRET in the environment, not to retry.
+      if (label === 'OAuth token') {
+        throw new MpesaOAuthException(
+          `Daraja OAuth returned HTTP ${res.status} — verify MPESA_CONSUMER_KEY and MPESA_CONSUMER_SECRET match your ${this.getConfigValue('app.mpesa.environment', 'sandbox')} app in the Safaricom Developer Portal`,
+          false,
+        );
+      }
       throw new MpesaApiException(String(res.status), `Daraja ${label} HTTP ${res.status}`);
     }
 

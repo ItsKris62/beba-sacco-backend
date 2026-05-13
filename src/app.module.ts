@@ -16,6 +16,7 @@ import { validationSchema } from './common/config/validation.schema';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { TenantMiddleware } from './common/middleware/tenant.middleware';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
+import { MpesaExceptionFilter } from './modules/mpesa/filters/mpesa-exception.filter';
 import { JwtAuthGuard } from './common/guards/jwt.guard';
 import { RBACGuard } from './common/guards/rbac.guard';
 import { TenantInterceptor } from './common/interceptors/tenant.interceptor';
@@ -199,8 +200,12 @@ import { AuditService } from './modules/audit/audit.service';
     { provide: APP_INTERCEPTOR, useClass: ApiVersionInterceptor },
 
     // ── Global Filters ────────────────────────────────────────
+    // Registration order matters for APP_FILTER: last entry = highest priority.
+    // MpesaExceptionFilter is also more specific (@Catch(MpesaException) vs @Catch()),
+    // so it wins over GlobalExceptionFilter for MpesaException subclasses on any route.
     { provide: APP_FILTER, useClass: SentryGlobalFilter },
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
+    { provide: APP_FILTER, useClass: MpesaExceptionFilter },
   ],
 })
 export class AppModule implements NestModule {
