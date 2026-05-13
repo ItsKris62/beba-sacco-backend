@@ -2,7 +2,6 @@ import {
   Injectable,
   Logger,
   BadRequestException,
-  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -14,7 +13,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
-import { MpesaException } from './exceptions/mpesa.exceptions';
+import { MpesaException, MpesaConfigException } from './exceptions/mpesa.exceptions';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
 import { maskPhone, buildMpesaRef } from './utils/mpesa.utils';
 import {
@@ -277,7 +276,7 @@ export class MpesaService {
     const queueTimeoutUrl = this.config.get<string>('app.mpesa.b2cQueueTimeoutUrl', '');
 
     if (!securityCredential) {
-      throw new InternalServerErrorException('MPESA_SECURITY_CREDENTIAL not configured');
+      throw new MpesaConfigException('MPESA_SECURITY_CREDENTIAL');
     }
 
     const darajaResp = await this.daraja.initiateB2C({
