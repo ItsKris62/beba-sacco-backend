@@ -14,6 +14,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
+import { MpesaException } from './exceptions/mpesa.exceptions';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
 import { maskPhone, buildMpesaRef } from './utils/mpesa.utils';
 import {
@@ -87,16 +88,26 @@ export class MpesaService {
       throw new BadRequestException('STK push request is already processing');
     }
 
+    // Hoisted so the catch block can reach these without re-computing.
+    const rlKey = stkRateLimitKey(tenantId, memberId);
+    // Set to true only after the daily limit guard passes. Ensures the catch
+    // block does NOT attempt a decrement on the "limit already exceeded" throw,
+    // where the INCR was a legitimate counter hit that must stay.
+    let rateLimitSlotConsumed = false;
+
     try {
       const maxPerDay = this.config.get<number>('app.mpesa.stkRateLimitPerDay', 3);
-      const rlKey = stkRateLimitKey(tenantId, memberId);
       const midnightEatMs = Date.now() + secondsUntilMidnightEAT() * 1000;
       const currentCount = await this.redis.incrWithExpireAt(rlKey, midnightEatMs);
       if (currentCount > maxPerDay) {
+        // The member genuinely hit their daily cap — do NOT decrement.
         throw new BadRequestException(
           `STK Push limit reached: ${maxPerDay} requests per day per member`,
         );
       }
+      // The guard passed: slot tentatively consumed. Will be returned if Daraja
+      // fails with a transient error (M-Pesa down, network blip).
+      rateLimitSlotConsumed = true;
 
       const accountRef = this.buildAccountRef(dto);
       await this.verifyAccountRef(dto.purpose, accountRef, tenantId);
@@ -149,6 +160,24 @@ export class MpesaService {
       await this.idempotency.complete(idemKey, tenantId, result, 24 * 60 * 60);
       return result;
     } catch (error) {
+      // Return the rate-limit slot when M-Pesa itself was the problem.
+      //
+      // All three conditions must hold:
+      //   1. rateLimitSlotConsumed — the INCR passed the limit guard, so we
+      //      actually incremented against the member's allowance.
+      //   2. error instanceof MpesaException — business/validation errors
+      //      (wrong account number, unknown loan) intentionally consume a slot
+      //      to deter enumeration; only Daraja transport/service errors are returned.
+      //   3. error.retryable — permanent Daraja rejections (bad credentials,
+      //      invalid shortcode) also consume a slot since resubmitting
+      //      immediately would fail again with no operator action.
+      if (
+        rateLimitSlotConsumed &&
+        error instanceof MpesaException &&
+        error.retryable
+      ) {
+        await this.safeReleaseRateLimitSlot(rlKey, tenantId, memberId);
+      }
       await this.idempotency.release(idemKey, tenantId);
       throw error;
     }
@@ -353,6 +382,29 @@ export class MpesaService {
   }
 
   // ─── Internal helpers ────────────────────────────────────────────────────
+
+  /**
+   * Returns a previously consumed rate-limit slot after a transient Daraja failure.
+   *
+   * Redis errors are intentionally swallowed. If decrIfPositive fails the counter
+   * stays too high for the rest of the day — the member may see a false rate-limit
+   * on their next attempt. That is the safer failure mode: prefer a temporary
+   * false-limit over masking the original error or leaking an unhandled rejection.
+   *
+   * The warn-level log provides an audit trail in production logs for on-call
+   * investigation if members report unexpected limits during an outage window.
+   */
+  private async safeReleaseRateLimitSlot(
+    rlKey: string,
+    tenantId: string,
+    memberId: string,
+  ): Promise<void> {
+    const newCount = await this.redis.decrIfPositive(rlKey);
+    this.logger.warn(
+      `STK rate-limit slot restored (retryable Daraja error) | ` +
+      `tenant=${tenantId} member=${memberId} newCount=${newCount}`,
+    );
+  }
 
   private buildAccountRef(dto: MemberDepositDto): string {
     if (dto.purpose === DepositPurpose.LOAN_REPAYMENT) {

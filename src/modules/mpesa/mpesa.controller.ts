@@ -7,6 +7,7 @@ import {
   Req,
   HttpCode,
   HttpStatus,
+  UseFilters,
   UseGuards,
   Logger,
   ServiceUnavailableException,
@@ -40,6 +41,7 @@ import {
   isC2bCallback,
   isB2cCallback,
 } from './dto/mpesa-callback.dto';
+import { MpesaExceptionFilter } from './filters/mpesa-exception.filter';
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -66,6 +68,7 @@ const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+@UseFilters(MpesaExceptionFilter)
 @Controller('mpesa')
 export class MpesaController implements OnModuleInit {
   private readonly logger = new Logger(MpesaController.name);
@@ -120,6 +123,7 @@ export class MpesaController implements OnModuleInit {
   @ApiResponse({ status: 400, description: 'Rate limit exceeded, invalid phone, or account not found' })
   @ApiResponse({ status: 401, description: 'Unauthenticated' })
   @ApiResponse({ status: 403, description: 'Insufficient role' })
+  @ApiResponse({ status: 503, description: 'M-Pesa temporarily unavailable — retryable', schema: { properties: { statusCode: { type: 'number' }, error: { type: 'string' }, message: { type: 'string' }, retryable: { type: 'boolean' } } } })
   @ApiHeader({ name: 'X-Idempotency-Key', required: true, description: 'Required to prevent duplicate STK prompts on retry' })
   async memberDeposit(
     @Body() dto: MemberDepositDto,

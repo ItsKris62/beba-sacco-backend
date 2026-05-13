@@ -1,11 +1,19 @@
 import {
   Injectable,
   Logger,
-  InternalServerErrorException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { RedisService } from '../../common/services/redis.service';
+import {
+  MpesaException,
+  MpesaConfigException,
+  MpesaNetworkException,
+  MpesaOAuthException,
+  MpesaServiceUnavailableException,
+  MpesaApiException,
+} from './exceptions/mpesa.exceptions';
 
 // ─── Daraja API response types ────────────────────────────────────────────────
 
@@ -50,13 +58,27 @@ export interface B2cResult {
   ResponseDescription: string;
 }
 
+export interface MpesaConfigValidation {
+  valid: boolean;
+  errors: string[];
+}
+
+export interface OAuthConnectivityResult {
+  success: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Cache 55 minutes – Daraja tokens live 60 min; we refresh before expiry.
 const OAUTH_TTL_SEC = 3300;
+// OAuth retry: 3 attempts with 1 s base → waits 1 s, then 2 s (max 3 s extra).
+const OAUTH_RETRY_ATTEMPTS = 3;
+const OAUTH_RETRY_BASE_MS = 1000;
 
 @Injectable()
-export class DarajaClientService {
+export class DarajaClientService implements OnModuleInit {
   private readonly logger = new Logger(DarajaClientService.name);
   private readonly baseUrl: string;
 
@@ -71,23 +93,94 @@ export class DarajaClientService {
         : 'https://sandbox.safaricom.co.ke';
   }
 
+  onModuleInit(): void {
+    const { valid, errors } = this.validateConfig();
+    if (!valid) {
+      errors.forEach(e => this.logger.warn(`M-Pesa config issue: ${e}`));
+      this.logger.warn(
+        `DarajaClientService started with ${errors.length} config problem(s). ` +
+        'STK Push and B2C calls will fail until these are resolved.',
+      );
+    }
+  }
+
+  // ─── Config validation ────────────────────────────────────────────────────
+
+  /**
+   * Validates that all required M-Pesa env vars are set and correctly formatted.
+   * Safe to call synchronously — does not make any network requests.
+   */
+  validateConfig(): MpesaConfigValidation {
+    const errors: string[] = [];
+
+    const required: [string, string][] = [
+      ['app.mpesa.consumerKey', 'MPESA_CONSUMER_KEY'],
+      ['app.mpesa.consumerSecret', 'MPESA_CONSUMER_SECRET'],
+      ['app.mpesa.passkey', 'MPESA_PASSKEY'],
+      ['app.mpesa.shortcode', 'MPESA_SHORTCODE'],
+      ['app.mpesa.callbackUrl', 'MPESA_CALLBACK_URL'],
+    ];
+
+    for (const [key, name] of required) {
+      if (!this.getConfigValue(key)) errors.push(`${name} is not set`);
+    }
+
+    const callbackUrl = this.getConfigValue('app.mpesa.callbackUrl');
+    if (callbackUrl) {
+      try {
+        const parsed = new URL(callbackUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          errors.push('MPESA_CALLBACK_URL must use http or https protocol');
+        }
+      } catch {
+        errors.push(`MPESA_CALLBACK_URL is not a valid URL: "${callbackUrl}"`);
+      }
+    }
+
+    // Verify the derived base URL is well-formed (guards against bad MPESA_ENVIRONMENT values)
+    try {
+      new URL(this.baseUrl);
+    } catch {
+      errors.push(`Daraja base URL is invalid: "${this.baseUrl}"`);
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Makes a live OAuth call (bypasses cache) to verify that the consumer
+   * key/secret are accepted by Safaricom. Use only for health checks or
+   * one-off diagnostics — do not call on every request.
+   */
+  async testOAuthConnectivity(): Promise<OAuthConnectivityResult> {
+    const start = Date.now();
+    try {
+      await this.invalidateTokenCache();
+      await this.getAccessToken();
+      return { success: true, latencyMs: Date.now() - start };
+    } catch (err) {
+      return {
+        success: false,
+        latencyMs: Date.now() - start,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
   // ─── OAuth Token ──────────────────────────────────────────────────────────
 
   /**
    * Returns a valid Daraja OAuth2 bearer token.
-   * Token is cached in Redis with a 55-minute TTL so we never hammer the
-   * OAuth endpoint on every request. Thread-safe: multiple concurrent calls
-   * will race to set the cache, but the cost is one extra Daraja call at
-   * most (not a correctness issue).
+   * Token is cached in Redis with a 55-minute TTL to avoid hammering the OAuth
+   * endpoint on every request. The token fetch retries up to 3× with exponential
+   * backoff (1 s → 2 s) to survive momentary Safaricom hiccups.
    */
   async getAccessToken(): Promise<string> {
     const key = this.getConfigValue('app.mpesa.consumerKey');
     const secret = this.getConfigValue('app.mpesa.consumerSecret');
 
     if (!key || !secret) {
-      throw new InternalServerErrorException(
-        'MPESA_CONSUMER_KEY / MPESA_CONSUMER_SECRET not configured',
-      );
+      throw new MpesaConfigException('MPESA_CONSUMER_KEY / MPESA_CONSUMER_SECRET');
     }
 
     const cacheKey = this.oauthCacheKey(key);
@@ -95,10 +188,17 @@ export class DarajaClientService {
     if (cached) return cached;
 
     const auth = Buffer.from(`${key}:${secret}`).toString('base64');
+    const url = `${this.baseUrl}/oauth/v1/generate?grant_type=client_credentials`;
 
-    const res = await this.darajaFetch<DarajaTokenResponse>(
-      `${this.baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
-      { method: 'GET', headers: { Authorization: `Basic ${auth}` } },
+    const res = await this.withRetry(
+      () =>
+        this.darajaFetch<DarajaTokenResponse>(
+          url,
+          { method: 'GET', headers: { Authorization: `Basic ${auth}` } },
+          'OAuth token',
+        ),
+      OAUTH_RETRY_ATTEMPTS,
+      OAUTH_RETRY_BASE_MS,
       'OAuth token',
     );
 
@@ -107,7 +207,7 @@ export class DarajaClientService {
     return res.access_token;
   }
 
-  /** Force-clear the token cache (call after 401 from Daraja) */
+  /** Force-clear the token cache (call after 401 from Daraja). */
   async invalidateTokenCache(): Promise<void> {
     const key = this.getConfigValue('app.mpesa.consumerKey');
     await this.redis.del(this.oauthCacheKey(key));
@@ -128,12 +228,8 @@ export class DarajaClientService {
     const shortcode = this.getConfigValue('app.mpesa.shortcode', '174379');
     const passkey = this.getConfigValue('app.mpesa.passkey');
 
-    if (!passkey) {
-      throw new InternalServerErrorException('MPESA_PASSKEY not configured');
-    }
-    if (!params.callbackUrl) {
-      throw new InternalServerErrorException('MPESA_CALLBACK_URL not configured');
-    }
+    if (!passkey) throw new MpesaConfigException('MPESA_PASSKEY');
+    if (!params.callbackUrl) throw new MpesaConfigException('MPESA_CALLBACK_URL');
 
     const token = await this.getAccessToken();
     const timestamp = this.buildTimestamp();
@@ -225,12 +321,58 @@ export class DarajaClientService {
   }
 
   /**
-   * Shared fetch wrapper with unified error handling.
-   * On HTTP error or non-zero ResponseCode, logs safely (no secrets in logs)
-   * and throws InternalServerErrorException.
+   * Retries `fn` up to `maxAttempts` times using exponential back-off.
    *
-   * If Daraja responds with 401, the token cache is invalidated so the next
-   * call will re-authenticate.
+   * - Non-retryable MpesaExceptions (e.g. config errors, bad credentials) propagate immediately.
+   * - Retryable exceptions and unknown errors wait `baseDelayMs * 2^(attempt-1)` before retry.
+   * - After all attempts are exhausted, wraps the last error in MpesaServiceUnavailableException
+   *   unless it was already a typed MpesaException.
+   */
+  private async withRetry<T>(
+    fn: () => Promise<T>,
+    maxAttempts: number,
+    baseDelayMs: number,
+    label: string,
+  ): Promise<T> {
+    let lastError: Error = new Error('No attempts made');
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+
+        // Permanent failures — don't retry (bad creds, missing config, etc.)
+        if (err instanceof MpesaException && !err.retryable) throw err;
+
+        if (attempt < maxAttempts) {
+          const delay = baseDelayMs * 2 ** (attempt - 1);
+          this.logger.warn(
+            `Daraja ${label} attempt ${attempt}/${maxAttempts} failed; ` +
+            `retrying in ${delay}ms — ${lastError.message}`,
+          );
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    if (lastError instanceof MpesaException) throw lastError;
+    throw new MpesaServiceUnavailableException(
+      `Daraja ${label} failed after ${maxAttempts} attempts: ${lastError.message}`,
+    );
+  }
+
+  /**
+   * Shared fetch wrapper with typed error handling.
+   *
+   * Error mapping:
+   *   - Network failure (fetch throws)  → MpesaNetworkException      (retryable)
+   *   - HTTP 401                        → MpesaOAuthException         (retryable: token refresh)
+   *   - HTTP 5xx                        → MpesaServiceUnavailableException (retryable)
+   *   - HTTP 4xx (other)                → MpesaApiException            (permanent)
+   *   - HTTP 200 + non-zero ResponseCode→ MpesaApiException            (permanent)
+   *
+   * Never logs request bodies (may contain credentials or PII).
    */
   private async darajaFetch<T>(
     url: string,
@@ -241,19 +383,29 @@ export class DarajaClientService {
     try {
       res = await fetch(url, init);
     } catch (err: unknown) {
-      this.logger.error(`Daraja ${label} network error`, err instanceof Error ? err.message : err);
-      throw new InternalServerErrorException(`Daraja ${label} request failed (network)`);
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Daraja ${label} network error: ${msg}`);
+      throw new MpesaNetworkException(`Daraja ${label}: ${msg}`);
     }
 
     if (res.status === 401) {
       await this.invalidateTokenCache();
+      throw new MpesaOAuthException(
+        `Daraja ${label} returned 401 — token expired or credentials rejected`,
+        true,
+      );
+    }
+
+    if (res.status >= 500) {
+      const text = await res.text().catch(() => '');
+      this.logger.error(`Daraja ${label} HTTP ${res.status} (server error)`, text.slice(0, 200));
+      throw new MpesaServiceUnavailableException(`Daraja ${label} HTTP ${res.status}`);
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      // Never log the full request body (may contain credentials)
       this.logger.error(`Daraja ${label} HTTP ${res.status}`, text.slice(0, 200));
-      throw new InternalServerErrorException(`Daraja ${label} HTTP error ${res.status}`);
+      throw new MpesaApiException(String(res.status), `Daraja ${label} HTTP ${res.status}`);
     }
 
     const data = (await res.json()) as T;
@@ -261,9 +413,11 @@ export class DarajaClientService {
     // Daraja returns HTTP 200 but ResponseCode '1' on logical errors
     const code = (data as Record<string, unknown>)['ResponseCode'];
     if (code !== undefined && code !== '0') {
-      const desc = (data as Record<string, unknown>)['ResponseDescription'] ?? 'Unknown error';
+      const desc = String(
+        (data as Record<string, unknown>)['ResponseDescription'] ?? 'Unknown error',
+      );
       this.logger.warn(`Daraja ${label} non-zero ResponseCode ${code}: ${desc}`);
-      throw new InternalServerErrorException(`Daraja ${label} rejected: ${desc}`);
+      throw new MpesaApiException(String(code), desc);
     }
 
     return data;

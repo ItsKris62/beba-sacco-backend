@@ -245,6 +245,44 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Atomically decrements a counter only if its current value is > 0.
+   *
+   * A single Lua script makes the GET → conditional DECR sequence atomic:
+   * no other Redis command can interleave between the read and the write,
+   * so the counter can never go negative regardless of concurrent callers.
+   *
+   * The existing TTL (set by incrWithExpireAt) is preserved — DECR does not
+   * touch the key's expiry.
+   *
+   * Use case: returning a rate-limit slot when a request fails transiently
+   * so the member can retry without burning their daily allowance.
+   *
+   * Returns the new counter value after decrement, or the unchanged value if
+   * already 0, or 0 if the key does not exist.
+   * Returns 0 on Redis error (fail-open: the counter stays as-is rather than
+   * crashing the caller — the member may see a false rate-limit for the rest
+   * of the day, which is the safer failure mode).
+   */
+  async decrIfPositive(key: string): Promise<number> {
+    const script = [
+      'local v = redis.call("GET", KEYS[1])',
+      'if not v then return 0 end',
+      'local n = tonumber(v)',
+      'if n and n > 0 then return redis.call("DECR", KEYS[1]) end',
+      'return n or 0',
+    ].join('\n');
+    try {
+      const result: unknown = await this.client.eval(script, 1, key);
+      return typeof result === 'number' ? result : 0;
+    } catch (err) {
+      this.logger.warn(
+        `Redis decrIfPositive failed for key "${key}": ${(err as Error).message}`,
+      );
+      return 0;
+    }
+  }
+
+  /**
    * Set TTL on an existing key.
    */
   async expire(key: string, ttlSeconds: number): Promise<void> {
