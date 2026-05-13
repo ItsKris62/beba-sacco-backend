@@ -51,8 +51,6 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       `password=${password ? '[SET]' : '[NOT SET]'}`,
     );
 
-    // Track whether we've already given up on Redis to suppress repeated logs
-    let redisGaveUp = false;
     // Set to true on WRONGPASS — stops retryStrategy immediately so we don't
     // burn Upstash command quota retrying a credential that will never work.
     let redisAuthFailed = false;
@@ -73,25 +71,19 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       connectTimeout: 5000,
       // Command timeout — fail fast rather than hang
       commandTimeout: 3000,
-      // Exponential back-off retry strategy (capped at 30 s, max 3 attempts for dev)
+      // Retry forever with exponential back-off (capped at 30 s).
+      // Never return null for transient failures — on Render's free tier the service
+      // hibernates and kills the TCP connection; ioredis must keep retrying until the
+      // network stabilises after wake-up rather than permanently giving up.
       retryStrategy: (times: number) => {
         if (redisAuthFailed) return null; // credential is wrong — retrying wastes quota
-        if (times > 3) {
-          if (!redisGaveUp) {
-            redisGaveUp = true;
-            this.logger.warn(
-              `Redis: max reconnect attempts reached — running in degraded mode (no cache/queue)`,
-            );
-          }
-          return null; // stop retrying — do NOT throw, just degrade gracefully
-        }
-        const delay = Math.min(times * 1000, 5_000);
+        const delay = Math.min(times * 500, 30_000);
         this.logger.warn(`Redis: reconnect attempt ${times}, next try in ${delay}ms`);
         return delay;
       },
-      // Only reconnect on READONLY (Upstash failover), NOT on ECONNREFUSED
+      // Reconnect on READONLY (Upstash failover) and ECONNRESET (hibernation wake-up)
       reconnectOnError: (err: Error) => {
-        return err.message.includes('READONLY');
+        return err.message.includes('READONLY') || err.message.includes('ECONNRESET');
       },
     };
 
@@ -110,20 +102,14 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         }
         return;
       }
-      if (!redisGaveUp) {
-        this.logger.warn(`Redis error (non-fatal): ${err.message}`);
-      }
+      this.logger.warn(`Redis error (non-fatal): ${err.message}`);
     });
     this.client.on('connect', () =>
       this.logger.log(`Redis connected → ${host}:${port} (TLS: ${tls})`),
     );
     this.client.on('ready', () => this.logger.log('Redis client ready'));
-    this.client.on('close', () => {
-      if (!redisGaveUp) this.logger.warn('Redis connection closed');
-    });
-    this.client.on('reconnecting', () => {
-      if (!redisGaveUp) this.logger.warn('Redis reconnecting…');
-    });
+    this.client.on('close', () => this.logger.warn('Redis connection closed'));
+    this.client.on('reconnecting', () => this.logger.warn('Redis reconnecting…'));
   }
 
   async onModuleInit(): Promise<void> {
