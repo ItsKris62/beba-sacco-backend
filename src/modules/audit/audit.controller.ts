@@ -76,7 +76,6 @@ export class AuditController {
       limit: safeLimit,
       offset,
     }).then((result) => ({
-      success: true,
       data: result.data,
       meta: {
         page: safePage,
@@ -84,7 +83,6 @@ export class AuditController {
         total: result.total,
         totalPages: Math.ceil(result.total / safeLimit),
       },
-      error: null,
     }));
   }
 
