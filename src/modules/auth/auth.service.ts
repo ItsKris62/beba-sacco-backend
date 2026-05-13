@@ -131,17 +131,20 @@ export class AuthService {
   async login(loginDto: LoginDto, tenantId: string, ipAddress?: string): Promise<LoginResponseDto> {
     const normalizedEmail =
       typeof loginDto.email === 'string' ? loginDto.email.trim().toLowerCase() : undefined;
+    // Strip leading '+' so '254...' and '+254...' both resolve to the same stored value
     const normalizedPhone =
-      typeof loginDto.phone === 'string' ? loginDto.phone.trim() : undefined;
+      typeof loginDto.phone === 'string' ? loginDto.phone.trim().replace(/^\+/, '') : undefined;
     const identifier = normalizedEmail || normalizedPhone;
 
     if (!identifier) {
       throw new UnauthorizedException('Provide email or phone');
     }
 
-    const credentialWhere = normalizedEmail
+    // For phone logins, search both `phone` (auth field) and `phoneNumber` (approval field)
+    // so members whose number was stored during admin approval can log in.
+    const credentialCondition = normalizedEmail
       ? { email: normalizedEmail }
-      : { phone: identifier };
+      : { OR: [{ phone: identifier }, { phoneNumber: identifier }] };
 
     // Find by credentials without tenant scope first so SUPER_ADMIN
     // (who belongs to the platform tenant) can log in from any tenant context.
@@ -150,8 +153,10 @@ export class AuthService {
     const candidate = await tenantAsyncStorage.run(undefined, () =>
       this.prisma.user.findFirst({
         where: {
-          ...credentialWhere,
-          OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }],
+          AND: [
+            credentialCondition,
+            { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] },
+          ],
         },
         select: {
           id: true,
