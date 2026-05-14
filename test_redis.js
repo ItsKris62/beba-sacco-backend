@@ -5,9 +5,9 @@
 const Redis = require('ioredis');
 
 const client = new Redis({
-  host: 'informed-newt-77715.upstash.io',
+  host: 'fair-terrapin-80627.upstash.io',
   port: 6379,
-  password: 'gQAAAAAAAS-TAAIncDEzMGEzZjY5YmY2MTg0NDU5OTRlYmQyNjEyYjc5ZGRiMXAxNzc3MTU',
+  password: 'gQAAAAAAATrzAAIgcDIwZGEyMjViNWVlMzg0OWQ4YjAyMWEwYTI4OGNmYWI4Nw',
   tls: { rejectUnauthorized: false },
   connectTimeout: 10000,
   commandTimeout: 5000,
@@ -29,7 +29,7 @@ async function main() {
   console.log('✅ DEL test: key cleaned up');
 
   console.log('\n🎉 Upstash Redis is working correctly!');
-  console.log('   Host: informed-newt-77715.upstash.io:6379 (TLS)');
+  console.log('   Host: fair-terrapin-80627.upstash.io:6379 (TLS)');
 }
 
 main()
