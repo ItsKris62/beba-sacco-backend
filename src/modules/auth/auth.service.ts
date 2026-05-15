@@ -372,15 +372,15 @@ export class AuthService {
     deviceInfo?: DeviceInfo,
     ipAddress?: string,
   ): Promise<RefreshTokenResponseDto> {
-    const refreshToken = refreshDto.refreshToken;
-    if (!refreshToken) {
+    const incomingToken = refreshDto.refreshToken;
+    if (!incomingToken) {
       throw new UnauthorizedException('Refresh token required');
     }
 
     let payload: JwtPayload;
 
     try {
-      payload = this.jwtService.verify<JwtPayload>(refreshToken, {
+      payload = this.jwtService.verify<JwtPayload>(incomingToken, {
         secret: this.configService.getOrThrow<string>('app.jwt.refreshSecret'),
       });
     } catch {
@@ -411,7 +411,7 @@ export class AuthService {
       throw new UnauthorizedException('Token/tenant mismatch');
     }
 
-    const isValid = await argon2.verify(user.refreshToken, refreshToken);
+    const isValid = await argon2.verify(user.refreshToken, incomingToken);
     if (!isValid) {
       // Token reuse detected: revoke ALL active sessions and clear the stored hash.
       // An attacker who obtained an old refresh token must not retain any foothold.
