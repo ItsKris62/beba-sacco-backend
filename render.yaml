@@ -155,6 +155,14 @@ services:
       - key: CORS_ORIGIN
         sync: false        # e.g. https://your-sacco.netlify.app
 
+      # Loan product rules — must be true to enforce guarantor/savings rules
+      - key: ENABLE_PRODUCT_RULES
+        value: "true"
+
+      # Sentry — auth token needed at build time for source-map upload
+      - key: SENTRY_AUTH_TOKEN
+        sync: false        # get from Sentry → Settings → Auth Tokens
+
       # Compliance
       - key: DATA_RETENTION_YEARS
         value: 7
