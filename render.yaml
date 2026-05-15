@@ -19,15 +19,15 @@ services:
     name: beba-sacco-api
     env: node
     region: frankfurt
-    plan: starter          # upgrade to standard for production SLA
-    numInstances: 1        # scale horizontally once load is confirmed
+    plan: starter # upgrade to standard for production SLA
+    numInstances: 1 # scale horizontally once load is confirmed
 
     # ── Build ────────────────────────────────────────────────────────────────
-    buildCommand: npm ci --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    buildCommand: npm ci --include=dev && npm run prisma:generate && npm run build
 
     # ── Pre-deploy (runs before each new version goes live) ──────────────────
     # Uses DIRECT_URL (set on the service) so migrations bypass the Neon pooler.
-    preDeployCommand: npx prisma migrate deploy --schema=src/prisma/schema.prisma
+    preDeployCommand: npm run prisma:deploy
 
     # ── Start ────────────────────────────────────────────────────────────────
     startCommand: node dist/main
@@ -53,7 +53,7 @@ services:
       - key: API_PREFIX
         value: api
       - key: APP_URL
-        sync: false        # e.g. https://api.your-render-service.onrender.com
+        sync: false # e.g. https://api.your-render-service.onrender.com
 
       # Database (Neon)
       # DATABASE_URL  = pooler URL  (ep-xxxx-pooler.region.aws.neon.tech)
@@ -75,13 +75,13 @@ services:
 
       # Redis (Upstash)
       - key: REDIS_HOST
-        sync: false        # e.g. your-db.upstash.io
+        sync: false # e.g. your-db.upstash.io
       - key: REDIS_PORT
         value: 6379
       - key: REDIS_PASSWORD
         sync: false
       - key: REDIS_TLS
-        value: "true"      # Upstash requires TLS
+        value: 'true' # Upstash requires TLS
 
       # Cloudflare R2
       - key: R2_ACCOUNT_ID
@@ -93,7 +93,7 @@ services:
       - key: R2_BUCKET_NAME
         sync: false
       - key: R2_PUBLIC_URL
-        sync: false        # e.g. https://pub-REPLACE.r2.dev
+        sync: false # e.g. https://pub-REPLACE.r2.dev
 
       # Tinybird Analytics
       - key: TINYBIRD_TOKEN
@@ -115,29 +115,29 @@ services:
       - key: MPESA_PASSKEY
         sync: false
       - key: MPESA_SHORTCODE
-        sync: false        # your registered production paybill number
+        sync: false # your registered production paybill number
       - key: MPESA_B2C_SHORTCODE
         sync: false
       - key: MPESA_INITIATOR_NAME
         sync: false
       - key: MPESA_SECURITY_CREDENTIAL
-        sync: false        # RSA-encrypted initiator password (base64)
+        sync: false # RSA-encrypted initiator password (base64)
       - key: MPESA_ENVIRONMENT
         value: production
       # Callback URLs — must match your Render service domain
       - key: MPESA_CALLBACK_URL
-        sync: false        # https://beba-sacco-api.onrender.com/api
+        sync: false # https://beba-sacco-api.onrender.com/api
       - key: MPESA_B2C_RESULT_URL
-        sync: false        # https://beba-sacco-api.onrender.com/api/mpesa/webhooks/b2c-result
+        sync: false # https://beba-sacco-api.onrender.com/api/mpesa/webhooks/b2c-result
       - key: MPESA_B2C_QUEUE_TIMEOUT_URL
-        sync: false        # https://beba-sacco-api.onrender.com/api/mpesa/webhooks/b2c-timeout
+        sync: false # https://beba-sacco-api.onrender.com/api/mpesa/webhooks/b2c-timeout
       # HMAC secret for validating Safaricom callback signatures
       # Generate with: openssl rand -hex 32
       - key: MPESA_WEBHOOK_SECRET
         sync: false
       # Safaricom production IP allowlist — comma-separated, no spaces
       - key: MPESA_ALLOWED_IPS
-        value: "196.201.214.200,196.201.214.206,196.201.213.114,196.201.214.207,196.201.214.208,196.201.213.44,196.201.214.185,196.201.214.186"
+        value: '196.201.214.200,196.201.214.206,196.201.213.114,196.201.214.207,196.201.214.208,196.201.213.44,196.201.214.185,196.201.214.186'
       - key: MPESA_STK_RATE_LIMIT_PER_DAY
         value: 3
 
@@ -147,21 +147,21 @@ services:
       - key: PLUNK_SECRET_KEY
         sync: false
       - key: PLUNK_FROM_EMAIL
-        sync: false        # e.g. noreply@your-sacco.co.ke
+        sync: false # e.g. noreply@your-sacco.co.ke
       - key: PLUNK_FROM_NAME
         value: Beba SACCO
 
       # CORS — set to your Netlify frontend domain
       - key: CORS_ORIGIN
-        sync: false        # e.g. https://your-sacco.netlify.app
+        sync: false # e.g. https://your-sacco.netlify.app
 
       # Loan product rules — must be true to enforce guarantor/savings rules
       - key: ENABLE_PRODUCT_RULES
-        value: "true"
+        value: 'true'
 
       # Sentry — auth token needed at build time for source-map upload
       - key: SENTRY_AUTH_TOKEN
-        sync: false        # get from Sentry → Settings → Auth Tokens
+        sync: false # get from Sentry → Settings → Auth Tokens
 
       # Compliance
       - key: DATA_RETENTION_YEARS

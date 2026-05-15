@@ -22,6 +22,8 @@ const DEFAULT_REQUIRED_TYPES: DocumentType[] = [
   DocumentType.MEMBER_FORM,
 ];
 
+const DOCUMENT_TYPE_VALUES = new Set<string>(Object.values(DocumentType));
+
 @Processor(QUEUE_NAMES.KYC_REVIEW, { concurrency: 2 })
 export class KycReviewProcessor extends WorkerHost {
   private readonly logger = new Logger(KycReviewProcessor.name);
@@ -85,12 +87,17 @@ export class KycReviewProcessor extends WorkerHost {
         memberUpdate.kycRejectionReason = rejectionReason?.trim() ?? null;
       } else {
         // Determine required types from KYCRequirement table, fall back to defaults
-        const configured = await tx.kycRequirement.findMany({
+        const configured = await tx.kYCRequirement.findMany({
           where: { tenantId, isRequired: true },
           select: { documentType: true },
         });
-        const requiredTypes = configured.length > 0
-          ? configured.map((r) => r.documentType as DocumentType)
+        const configuredTypes = configured
+          .map(({ documentType }: { documentType: string }) => documentType)
+          .filter((documentType): documentType is DocumentType =>
+            DOCUMENT_TYPE_VALUES.has(documentType),
+          );
+        const requiredTypes = configuredTypes.length > 0
+          ? configuredTypes
           : DEFAULT_REQUIRED_TYPES;
 
         const approvedCount = await tx.document.findMany({

@@ -5,6 +5,7 @@
   "author": "Beba SACCO",
   "private": true,
   "license": "UNLICENSED",
+  "packageManager": "npm@10.8.2",
   "scripts": {
     "seed:locations": "node scripts/seed-locations.js",
     "seed:clean-demo": "node scripts/reset-clean-demo.js --yes",
@@ -124,7 +125,7 @@
     "testEnvironment": "node"
   },
   "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0"
+    "node": "20.x",
+    "npm": "10.x"
   }
 }

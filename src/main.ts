@@ -9,7 +9,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
 import * as express from 'express';
-import * as cookieParser from 'cookie-parser';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
 
