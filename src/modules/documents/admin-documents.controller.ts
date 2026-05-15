@@ -7,6 +7,7 @@ import {
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Query,
   Req,
 } from '@nestjs/common';
@@ -72,7 +73,7 @@ export class AdminDocumentsController {
   @Roles(UserRole.MEMBER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Approve or reject a KYC document',
+    summary: 'Approve or reject a KYC document (synchronous)',
     description: 'Only MANAGER and CHAIRMAN may approve or reject, enforced inside the service as exact-role policy.',
   })
   @ApiResponse({ status: 200, description: 'Document review recorded' })
@@ -84,5 +85,23 @@ export class AdminDocumentsController {
     @Req() req: Request,
   ) {
     return this.documents.reviewDocument(tenant.id, actor, id, dto, req.ip);
+  }
+
+  @Post(':id/review')
+  @Roles(UserRole.MANAGER, UserRole.CHAIRMAN)
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({
+    summary: 'Enqueue async KYC document review (recommended)',
+    description: 'Enqueues the approve/reject action to BullMQ. Returns 202 with jobId immediately. ' +
+      'The worker updates member KYC status, auto-provisions accounts on full approval, and sends email.',
+  })
+  @ApiResponse({ status: 202, description: 'Review job enqueued' })
+  enqueueReview(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReviewDocumentDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.documents.enqueueKycReview(tenant.id, actor, id, dto);
   }
 }

@@ -1,4 +1,9 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   S3Client,
@@ -88,6 +93,7 @@ export class StorageService {
       Bucket: this.bucketName,
       Key: objectKey,
       ContentType: params.contentType,
+      ServerSideEncryption: 'AES256',
     });
 
     const uploadUrl = await getSignedUrl(this.s3Client, command, { expiresIn: UPLOAD_URL_TTL });
@@ -116,6 +122,7 @@ export class StorageService {
       Bucket: this.bucketName,
       Key: params.objectKey,
       ContentType: params.contentType,
+      ServerSideEncryption: 'AES256',
     });
 
     const uploadUrl = await getSignedUrl(this.s3Client, command, { expiresIn });
@@ -124,13 +131,43 @@ export class StorageService {
 
   /**
    * Generate a pre-signed GET URL for secure file download.
+   *
+   * @param key        Object key in the bucket
+   * @param expiresIn  URL validity in seconds (default 1 hour)
+   * @param expiresAt  Optional document-level expiry date. If set and in the past,
+   *                   throws ForbiddenException before generating the URL.
    */
-  async getDownloadUrl(key: string, expiresIn = 3600): Promise<string> {
+  async getDownloadUrl(key: string, expiresIn = 3600, expiresAt?: Date): Promise<string> {
+    if (expiresAt && new Date() > expiresAt) {
+      throw new ForbiddenException('Document has expired and can no longer be downloaded');
+    }
+
     const command = new GetObjectCommand({
       Bucket: this.bucketName,
       Key: key,
     });
     return getSignedUrl(this.s3Client, command, { expiresIn });
+  }
+
+  /**
+   * Verify that the file stored at `key` does not exceed `declaredSizeBytes` by
+   * more than 5 %. Call this after the client confirms upload to catch cases where
+   * the browser PUT bypassed the declared Content-Length.
+   *
+   * Throws BadRequestException if the stored size exceeds the tolerance.
+   */
+  async validateUploadedSize(key: string, declaredSizeBytes: number): Promise<void> {
+    const command = new HeadObjectCommand({ Bucket: this.bucketName, Key: key });
+    const response = await this.s3Client.send(command);
+    const actualBytes = response.ContentLength ?? 0;
+    const ceiling = Math.ceil(declaredSizeBytes * 1.05);
+
+    if (actualBytes > ceiling) {
+      throw new BadRequestException(
+        `File exceeds declared size by >5% ` +
+        `(declared ${declaredSizeBytes} B, stored ${actualBytes} B)`,
+      );
+    }
   }
 
   /**
@@ -197,6 +234,7 @@ export class StorageService {
       Body: body,
       ContentType: contentType,
       ContentLength: body.length,
+      ServerSideEncryption: 'AES256',
     });
     await this.s3Client.send(command);
     this.logger.log(`Uploaded buffer to ${key} (${body.length} bytes)`);

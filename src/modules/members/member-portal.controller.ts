@@ -23,6 +23,7 @@ import type { Tenant } from '@prisma/client';
 import { MemberApplyLoanDto, MemberRequestGuarantorsDto } from '../loans/dto/member-apply-loan.dto';
 import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
 import { MemberStkPushDto } from './dto/member-stk-push.dto';
+import { PatchProfileDto } from './dto/patch-profile.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
@@ -67,6 +68,29 @@ export class MemberPortalController {
     });
     if (!member) throw new Error('Member profile not found');
     return member.id;
+  }
+
+  // ─── PROFILE ───────────────────────────────────────────────────────────────
+
+  @Patch('profile')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Update my profile',
+    description:
+      'Members can update their own phone, email, employer, and occupation. ' +
+      'Stage assignments are reserved for admin use and are ignored here.',
+  })
+  @ApiResponse({ status: 200, description: 'Profile updated' })
+  async patchMyProfile(
+    @Body() dto: PatchProfileDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    const memberId = await this.resolveMemberId(user.id, tenant.id);
+    // Members cannot manage their own stage assignments
+    const { stageIds: _ignored, ...profileFields } = dto;
+    return this.members.patchProfile(memberId, profileFields, tenant.id, user.id, req.ip);
   }
 
   // ─── DASHBOARD ─────────────────────────────────────────────────────────────

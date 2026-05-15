@@ -13,6 +13,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
+import { PatchProfileDto } from './dto/patch-profile.dto';
 import type { Member, PaginatedResponse } from './members.types';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 
@@ -245,6 +246,82 @@ export class MembersService {
       resource: 'Member',
       resourceId: id,
       metadata: dto as Record<string, unknown>,
+      ipAddress,
+    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+    return updated as Member;
+  }
+
+  // ─── PATCH PROFILE ──────────────────────────────────────────
+
+  async patchProfile(
+    memberId: string,
+    dto: PatchProfileDto,
+    tenantId: string,
+    actorId: string,
+    ipAddress?: string,
+  ): Promise<Member> {
+    const member = await this.prisma.member.findFirst({
+      where: { id: memberId, tenantId },
+      select: { id: true, userId: true },
+    });
+    if (!member) throw new NotFoundException('Member not found');
+
+    await this.prisma.$transaction(async (tx) => {
+      if (dto.phone !== undefined || dto.email !== undefined) {
+        await tx.user.update({
+          where: { id: member.userId },
+          data: {
+            ...(dto.phone !== undefined && { phone: dto.phone }),
+            ...(dto.email !== undefined && { email: dto.email.toLowerCase() }),
+          },
+        });
+      }
+
+      if (dto.employer !== undefined || dto.occupation !== undefined) {
+        await tx.member.update({
+          where: { id: memberId },
+          data: {
+            ...(dto.employer !== undefined && { employer: dto.employer }),
+            ...(dto.occupation !== undefined && { occupation: dto.occupation }),
+          },
+        });
+      }
+
+      if (dto.stageIds !== undefined) {
+        const uniqueIds = [...new Set(dto.stageIds)];
+        if (uniqueIds.length > 0) {
+          const validCount = await tx.stage.count({
+            where: { id: { in: uniqueIds }, tenantId },
+          });
+          if (validCount !== uniqueIds.length) {
+            throw new BadRequestException('One or more stage IDs are invalid or do not belong to this tenant');
+          }
+        }
+        await tx.memberStage.updateMany({
+          where: { memberId, isActive: true },
+          data: { isActive: false },
+        });
+        for (const stageId of uniqueIds) {
+          await tx.memberStage.create({
+            data: { memberId, stageId, assignedBy: actorId, isActive: true },
+          });
+        }
+      }
+    });
+
+    const updated = await this.prisma.member.findFirst({
+      where: { id: memberId, tenantId },
+      include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
+    });
+
+    await this.audit.create({
+      tenantId,
+      userId: actorId,
+      action: 'MEMBER.PATCH_PROFILE',
+      resource: 'Member',
+      resourceId: memberId,
+      metadata: dto as unknown as Record<string, unknown>,
       ipAddress,
     }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 

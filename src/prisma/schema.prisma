@@ -371,6 +371,7 @@ model Tenant {
   dataImportLogs       DataImportLog[]
   reportJobs           ReportJob[]
   documents            Document[]
+  kycRequirements      KYCRequirement[]
 
   @@index([slug])
   @@index([status])
@@ -1771,5 +1772,28 @@ model DataImportLog {
   @@index([tenantId, status])
   @@index([batchId])
   @@index([initiatedBy])
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 1 KYC – Configurable per-tenant document requirements per KYC stage
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maps a KYC stage to the documents required to pass that stage.
+/// Replaces hard-coded document-type checks with a tenant-configurable table.
+model KYCRequirement {
+  id           String  @id @default(uuid())
+  tenantId     String
+  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  documentType String  // Matches DocumentType enum values: e.g. "NATIONAL_ID_FRONT"
+  kycStage     String  // Matches KycStatus enum values: e.g. "PENDING_REVIEW"
+  isRequired   Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, documentType, kycStage])
+  @@index([tenantId, kycStage])
+  @@index([tenantId, isRequired])
+  @@map("kyc_requirements")
   @@schema("public")
 }

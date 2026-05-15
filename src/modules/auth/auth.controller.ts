@@ -6,7 +6,9 @@ import {
   HttpCode,
   HttpStatus,
   Req,
+  Res,
   UseGuards,
+  UnauthorizedException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -17,7 +19,7 @@ import {
   ApiHeader,
 } from '@nestjs/swagger';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
 import type { DeviceInfo } from './session.service';
 import { LoginDto, LoginResponseDto } from './dto/login.dto';
@@ -33,6 +35,7 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import type { AuthenticatedUser, JwtPayload } from './strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
+import { CookieRefreshGuard } from './guards/cookie-refresh.guard';
 
 /** Typed request shape after TenantInterceptor + JwtStrategy run */
 interface TenantRequest extends Request {
@@ -60,10 +63,34 @@ interface TenantRequest extends Request {
 @ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier', required: true })
 @Controller('auth')
 export class AuthController {
+  /** 7 days in milliseconds — matches JWT_REFRESH_EXPIRATION */
+  private readonly REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
   constructor(
     private readonly authService: AuthService,
     private readonly jwtService: JwtService,
   ) {}
+
+  /** Set the HttpOnly refresh token cookie */
+  private setRefreshCookie(res: Response, token: string): void {
+    res.cookie('refresh_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/api/v1/auth',
+      maxAge: this.REFRESH_COOKIE_MAX_AGE_MS,
+    });
+  }
+
+  /** Clear the refresh token cookie on logout */
+  private clearRefreshCookie(res: Response): void {
+    res.clearCookie('refresh_token', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/api/v1/auth',
+    });
+  }
 
   /** Extract JTI from the Authorization header for immediate token revocation */
   private extractJti(req: TenantRequest): string | undefined {
@@ -96,8 +123,10 @@ export class AuthController {
   async login(
     @Body() loginDto: LoginDto,
     @Req() req: TenantRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
     const data = await this.authService.login(loginDto, req.tenant.id, req.ip);
+    this.setRefreshCookie(res, data.refreshToken);
     return { success: true, data, error: null };
   }
 
@@ -116,8 +145,10 @@ export class AuthController {
   async register(
     @Body() registerDto: RegisterDto,
     @Req() req: TenantRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
     const data = await this.authService.register(registerDto, req.tenant.id, req.ip);
+    this.setRefreshCookie(res, data.refreshToken);
     return { success: true, data, error: null };
   }
 
@@ -125,13 +156,14 @@ export class AuthController {
 
   @Public()
   @SkipPasswordCheck()
+  @UseGuards(CookieRefreshGuard)
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @SkipThrottle()
   @ApiOperation({
     summary: 'Rotate access + refresh token pair',
     description:
-      'Submit the current refresh token to receive a new pair. ' +
+      'Submit the current refresh token (in body or HttpOnly cookie) to receive a new pair. ' +
       'The old refresh token is immediately invalidated (rotation). ' +
       'Suspected reuse will invalidate ALL sessions for the user.',
   })
@@ -140,13 +172,23 @@ export class AuthController {
   async refresh(
     @Body() refreshDto: RefreshTokenDto,
     @Req() req: TenantRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; data: RefreshTokenResponseDto; error: null }> {
+    const token = refreshDto.refreshToken;
+    if (!token) throw new UnauthorizedException('Refresh token required');
+
     const deviceInfo: DeviceInfo = {
       userAgent: req.headers['user-agent'] ?? 'unknown',
       timezone: req.headers['x-timezone'] as string | undefined,
       screenRes: req.headers['x-screen-res'] as string | undefined,
     };
-    const data = await this.authService.refreshToken(refreshDto, req.tenant.id, deviceInfo, req.ip);
+    const data = await this.authService.refreshToken(
+      { refreshToken: token },
+      req.tenant.id,
+      deviceInfo,
+      req.ip,
+    );
+    this.setRefreshCookie(res, data.refreshToken);
     return { success: true, data, error: null };
   }
 
@@ -169,9 +211,11 @@ export class AuthController {
   async logout(
     @CurrentUser() user: AuthenticatedUser,
     @Req() req: TenantRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; data: null; error: null }> {
     const jti = this.extractJti(req);
     await this.authService.logout(user.id, req.tenant.id, jti, req.ip);
+    this.clearRefreshCookie(res);
     return { success: true, data: null, error: null };
   }
 

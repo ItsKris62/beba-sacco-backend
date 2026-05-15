@@ -111,6 +111,9 @@ import { GuarantorValidationService } from '../loans/guarantor-validation.servic
       { name: QUEUE_NAMES.MPESA_STK_REPAYMENT },
       { name: QUEUE_NAMES.REPORT_GENERATION },
       { name: QUEUE_NAMES.REPORT_GENERATION_DLQ },
+      // Phase 1 – KYC async review pipeline
+      { name: QUEUE_NAMES.KYC_REVIEW },
+      { name: QUEUE_NAMES.KYC_REVIEW_DLQ },
     ),
     MpesaModule,
     LoansModule,

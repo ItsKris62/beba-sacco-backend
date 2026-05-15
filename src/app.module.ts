@@ -34,6 +34,7 @@ import { LoanApplicationModule } from './modules/loans/loan-application.module';
 import { MpesaModule } from './modules/mpesa/mpesa.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { QueueModule } from './modules/queue/queue.module';
+import { BullBoardModule } from './modules/queue/bull-board.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
@@ -64,6 +65,8 @@ import { StatementsModule } from './modules/statements/statements.module';
 import { ReportsModule } from './modules/reports/reports.module';
 // Tier 2 – Accounting
 import { AccountingModule } from './modules/accounting/accounting.module';
+// KYC async processing
+import { KycModule } from './modules/kyc/kyc.module';
 
 // Prisma
 import { PrismaModule } from './prisma/prisma.module';
@@ -154,6 +157,7 @@ import { AuditService } from './modules/audit/audit.service';
     MpesaModule,
     AuditModule,     // Must be imported so AuditService is resolvable by AuditInterceptor
     QueueModule,
+    BullBoardModule,  // must come after QueueModule so the shared BullMQ root connection is ready
     StorageModule,
     DocumentsModule,
     AnalyticsModule,
@@ -182,6 +186,7 @@ import { AuditService } from './modules/audit/audit.service';
     StatementsModule,
     ReportsModule,
     AccountingModule,
+    KycModule,
   ],
 
   providers: [

@@ -27,6 +27,7 @@ import {
   ReviewDocumentDto,
 } from './dto/document.dto';
 import { DOCUMENT_ORPHAN_CLEANUP_JOB, QUEUE_NAMES } from '../queue/queue.constants';
+import type { KycReviewJobPayload } from '../kyc/kyc-review.processor';
 
 const UPLOAD_URL_TTL_SECONDS = 3600;
 const UPLOAD_TTL_MS = UPLOAD_URL_TTL_SECONDS * 1000;
@@ -64,6 +65,8 @@ export class DocumentsService {
     private readonly storage: StorageService,
     @InjectQueue(QUEUE_NAMES.DOCUMENT_CLEANUP)
     private readonly cleanupQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.KYC_REVIEW)
+    private readonly kycReviewQueue: Queue<KycReviewJobPayload>,
   ) {}
 
   @Cron('*/15 * * * *')
@@ -192,6 +195,9 @@ export class DocumentsService {
       await this.storage.deleteFile(document.objectKey).catch(() => undefined);
       throw new BadRequestException(`Uploaded document exceeds ${MAX_DOCUMENT_UPLOAD_BYTES} bytes`);
     }
+
+    // Verify stored size doesn't exceed declared size by more than 5%
+    await this.storage.validateUploadedSize(document.objectKey, document.sizeBytes);
 
     const updated = await this.prisma.document.update({
       where: { id: document.id },
@@ -371,6 +377,38 @@ export class DocumentsService {
     });
 
     return this.serializeDocument(updated);
+  }
+
+  async enqueueKycReview(
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    documentId: string,
+    dto: ReviewDocumentDto,
+  ): Promise<{ status: 'QUEUED'; jobId: string | undefined }> {
+    this.assertCanReview(actor.role);
+    if (dto.status !== DocumentStatus.APPROVED && dto.status !== DocumentStatus.REJECTED) {
+      throw new BadRequestException('Review status must be APPROVED or REJECTED');
+    }
+    if (dto.status === DocumentStatus.REJECTED && !dto.rejectionReason?.trim()) {
+      throw new BadRequestException('Rejection reason is required when rejecting');
+    }
+
+    const document = await this.prisma.document.findFirst({
+      where: { id: documentId, tenantId, status: DocumentStatus.PENDING_REVIEW },
+      select: { id: true },
+    });
+    if (!document) throw new NotFoundException('Pending review document not found');
+
+    const action: KycReviewJobPayload['action'] =
+      dto.status === DocumentStatus.APPROVED ? 'APPROVED' : 'REJECTED';
+
+    const job = await this.kycReviewQueue.add(
+      'review',
+      { docId: documentId, reviewerId: actor.id, action, tenantId, rejectionReason: dto.rejectionReason },
+      { attempts: 5, backoff: { type: 'exponential', delay: 2000 }, removeOnComplete: 100 },
+    );
+
+    return { status: 'QUEUED', jobId: job.id };
   }
 
   async cleanupExpiredUploads(limit = 100): Promise<{ deleted: number }> {

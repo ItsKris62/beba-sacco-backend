@@ -13,6 +13,7 @@ import { DocumentCleanupProcessor } from './processors/document-cleanup.processo
     AuditModule,
     StorageModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.DOCUMENT_CLEANUP }),
+    BullModule.registerQueue({ name: QUEUE_NAMES.KYC_REVIEW }),
   ],
   controllers: [AdminDocumentsController],
   providers: [DocumentsService, DocumentCleanupProcessor, PrismaService],

@@ -9,6 +9,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
 import * as express from 'express';
+import * as cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
 
@@ -59,6 +60,7 @@ async function bootstrap() {
   // 1 MB covers the largest anticipated CSV import; M-Pesa callbacks are <4 KB.
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+  app.use(cookieParser());
 
   // CORS must be registered before helmet so that OPTIONS preflight responses
   // include Access-Control-Allow-* headers before helmet can inspect them.

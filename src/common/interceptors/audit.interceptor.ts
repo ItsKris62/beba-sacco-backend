@@ -18,6 +18,41 @@ const AUDITED_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 /** URL patterns to skip entirely (health, swagger, metrics). */
 const SKIP_PATTERNS = ['/health', '/metrics', '/docs', '/favicon.ico'];
 
+// ─── PII masking helpers ───────────────────────────────────────────────────────
+
+/** +254712345678 → +254***5678 */
+export function maskPhone(phone: string): string {
+  return phone.replace(/(\+?\d{3})\d+(\d{4})$/, '$1***$2');
+}
+
+/** john.doe@example.com → jo***@example.com */
+export function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at < 0) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  return `${local.slice(0, Math.min(2, local.length))}***${domain}`;
+}
+
+/** Strip or mask query-string parameters that look like emails or phone numbers */
+function sanitizeUrl(url: string): string {
+  try {
+    const qIdx = url.indexOf('?');
+    if (qIdx === -1) return url;
+    const base = url.slice(0, qIdx);
+    const params = new URLSearchParams(url.slice(qIdx + 1));
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const PHONE_RE = /^\+?\d{9,15}$/;
+    for (const [key, value] of params.entries()) {
+      if (EMAIL_RE.test(value)) params.set(key, maskEmail(value));
+      else if (PHONE_RE.test(value)) params.set(key, maskPhone(value));
+    }
+    return `${base}?${params.toString()}`;
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Audit Trail Interceptor
  *
@@ -67,6 +102,8 @@ export class AuditInterceptor implements NestInterceptor {
     const resource = this.extractResource(url);
     const action = `${method}.${resource}`.toUpperCase();
 
+    const safeUrl = sanitizeUrl(url);
+
     return next.handle().pipe(
       tap({
         next: () => {
@@ -77,7 +114,7 @@ export class AuditInterceptor implements NestInterceptor {
               actorId: userId,
               action,
               entityType: resource,
-              metadata: { url, method, durationMs: duration, status: 'success' },
+              metadata: { url: safeUrl, method, durationMs: duration, status: 'success' },
               ipAddress: ip,
               userAgent,
               requestId,
@@ -98,7 +135,7 @@ export class AuditInterceptor implements NestInterceptor {
               action: `${action}.ERROR`,
               entityType: resource,
               metadata: {
-                url,
+                url: safeUrl,
                 method,
                 durationMs: duration,
                 status: 'error',

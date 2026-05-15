@@ -65,7 +65,7 @@ USER nestjs
 
 # Lightweight healthcheck using the bundled Node runtime (no wget/curl needed)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
-  CMD node -e "require('http').get({host:'localhost',port:3000,path:'/api/health'}, \
+  CMD node -e "require('http').get({host:'localhost',port:3000,path:'/api/health/ping'}, \
     r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 CMD ["node", "dist/main"]

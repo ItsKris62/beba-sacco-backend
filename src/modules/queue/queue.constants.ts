@@ -45,6 +45,9 @@ export const QUEUE_NAMES = {
   REPORT_GENERATION_DLQ: 'reports.generation.dlq',
   DOCUMENT_CLEANUP: 'documents.cleanup',
   DR_DRILL: 'sre.dr-drill',
+  // Phase 1 – KYC document review async pipeline
+  KYC_REVIEW: 'kyc.review',
+  KYC_REVIEW_DLQ: 'kyc.review.dlq',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

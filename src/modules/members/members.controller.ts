@@ -1,7 +1,8 @@
 import {
   Controller, Get, Post, Patch, Param, Body,
-  Query, HttpCode, HttpStatus, ParseUUIDPipe,
+  Query, HttpCode, HttpStatus, ParseUUIDPipe, Req,
 } from '@nestjs/common';
+import { Request } from 'express';
 import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader,
@@ -10,6 +11,7 @@ import { UserRole } from '@prisma/client';
 import { MembersService } from './members.service';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
+import { PatchProfileDto } from './dto/patch-profile.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
@@ -75,5 +77,25 @@ export class MembersController {
     @CurrentUser() actor: AuthenticatedUser,
   ) {
     return this.members.update(id, dto, tenant.id, actor.id);
+  }
+
+  @Patch(':id/profile')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Patch member profile fields + stage assignments (admin/manager)',
+    description:
+      'Allows granular profile updates including stage reassignment (max 5 active). ' +
+      'The DB trigger enforces the 5-stage cap at write time.',
+  })
+  @ApiResponse({ status: 200, description: 'Member profile updated' })
+  patchProfile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PatchProfileDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.members.patchProfile(id, dto, tenant.id, actor.id, req.ip);
   }
 }
