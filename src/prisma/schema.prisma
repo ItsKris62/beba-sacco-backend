@@ -521,11 +521,12 @@ model Member {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  accounts         Account[]
-  loans            Loan[]
-  guarantors       LoanGuarantor[]
-  documents        Document[]
-  stageAssignments MemberStage[] // MVP: many-to-many with Stage
+  accounts          Account[]
+  loans             Loan[]
+  guarantors        LoanGuarantor[]
+  documents         Document[]
+  stageAssignments  MemberStage[] // MVP: many-to-many with Stage
+  mpesaTransactions MpesaTransaction[]
 
   @@unique([tenantId, memberNumber])
   @@index([tenantId])
@@ -780,6 +781,7 @@ model MpesaTransaction {
 
   // ── Business-entity links (set at initiation for fast callback lookup) ──
   memberId        String?
+  member          Member?   @relation(fields: [memberId], references: [id])
   loanId          String? // present for repayments and disbursements
   loanRepaymentId String? // set when a specific LoanRepayment record is created
 

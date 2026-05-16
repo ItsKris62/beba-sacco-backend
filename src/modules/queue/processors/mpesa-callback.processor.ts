@@ -607,7 +607,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
           balanceAfter,
           receipt: params.receipt,
           amount: params.amount.toFixed(4),
-          ...(loanId && { loanId, loanNumber, isFullyPaid }),
+          ...(loanId ? { loanId, loanNumber, isFullyPaid } : {}),
         },
         metadata: {
           reference,
@@ -633,67 +633,61 @@ export class MpesaCallbackProcessor extends WorkerHost {
   }): Promise<void> {
     const reference = `MPESA-B2C-${params.receipt}`;
 
-    let auditData: {
-      balanceBefore: string;
-      balanceAfter: string;
-      loanStatusChanged: boolean;
-    } | null = null;
-
     const txClient = this.prisma.direct ?? this.prisma;
-    await txClient.$transaction(
-      async (tx) => {
+    const auditData = await txClient.$transaction(
+      async (tx): Promise<{ balanceBefore: string; balanceAfter: string; loanStatusChanged: boolean } | null> => {
         const dup = await tx.transaction.findUnique({ where: { reference } });
-      if (dup) return;
+        if (dup) return null;
 
-      const loan = await tx.loan.findUnique({
-        where: { id: params.loanId },
-        select: { id: true, memberId: true, status: true },
-      });
-      if (!loan) return;
-
-      const fosa = await tx.account.findFirst({
-        where: { memberId: loan.memberId, tenantId: params.tenantId, accountType: 'FOSA', isActive: true },
-        select: { id: true, balance: true },
-      });
-
-      const fosaId = fosa?.id ?? (await this.getFosaAccountId(tx, loan.memberId, params.tenantId));
-      const balanceBefore = new Decimal(fosa?.balance.toString() ?? '0');
-      const balanceAfter = balanceBefore.plus(params.amount);
-
-      const ledgerTx = await tx.transaction.create({
-        data: {
-          tenantId: params.tenantId,
-          accountId: fosaId,
-          loanId: params.loanId,
-          type: TransactionType.LOAN_DISBURSEMENT,
-          status: TransactionStatus.COMPLETED,
-          amount: params.amount.toDecimalPlaces(4).toString(),
-          balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
-          reference,
-          description: `M-Pesa B2C disbursement – ${params.receipt}`,
-          processedBy: 'MPESA_SYSTEM',
-        },
-      });
-
-      if (fosa) {
-        await tx.account.update({
-          where: { id: fosa.id },
-          data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
-        });
-      }
-
-      const loanStatusChanged = loan.status === LoanStatus.APPROVED;
-      if (loanStatusChanged) {
-        await tx.loan.update({
+        const loan = await tx.loan.findUnique({
           where: { id: params.loanId },
+          select: { id: true, memberId: true, status: true },
+        });
+        if (!loan) return null;
+
+        const fosa = await tx.account.findFirst({
+          where: { memberId: loan.memberId, tenantId: params.tenantId, accountType: 'FOSA', isActive: true },
+          select: { id: true, balance: true },
+        });
+
+        const fosaId = fosa?.id ?? (await this.getFosaAccountId(tx, loan.memberId, params.tenantId));
+        const balanceBefore = new Decimal(fosa?.balance.toString() ?? '0');
+        const balanceAfter = balanceBefore.plus(params.amount);
+
+        const ledgerTx = await tx.transaction.create({
           data: {
-            status: LoanStatus.DISBURSED,
-            disbursedAt: params.transactionDate,
-            disbursedBy: 'MPESA_SYSTEM',
+            tenantId: params.tenantId,
+            accountId: fosaId,
+            loanId: params.loanId,
+            type: TransactionType.LOAN_DISBURSEMENT,
+            status: TransactionStatus.COMPLETED,
+            amount: params.amount.toDecimalPlaces(4).toString(),
+            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+            reference,
+            description: `M-Pesa B2C disbursement – ${params.receipt}`,
+            processedBy: 'MPESA_SYSTEM',
           },
         });
-      }
+
+        if (fosa) {
+          await tx.account.update({
+            where: { id: fosa.id },
+            data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
+          });
+        }
+
+        const loanStatusChanged = loan.status === LoanStatus.APPROVED;
+        if (loanStatusChanged) {
+          await tx.loan.update({
+            where: { id: params.loanId },
+            data: {
+              status: LoanStatus.DISBURSED,
+              disbursedAt: params.transactionDate,
+              disbursedBy: 'MPESA_SYSTEM',
+            },
+          });
+        }
 
         await tx.mpesaTransaction.update({
           where: { id: params.mpesaTxId },
@@ -708,7 +702,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
           },
         });
 
-        auditData = {
+        return {
           balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
           balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
           loanStatusChanged,
