@@ -6,11 +6,12 @@ import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader,
 } from '@nestjs/swagger';
-import { UserRole } from '@prisma/client';
+import { TransactionStatus, TransactionType, UserRole } from '@prisma/client';
 import { Request } from 'express';
 import { AdminService } from './admin.service';
 import { UpdateKycDto } from './dto/update-kyc.dto';
 import { ReviewMemberDto } from './dto/review-member.dto';
+import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
@@ -78,6 +79,33 @@ export class AdminController {
     @Query('limit') limit?: number,
   ) {
     return this.adminService.getPendingMembers(tenant.id, { search, page, limit });
+  }
+
+  // ─── TRANSACTIONS ─────────────────────────────────────────────
+
+  @Get('transactions')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR, UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Paginated, filterable transaction list',
+    description:
+      'TENANT_ADMIN / MANAGER / AUDITOR see only their tenant\'s transactions. ' +
+      'SUPER_ADMIN omits tenant scoping to query across all tenants.',
+  })
+  @ApiQuery({ name: 'type', required: false, enum: TransactionType })
+  @ApiQuery({ name: 'status', required: false, enum: TransactionStatus })
+  @ApiQuery({ name: 'from', required: false, description: 'ISO 8601 start date' })
+  @ApiQuery({ name: 'to', required: false, description: 'ISO 8601 end date' })
+  @ApiQuery({ name: 'search', required: false, description: 'Reference or account number' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'Paginated transactions with member/account context' })
+  getTransactions(
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: GetTransactionsQueryDto,
+  ) {
+    const tenantId = user.role === UserRole.SUPER_ADMIN ? undefined : tenant.id;
+    return this.adminService.getTransactions(tenantId, query);
   }
 
   // ─── KYC REVIEW (APPROVE / REJECT) ───────────────────────────

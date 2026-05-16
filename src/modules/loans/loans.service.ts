@@ -24,6 +24,7 @@ import {
   EmailJobPayload,
 } from '../queue/queue.constants';
 import { DisbursementGateService } from '../../loans/disbursement-gate.service';
+import { ProductRuleService } from './product-rule.service';
 
 /**
  * Loans Service
@@ -54,6 +55,7 @@ export class LoansService {
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
     private readonly disbursementGate: DisbursementGateService,
+    private readonly productRules: ProductRuleService,
   ) {}
 
   /**
@@ -292,28 +294,25 @@ export class LoansService {
       throw new BadRequestException(`Maximum tenure is ${product.maxTenureMonths} months`);
     }
 
-    // Max loan limit: 3× BOSA balance + 1.5× FOSA balance
     const accounts = await this.prisma.account.findMany({
       where: { memberId: dto.memberId, tenantId, isActive: true },
       select: { balance: true, accountType: true },
     });
-    
-    let maxLoanLimit = new Decimal(0);
-    for (const acc of accounts) {
-      const bal = new Decimal(acc.balance.toString());
-      if (acc.accountType === 'BOSA') {
-        maxLoanLimit = maxLoanLimit.plus(bal.times(3));
-      } else if (acc.accountType === 'FOSA') {
-        maxLoanLimit = maxLoanLimit.plus(bal.times(1.5));
-      }
-    }
 
-    if (principal.greaterThan(maxLoanLimit)) {
-      throw new BadRequestException(
-        `Loan amount exceeds your maximum eligible limit of KES ${maxLoanLimit.toFixed(2)} ` +
-          `(3× your BOSA + 1.5× your FOSA balance)`,
-      );
-    }
+    const fosaBalance = accounts
+      .filter((a) => a.accountType === AccountType.FOSA)
+      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString())), new Decimal(0));
+    const bosaBalance = accounts
+      .filter((a) => a.accountType === AccountType.BOSA)
+      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString())), new Decimal(0));
+
+    this.productRules.assertLoanApplicationRules({
+      product,
+      principal,
+      guarantorCount: dto.guarantors?.length ?? 0,
+      fosaBalance,
+      bosaBalance,
+    });
 
     // Calculate processing fee and instalment
     const annualRate = new Decimal(product.interestRate.toString());

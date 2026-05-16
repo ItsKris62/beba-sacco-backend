@@ -11,6 +11,7 @@ import { RedisService } from '../../common/services/redis.service';
 import { QUEUE_NAMES, type EmailJobPayload } from '../queue/queue.constants';
 import { UpdateKycDto } from './dto/update-kyc.dto';
 import { ReviewMemberDto, ReviewAction } from './dto/review-member.dto';
+import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
 
 const STATS_CACHE_TTL = 60; // 60 seconds
 const REQUIRED_KYC_DOCUMENT_TYPES: DocumentType[] = [
@@ -64,6 +65,75 @@ export class AdminService {
   /** Invalidate the dashboard stats cache for a tenant (call after KYC / loan changes). */
   async invalidateDashboardCache(tenantId: string): Promise<void> {
     await this.redis.del(`admin:stats:${tenantId}`);
+  }
+
+  // ─── TRANSACTIONS ─────────────────────────────────────────────
+
+  /**
+   * Paginated transaction list scoped to a tenant.
+   * SUPER_ADMIN may pass tenantId = undefined to query across all tenants.
+   */
+  async getTransactions(
+    tenantId: string | undefined,
+    query: GetTransactionsQueryDto,
+  ) {
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(100, Math.max(1, query.limit ?? 20));
+    const skip = (page - 1) * limit;
+
+    const where = {
+      ...(tenantId && { tenantId }),
+      ...(query.type && { type: query.type }),
+      ...(query.status && { status: query.status }),
+      ...((query.from || query.to) && {
+        createdAt: {
+          ...(query.from && { gte: new Date(query.from) }),
+          ...(query.to && { lte: new Date(query.to) }),
+        },
+      }),
+      ...(query.search && {
+        OR: [
+          { reference: { contains: query.search, mode: 'insensitive' as const } },
+          { account: { accountNumber: { contains: query.search, mode: 'insensitive' as const } } },
+        ],
+      }),
+    };
+
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.transaction.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          account: {
+            select: {
+              id: true,
+              accountNumber: true,
+              accountType: true,
+              member: {
+                select: {
+                  id: true,
+                  memberNumber: true,
+                  user: { select: { firstName: true, lastName: true } },
+                },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.transaction.count({ where }),
+    ]);
+
+    return {
+      data: data.map((tx) => ({
+        ...tx,
+        amount: tx.amount.toNumber(),
+        balanceBefore: tx.balanceBefore.toNumber(),
+        balanceAfter: tx.balanceAfter.toNumber(),
+      })),
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   private async computeDashboardStats(tenantId: string) {

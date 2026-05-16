@@ -104,4 +104,27 @@ export class AdminDocumentsController {
   ) {
     return this.documents.enqueueKycReview(tenant.id, actor, id, dto);
   }
+  @Post('upload-url')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Request upload URL for a member document' })
+  requestUploadUrl(
+    @Body() dto: import('./dto/document.dto').AdminRequestDocumentUploadUrlDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.documents.requestAdminUploadUrl(tenant.id, actor, dto, req.ip);
+  }
+
+  @Post('confirm-upload')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Confirm upload for a member document' })
+  confirmUpload(
+    @Body() dto: import('./dto/document.dto').AdminConfirmDocumentUploadDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.documents.confirmAdminUpload(tenant.id, actor, dto, req.ip);
+  }
 }

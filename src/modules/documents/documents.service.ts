@@ -231,6 +231,168 @@ export class DocumentsService {
     return this.serializeDocument(updated);
   }
 
+  async requestAdminUploadUrl(
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    dto: import('./dto/document.dto').AdminRequestDocumentUploadUrlDto,
+    ipAddress?: string,
+  ): Promise<DocumentUploadUrlResponseDto> {
+    this.assertCanView(actor.role); // Admins that can view can also upload on behalf of member
+    this.assertUploadPayload(dto);
+    
+    const member = await this.prisma.member.findFirst({
+      where: { id: dto.memberId, tenantId },
+      select: { id: true, kycStatus: true },
+    });
+    if (!member) throw new NotFoundException('Member profile not found');
+
+    const version = await this.nextDocumentVersion(tenantId, member.id, dto.type);
+    const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType);
+    const expiresAt = new Date(Date.now() + UPLOAD_TTL_MS);
+    const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
+
+    const document = await this.prisma.document.create({
+      data: {
+        tenantId,
+        memberId: member.id,
+        uploadedById: actor.id,
+        objectKey,
+        originalFileName: this.cleanFileName(dto.originalFileName ?? `${dto.type.toLowerCase()}.${this.extensionFor(dto.mimeType)}`),
+        mimeType: dto.mimeType,
+        sizeBytes: declaredSizeBytes,
+        checksum: dto.checksum ?? null,
+        type: dto.type,
+        status: DocumentStatus.PENDING_UPLOAD,
+        version,
+        expiresAt,
+      },
+      select: { id: true, objectKey: true },
+    });
+
+    if (member.kycStatus === KycStatus.REJECTED) {
+      await this.prisma.member.update({
+        where: { id: member.id },
+        data: {
+          kycStatus: KycStatus.PENDING_UPLOAD,
+          kycRejectionReason: null,
+        },
+      });
+    }
+
+    const signed = await this.storage.getUploadUrlForKey({
+      objectKey,
+      contentType: dto.mimeType,
+      expiresIn: UPLOAD_URL_TTL_SECONDS,
+    });
+
+    await this.auditSafe({
+      tenantId,
+      userId: actor.id,
+      action: 'DOCUMENT.UPLOAD_INTENT',
+      resource: 'Document',
+      resourceId: document.id,
+      metadata: {
+        memberId: member.id,
+        type: dto.type,
+        objectKey,
+        mimeType: dto.mimeType,
+        declaredSizeBytes,
+        expiresAt: expiresAt.toISOString(),
+        actorScope: 'ADMIN',
+      },
+      ipAddress,
+    });
+
+    return {
+      documentId: document.id,
+      uploadUrl: signed.uploadUrl,
+      preSignedUrl: signed.uploadUrl,
+      objectKey: signed.objectKey,
+      expiresIn: signed.expiresIn,
+      maxBytes: MAX_DOCUMENT_UPLOAD_BYTES,
+    };
+  }
+
+  async confirmAdminUpload(
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    dto: import('./dto/document.dto').AdminConfirmDocumentUploadDto,
+    ipAddress?: string,
+  ) {
+    this.assertCanView(actor.role);
+    const member = await this.prisma.member.findFirst({
+      where: { id: dto.memberId, tenantId },
+      select: { id: true },
+    });
+    if (!member) throw new NotFoundException('Member profile not found');
+
+    const document = await this.prisma.document.findFirst({
+      where: {
+        id: dto.documentId,
+        tenantId,
+        memberId: member.id,
+        status: DocumentStatus.PENDING_UPLOAD,
+      },
+    });
+    if (!document) throw new NotFoundException('Pending upload document not found');
+
+    if (document.expiresAt && document.expiresAt.getTime() < Date.now()) {
+      throw new BadRequestException('Upload URL has expired. Request a new upload URL.');
+    }
+
+    this.assertObjectKeyOwnership(document.objectKey, tenantId, member.id);
+    const metadata = await this.storage.headFile(document.objectKey).catch((err: unknown) => {
+      this.logger.warn(`HEAD failed for ${document.objectKey}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new BadRequestException('Uploaded object was not found in storage');
+    });
+
+    const storedMimeType = this.normalizeMimeType(metadata.contentType);
+    if (storedMimeType !== document.mimeType) {
+      throw new BadRequestException(`Uploaded MIME type mismatch. Expected ${document.mimeType}, got ${storedMimeType ?? 'unknown'}`);
+    }
+    if (metadata.contentLength < 1) {
+      throw new BadRequestException('Uploaded document is empty');
+    }
+    if (metadata.contentLength > MAX_DOCUMENT_UPLOAD_BYTES) {
+      await this.storage.deleteFile(document.objectKey).catch(() => undefined);
+      throw new BadRequestException(`Uploaded document exceeds ${MAX_DOCUMENT_UPLOAD_BYTES} bytes`);
+    }
+
+    await this.storage.validateUploadedSize(document.objectKey, document.sizeBytes);
+
+    const updated = await this.prisma.document.update({
+      where: { id: document.id },
+      data: {
+        status: DocumentStatus.PENDING_REVIEW,
+        sizeBytes: metadata.contentLength,
+        checksum: dto.checksum ?? document.checksum,
+        expiresAt: null,
+      },
+      include: { member: { select: { id: true, kycStatus: true } } },
+    });
+
+    await this.syncMemberReviewReadiness(tenantId, member.id);
+
+    await this.auditSafe({
+      tenantId,
+      userId: actor.id,
+      action: 'DOCUMENT.UPLOAD_CONFIRMED',
+      resource: 'Document',
+      resourceId: document.id,
+      metadata: {
+        memberId: member.id,
+        type: document.type,
+        objectKey: document.objectKey,
+        sizeBytes: metadata.contentLength,
+        eTag: metadata.eTag,
+        actorScope: 'ADMIN',
+      },
+      ipAddress,
+    });
+
+    return this.serializeDocument(updated);
+  }
+
   async listMemberDocuments(tenantId: string, userId: string) {
     const member = await this.resolveMemberForUser(tenantId, userId);
     const documents = await this.prisma.document.findMany({

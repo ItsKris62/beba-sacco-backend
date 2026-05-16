@@ -122,3 +122,15 @@ export class AdminDocumentQueryDto {
   @IsUUID()
   memberId?: string;
 }
+
+export class AdminRequestDocumentUploadUrlDto extends RequestDocumentUploadUrlDto {
+  @ApiProperty({ format: 'uuid', description: 'The UUID of the member to upload the document for' })
+  @IsUUID()
+  memberId!: string;
+}
+
+export class AdminConfirmDocumentUploadDto extends ConfirmDocumentUploadDto {
+  @ApiProperty({ format: 'uuid', description: 'The UUID of the member to confirm the document upload for' })
+  @IsUUID()
+  memberId!: string;
+}
