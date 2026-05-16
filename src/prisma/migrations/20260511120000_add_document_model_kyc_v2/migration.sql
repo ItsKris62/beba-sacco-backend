@@ -1,3 +1,5 @@
+-- This migration is not transactional
+
 -- AddEnumValue
 ALTER TYPE "public"."KycStatus" ADD VALUE IF NOT EXISTS 'PENDING_UPLOAD';
 
@@ -8,7 +10,6 @@ CREATE TYPE "public"."DocumentStatus" AS ENUM ('PENDING_UPLOAD', 'PENDING_REVIEW
 CREATE TYPE "public"."DocumentType" AS ENUM ('NATIONAL_ID_FRONT', 'NATIONAL_ID_BACK', 'KRA_PIN', 'MEMBER_FORM', 'OTHER');
 
 -- AlterTable
-ALTER TABLE "public"."Member" ALTER COLUMN "kycStatus" SET DEFAULT 'PENDING_UPLOAD';
 ALTER TABLE "public"."Member" DROP COLUMN IF EXISTS "kycDocumentUrls";
 
 -- CreateTable

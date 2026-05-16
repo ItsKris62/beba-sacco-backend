@@ -55,6 +55,7 @@ const CHANNEL_COSTS: Record<string, number> = {
   EMAIL: 0,
   SMS: 1.5,
   WHATSAPP: 0.8,
+  IN_APP: 0,
 };
 
 @Injectable()
@@ -74,7 +75,7 @@ export class NotificationsService {
   async send(params: {
     tenantId: string;
     memberId?: string;
-    channel: 'EMAIL' | 'SMS' | 'WHATSAPP';
+    channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'IN_APP';
     recipient: string;
     templateId: string;
     payload: Record<string, unknown>;
@@ -154,6 +155,10 @@ export class NotificationsService {
           break;
         case 'EMAIL':
           await this.sendEmail(notification.recipient, subject, body);
+          break;
+        case 'IN_APP':
+          // In-app notifications are directly accessible from the DB, no external call needed.
+          this.logger.log(`[IN_APP] Logged notification for recipient: ${notification.recipient}`);
           break;
       }
 

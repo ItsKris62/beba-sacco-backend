@@ -277,7 +277,7 @@ export interface AmlScreenJobPayload {
 export interface MultiChannelNotifyJobPayload {
   tenantId: string;
   notificationId: string;
-  channel: 'EMAIL' | 'SMS' | 'WHATSAPP';
+  channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'IN_APP';
   recipient: string;
   templateId: string;
   payload: Record<string, unknown>;
