@@ -21,7 +21,8 @@ export default registerAs('app', () => ({
     refreshExpiration: process.env.JWT_REFRESH_EXPIRATION || '7d',
   },
 
-  // Redis (Upstash) – ioredis TCP connection
+  // Redis (Upstash) – ioredis TCP connection – application cache only
+  // Used by: IdempotencyService, MpesaService rate-limit, DarajaClientService OAuth cache
   redis: {
     host: process.env.REDIS_HOST,
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
@@ -30,6 +31,13 @@ export default registerAs('app', () => ({
     // Upstash REST API (for lightweight HTTP-based reads outside ioredis)
     restUrl: process.env.UPSTASH_REDIS_REST_URL,
     restToken: process.env.UPSTASH_REDIS_REST_TOKEN,
+  },
+
+  // Redis for BullMQ queues – must be a connection-based provider (no command-count billing)
+  // Use Render Redis, Railway Redis, or any provider without per-command limits.
+  // When unset in dev, BullMQ falls back to the Upstash config above.
+  bullRedis: {
+    url: process.env.BULL_REDIS_URL,
   },
 
   // Cloudflare R2

@@ -34,10 +34,20 @@ import { StorageModule } from '../storage/storage.module';
 import { GuarantorValidationService } from '../loans/guarantor-validation.service';
 
 /**
- * Queue Module – BullMQ + Redis
+ * Queue Module – BullMQ + dedicated Redis
  *
- * When Redis is unavailable (local dev without Redis), BullMQ will retry
- * up to 3 times then stop — the app continues in degraded mode without queues.
+ * BullMQ uses a separate Redis connection (BULL_REDIS_URL) so that its
+ * continuous polling never touches the Upstash command quota.
+ *
+ * Connection strategy:
+ *   Production  → BULL_REDIS_URL (Render Redis / Railway / any connection-based provider)
+ *   Development → falls back to the Upstash config (single Redis is fine for low load)
+ *
+ * Why two Redis instances?
+ *   Upstash bills per command. BullMQ's internal polling across 20+ queues
+ *   generates thousands of commands/minute even with zero jobs — far beyond
+ *   Upstash's free tier and expensive on paid tiers. Connection-based providers
+ *   have no per-command cost, making them the correct home for a job queue.
  */
 @Module({
   imports: [
@@ -45,9 +55,45 @@ import { GuarantorValidationService } from '../loans/guarantor-validation.servic
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
+        const bullRedisUrl = configService.get<string>('app.bullRedis.url');
+
+        // ── Production path: parse BULL_REDIS_URL ──────────────────────────
+        // Render Redis URL format: redis://:password@host:port
+        //                    TLS: rediss://:password@host:port
+        if (bullRedisUrl) {
+          const parsed = new URL(bullRedisUrl);
+          const tls = parsed.protocol === 'rediss:' ? { rejectUnauthorized: false } : undefined;
+
+          return {
+            connection: {
+              host: parsed.hostname,
+              port: parseInt(parsed.port || '6379', 10),
+              // URL password is percent-encoded — decode before passing to ioredis
+              password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+              tls,
+              maxRetriesPerRequest: null,
+              enableAutoPipelining: true,
+              connectTimeout: 5000,
+              keepAlive: 10000,
+              // Render Redis is stable — retry generously with exponential back-off
+              retryStrategy: (times: number) => Math.min(times * 500, 10_000),
+              reconnectOnError: (err: Error) => err.message.includes('READONLY'),
+            },
+            defaultJobOptions: {
+              removeOnComplete: { count: 1000 },
+              // Cap failed jobs so they don't accumulate in Redis indefinitely
+              removeOnFail: { count: 500 },
+              attempts: 5,
+              backoff: { type: 'exponential', delay: 5000 },
+            },
+          };
+        }
+
+        // ── Dev fallback: share the Upstash connection ─────────────────────
+        // Acceptable for local dev where job volume is negligible.
+        // BullMQ will stop retrying after 1 attempt to avoid burning quota.
         const password = configService.get<string>('app.redis.password');
         const tls = configService.get<boolean>('app.redis.tls');
-        // Strip any accidental protocol prefix (ioredis expects a bare hostname)
         const rawHost = configService.get<string>('app.redis.host', 'localhost');
         const host = rawHost.replace(/^https?:\/\//, '');
         let bullGaveUp = false;
@@ -57,16 +103,12 @@ import { GuarantorValidationService } from '../loans/guarantor-validation.servic
             host,
             port: configService.get<number>('app.redis.port'),
             password: password || undefined,
-            // Upstash requires TLS; local dev uses plain TCP
             tls: tls ? { rejectUnauthorized: false } : undefined,
-            // Required by BullMQ — do not set a per-request retry limit
             maxRetriesPerRequest: null,
-            // Auto-pipeline batches concurrent BullMQ commands into fewer round-trips
             enableAutoPipelining: true,
             connectTimeout: 5000,
             keepAlive: 10000,
-            // 1 retry max — keeps degraded-mode noise low and avoids burning
-            // Upstash command quota when the password is wrong or Redis is down.
+            // 1 retry only — avoids burning Upstash quota if Redis is misconfigured
             retryStrategy: (times: number) => {
               if (times > 1) {
                 if (!bullGaveUp) {
@@ -77,12 +119,11 @@ import { GuarantorValidationService } from '../loans/guarantor-validation.servic
               }
               return Math.min(times * 1000, 5000);
             },
-            // Only reconnect on READONLY (Upstash failover), not ECONNREFUSED
             reconnectOnError: (err: Error) => err.message.includes('READONLY'),
           },
           defaultJobOptions: {
-            removeOnComplete: 1000,
-            removeOnFail: false,
+            removeOnComplete: { count: 1000 },
+            removeOnFail: { count: 500 },
             attempts: 5,
             backoff: { type: 'exponential', delay: 5000 },
           },

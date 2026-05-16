@@ -43,7 +43,7 @@ export const validationSchema = Joi.object({
   JWT_REFRESH_SECRET: Joi.string().min(64).required(),
   JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
 
-  // ── Redis (Upstash) ────────────────────────────────────────────────────────
+  // ── Redis (Upstash) – application cache ───────────────────────────────────
   // password & TLS optional for local dev (no-auth Redis container)
   REDIS_HOST: Joi.string().required(),
   REDIS_PORT: Joi.number().default(6379),
@@ -51,6 +51,16 @@ export const validationSchema = Joi.object({
   REDIS_TLS: Joi.boolean().default(false),
   UPSTASH_REDIS_REST_URL: Joi.string().uri().optional(),
   UPSTASH_REDIS_REST_TOKEN: Joi.string().allow('').optional(),
+
+  // ── Redis (BullMQ queues) – connection-based provider, no command-count limits
+  // Required in production (Render Redis / Railway Redis).
+  // When absent in dev, BullMQ falls back to the Upstash connection above.
+  // Format: redis://:password@host:port  or  rediss://:password@host:port (TLS)
+  BULL_REDIS_URL: Joi.string().uri({ scheme: ['redis', 'rediss'] }).when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
 
   // ── Cloudflare R2 ──────────────────────────────────────────────────────────
   R2_ACCOUNT_ID: Joi.string().required(),
