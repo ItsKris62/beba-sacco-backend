@@ -1,8 +1,10 @@
-import { Controller, ForbiddenException, Get, HttpCode, HttpStatus, Query } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiBody,
   ApiHeader,
   ApiOperation,
+  ApiParam,
   ApiQuery,
   ApiResponse,
   ApiSecurity,
@@ -16,6 +18,7 @@ import {
   ReconQueryDto,
   ReportsQueryDto,
 } from './dto/accounting-query.dto';
+import { MatchMpesaTransactionDto } from './dto/match-mpesa.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -164,6 +167,46 @@ export class AccountingController {
     }
 
     return this.accounting.getPendingReconciliation(tenant.id, query);
+  }
+
+  @Post('reconciliation/:id/match')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Match an unlinked MPESA transaction to a member account',
+    description:
+      'Manually reconciles a RECON_PENDING M-Pesa transaction by linking it to the specified ' +
+      'account and posting a DEPOSIT ledger entry. The operation is atomic (SERIALIZABLE) and ' +
+      'idempotent — re-submitting the same mpesaTxId returns the existing result without ' +
+      'double-posting. Only MANAGER and TENANT_ADMIN may perform this action. An audit log ' +
+      'entry is written for every successful match.',
+  })
+  @ApiParam({ name: 'id', description: 'RECON_PENDING MpesaTransaction UUID' })
+  @ApiBody({ type: MatchMpesaTransactionDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Transaction matched and account credited',
+    schema: {
+      example: {
+        success: true,
+        transactionId: 'tx-uuid',
+        amount: 5000,
+        balanceBefore: 12000,
+        balanceAfter: 17000,
+        accountNumber: 'ACC-FOSA-000042',
+        memberName: 'Jane Doe',
+      },
+    },
+  })
+  @ApiResponse({ status: 404, description: 'RECON_PENDING transaction or target account not found' })
+  @ApiResponse({ status: 409, description: 'Transaction already matched (should not normally occur)' })
+  async matchMpesaTransaction(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: MatchMpesaTransactionDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.accounting.matchMpesaTransaction(id, tenant.id, dto.accountId, user.id, dto.note);
   }
 
   @Get('reports')

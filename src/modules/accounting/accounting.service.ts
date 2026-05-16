@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
-import { MpesaTxType, TransactionStatus } from '@prisma/client';
+import { MpesaTxType, TransactionStatus, TransactionType } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ReconciliationService } from '../financial/reconciliation.service';
+import { AuditService } from '../audit/audit.service';
 import {
   GetPendingReconQueryDto,
   LedgerQueryDto,
@@ -22,6 +23,7 @@ export class AccountingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly recon: ReconciliationService,
+    private readonly audit: AuditService,
   ) {}
 
   // ─── LEDGER ─────────────────────────────────────────────────────────────────
@@ -202,6 +204,7 @@ export class AccountingService {
     const where = {
       tenantId,
       status: TransactionStatus.RECON_PENDING,
+      transactionId: null, // only unlinked transactions need matching
       ...(typeFilter && { type: typeFilter }),
       ...(dateFilter && { createdAt: dateFilter }),
     };
@@ -218,11 +221,20 @@ export class AccountingService {
           type: true,
           status: true,
           amount: true,
+          phoneNumber: true,
+          accountReference: true,
           checkoutRequestId: true,
           conversationId: true,
           mpesaReceiptNumber: true,
           resultDesc: true,
           createdAt: true,
+          member: {
+            select: {
+              id: true,
+              memberNumber: true,
+              user: { select: { firstName: true, lastName: true, email: true } },
+            },
+          },
           transaction: {
             select: {
               reference: true,
@@ -237,21 +249,27 @@ export class AccountingService {
     return {
       data: rows.map((row) => ({
         id: row.id,
-        reference:
-          row.transaction?.reference ??
-          row.reference ??
+        mpesaReference:
+          row.mpesaReceiptNumber ??
           row.checkoutRequestId ??
           row.conversationId ??
-          row.id,
-        type: row.type === MpesaTxType.STK_PUSH ? 'STK' : row.type,
+          row.reference,
+        type: row.type === MpesaTxType.STK_PUSH ? 'STK_PUSH' : row.type,
         amount: new Decimal(row.amount.toString()).toNumber(),
-        expectedAmount: row.transaction?.amount
-          ? new Decimal(row.transaction.amount.toString()).toNumber()
-          : null,
+        phoneNumber: row.phoneNumber,
+        accountReference: row.accountReference,
         mpesaReceipt: row.mpesaReceiptNumber,
         createdAt: row.createdAt,
         flagReason: row.resultDesc ?? 'Reconciliation mismatch requires manual review',
         reconciliationStatus: row.status,
+        member: row.member
+          ? {
+              id: row.member.id,
+              memberNumber: row.member.memberNumber,
+              name: `${row.member.user.firstName} ${row.member.user.lastName}`,
+              email: row.member.user.email,
+            }
+          : null,
       })),
       meta: {
         page,
@@ -262,6 +280,160 @@ export class AccountingService {
         endDate: query.endDate,
         type: query.type,
       },
+    };
+  }
+
+  /**
+   * Manually match an unlinked RECON_PENDING M-Pesa transaction to a member account.
+   *
+   * Posts a credit (DEPOSIT) to the target account inside a SERIALIZABLE transaction,
+   * then marks the MpesaTransaction as COMPLETED with the new ledger reference.
+   * Idempotent: if the MPESA-RECON-{id} reference already exists the match is skipped
+   * and the existing transaction is returned.
+   */
+  async matchMpesaTransaction(
+    mpesaTxId: string,
+    tenantId: string,
+    accountId: string,
+    actorId: string,
+    note?: string,
+  ): Promise<{
+    success: boolean;
+    transactionId: string;
+    amount: number;
+    balanceBefore: number;
+    balanceAfter: number;
+    accountNumber: string;
+    memberName: string;
+  }> {
+    const mpesaTx = await this.prisma.mpesaTransaction.findFirst({
+      where: {
+        id: mpesaTxId,
+        tenantId,
+        status: TransactionStatus.RECON_PENDING,
+        transactionId: null,
+      },
+    });
+
+    if (!mpesaTx) {
+      throw new NotFoundException(
+        `RECON_PENDING M-Pesa transaction ${mpesaTxId} not found, already matched, or belongs to a different tenant`,
+      );
+    }
+
+    const account = await this.prisma.account.findFirst({
+      where: { id: accountId, tenantId, isActive: true },
+      include: {
+        member: {
+          select: {
+            id: true,
+            user: { select: { firstName: true, lastName: true } },
+          },
+        },
+      },
+    });
+
+    if (!account) {
+      throw new NotFoundException(`Active account ${accountId} not found in this tenant`);
+    }
+
+    const reference = `MPESA-RECON-${mpesaTxId}`;
+    const amount = new Decimal(mpesaTx.amount.toString());
+    const noteText = note?.trim() ?? 'No note provided';
+
+    let resultTxId = '';
+    let balanceBefore = new Decimal(0);
+    let balanceAfter = new Decimal(0);
+
+    const txClient = this.prisma.direct ?? this.prisma;
+    await txClient.$transaction(
+      async (tx) => {
+        const dup = await tx.transaction.findUnique({ where: { reference } });
+        if (dup) {
+          resultTxId = dup.id;
+          balanceBefore = new Decimal(dup.balanceBefore.toString());
+          balanceAfter = new Decimal(dup.balanceAfter.toString());
+          return;
+        }
+
+        const freshAccount = await tx.account.findUnique({
+          where: { id: accountId },
+          select: { balance: true },
+        });
+        if (!freshAccount) throw new NotFoundException(`Account ${accountId} disappeared during transaction`);
+
+        balanceBefore = new Decimal(freshAccount.balance.toString());
+        balanceAfter = balanceBefore.plus(amount);
+
+        const ledgerTx = await tx.transaction.create({
+          data: {
+            tenantId,
+            accountId,
+            type: TransactionType.DEPOSIT,
+            status: TransactionStatus.COMPLETED,
+            amount: amount.toDecimalPlaces(4).toString(),
+            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+            reference,
+            description: `Manual M-Pesa reconciliation – receipt ${mpesaTx.mpesaReceiptNumber ?? mpesaTxId} – ${noteText}`,
+            processedBy: actorId,
+          },
+        });
+
+        await tx.account.update({
+          where: { id: accountId },
+          data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
+        });
+
+        await tx.mpesaTransaction.update({
+          where: { id: mpesaTxId },
+          data: {
+            transactionId: ledgerTx.id,
+            memberId: mpesaTx.memberId ?? account.member.id,
+            status: TransactionStatus.COMPLETED,
+            resultDesc: `Manually reconciled – ${noteText}`,
+          },
+        });
+
+        resultTxId = ledgerTx.id;
+      },
+      { isolationLevel: 'Serializable' },
+    );
+
+    this.audit.create({
+      tenantId,
+      actorId,
+      action: 'MPESA.MANUAL_MATCH',
+      entityType: 'MpesaTransaction',
+      entityId: mpesaTxId,
+      oldValue: { status: TransactionStatus.RECON_PENDING },
+      newValue: {
+        status: TransactionStatus.COMPLETED,
+        transactionId: resultTxId,
+        accountId,
+        balanceBefore: balanceBefore.toFixed(4),
+        balanceAfter: balanceAfter.toFixed(4),
+      },
+      metadata: {
+        mpesaReceipt: mpesaTx.mpesaReceiptNumber,
+        amount: amount.toFixed(4),
+        phoneNumber: mpesaTx.phoneNumber,
+        accountReference: mpesaTx.accountReference,
+        note: noteText,
+        reference,
+      },
+    }).catch(() => { /* audit failures are non-fatal */ });
+
+    const memberName = `${account.member.user.firstName} ${account.member.user.lastName}`;
+
+    return {
+      success: true,
+      transactionId: resultTxId,
+      amount: amount.toNumber(),
+      balanceBefore: balanceBefore.toNumber(),
+      balanceAfter: balanceAfter.toNumber(),
+      accountNumber: account.accountNumber,
+      memberName,
     };
   }
 

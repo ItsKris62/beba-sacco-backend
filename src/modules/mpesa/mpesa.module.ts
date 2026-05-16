@@ -8,6 +8,7 @@ import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
 import { MpesaStkTimeoutService } from './mpesa-stk-timeout.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 
 /**
@@ -38,6 +39,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
  */
 @Module({
   imports: [
+    AuditModule,
     // Queue registrations (connection inherited from BullModule.forRootAsync in QueueModule)
     BullModule.registerQueue(
       { name: QUEUE_NAMES.MPESA_CALLBACK },

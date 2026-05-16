@@ -6,6 +6,7 @@ import { Decimal } from 'decimal.js';
 import { Prisma, TransactionStatus, TransactionType, MpesaTxType, MpesaTriggerSource, LoanStatus } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { AuditService } from '../../audit/audit.service';
 import {
   QUEUE_NAMES,
   MpesaCallbackJobPayload,
@@ -49,6 +50,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)
     private readonly dlq: Queue,
   ) {
@@ -112,6 +114,20 @@ export class MpesaCallbackProcessor extends WorkerHost {
       this.logger.log(
         `STK Push failed | checkout=${CheckoutRequestID} code=${ResultCode} desc=${ResultDesc}`,
       );
+      this.audit.create({
+        tenantId: mpesaTx.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MPESA.DEPOSIT.FAILED',
+        entityType: 'MpesaTransaction',
+        entityId: mpesaTx.id,
+        newValue: { status: 'FAILED', resultCode: ResultCode, resultDesc: ResultDesc },
+        metadata: {
+          checkoutRequestId: CheckoutRequestID,
+          amount: mpesaTx.amount,
+          phone: maskPhone(mpesaTx.phoneNumber),
+          accountReference: mpesaTx.accountReference,
+        },
+      }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
       return;
     }
 
@@ -307,6 +323,20 @@ export class MpesaCallbackProcessor extends WorkerHost {
       this.logger.warn(
         `B2C failed | conversation=${ConversationID} code=${ResultCode} desc=${ResultDesc}`,
       );
+      this.audit.create({
+        tenantId: mpesaTx.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MPESA.DISBURSEMENT.FAILED',
+        entityType: 'MpesaTransaction',
+        entityId: mpesaTx.id,
+        newValue: { status: 'FAILED', resultCode: ResultCode, resultDesc: ResultDesc },
+        metadata: {
+          conversationId: ConversationID,
+          loanId: mpesaTx.loanId,
+          amount: mpesaTx.amount,
+          phone: maskPhone(mpesaTx.phoneNumber),
+        },
+      }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
       return;
     }
 
@@ -371,6 +401,17 @@ export class MpesaCallbackProcessor extends WorkerHost {
     const isLoanRepayment = parsed.type === 'LOAN_REPAYMENT';
     const reference = `MPESA-${params.receipt}`;
 
+    // Populated inside the transaction; read after commit to emit audit log.
+    let auditData: {
+      action: string;
+      entityId: string;
+      balanceBefore: string;
+      balanceAfter: string;
+      loanId?: string;
+      loanNumber?: string;
+      isFullyPaid?: boolean;
+    } | null = null;
+
     // Use SERIALIZABLE isolation to prevent lost updates on concurrent deposits
     // to the same account. Falls back to pooler client if direct URL is unavailable.
     const txClient = this.prisma.direct ?? this.prisma;
@@ -392,6 +433,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
             totalRepaid: true,
             outstandingBalance: true,
             memberId: true,
+            loanNumber: true,
           },
         });
 
@@ -422,6 +464,9 @@ export class MpesaCallbackProcessor extends WorkerHost {
         const fosaId =
           fosa?.id ?? (await this.getFosaAccountId(tx, loan.memberId, params.tenantId));
 
+        const balanceBefore = fosa ? new Decimal(fosa.balance.toString()) : new Decimal(0);
+        const balanceAfter = balanceBefore.plus(params.amount);
+
         const ledgerTx = await tx.transaction.create({
           data: {
             tenantId: params.tenantId,
@@ -430,15 +475,8 @@ export class MpesaCallbackProcessor extends WorkerHost {
             type: TransactionType.LOAN_REPAYMENT,
             status: TransactionStatus.COMPLETED,
             amount: params.amount.toDecimalPlaces(4).toString(),
-            balanceBefore: fosa
-              ? new Decimal(fosa.balance.toString()).toDecimalPlaces(4).toString()
-              : '0.0000',
-            balanceAfter: fosa
-              ? new Decimal(fosa.balance.toString())
-                  .plus(params.amount)
-                  .toDecimalPlaces(4)
-                  .toString()
-              : '0.0000',
+            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
             reference,
             description: `M-Pesa loan repayment – ${params.receipt}`,
             processedBy: 'MPESA_SYSTEM',
@@ -457,12 +495,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
         if (fosa) {
           await tx.account.update({
             where: { id: fosa.id },
-            data: {
-              balance: new Decimal(fosa.balance.toString())
-                .plus(params.amount)
-                .toDecimalPlaces(4)
-                .toString(),
-            },
+            data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
           });
         }
 
@@ -481,6 +514,16 @@ export class MpesaCallbackProcessor extends WorkerHost {
               },
             });
           }
+
+          auditData = {
+            action: 'MPESA.LOAN_REPAYMENT.COMPLETED',
+            entityId: params.mpesaTxId ?? ledgerTx.id,
+            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+            loanId: loan.id,
+            loanNumber: loan.loanNumber ?? undefined,
+            isFullyPaid,
+          };
         } else {
           // ── Savings deposit path ──────────────────────────────────────────────
           const accountNumber = parsed.isMemberIdDeposit
@@ -536,10 +579,44 @@ export class MpesaCallbackProcessor extends WorkerHost {
               },
             });
           }
+
+          auditData = {
+            action: 'MPESA.DEPOSIT.COMPLETED',
+            entityId: params.mpesaTxId ?? ledgerTx.id,
+            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+          };
         }
       },
       { isolationLevel: 'Serializable' as const },
     );
+
+    // Emit audit log after the transaction commits — fire-and-forget so a missed
+    // audit event never rolls back the ledger entry.
+    if (auditData) {
+      const { action, entityId, balanceBefore, balanceAfter, loanId, loanNumber, isFullyPaid } = auditData;
+      this.audit.create({
+        tenantId: params.tenantId,
+        actorId: 'SYSTEM',
+        action,
+        entityType: 'MpesaTransaction',
+        entityId,
+        oldValue: { status: 'PENDING', balanceBefore },
+        newValue: {
+          status: 'COMPLETED',
+          balanceAfter,
+          receipt: params.receipt,
+          amount: params.amount.toFixed(4),
+          ...(loanId && { loanId, loanNumber, isFullyPaid }),
+        },
+        metadata: {
+          reference,
+          accountReference: params.accountReference,
+          memberId: params.memberId,
+          transactionDate: params.transactionDate.toISOString(),
+        },
+      }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
+    }
   }
 
   private async postDisbursementLedger(params: {
@@ -555,6 +632,12 @@ export class MpesaCallbackProcessor extends WorkerHost {
     transactionDate: Date;
   }): Promise<void> {
     const reference = `MPESA-B2C-${params.receipt}`;
+
+    let auditData: {
+      balanceBefore: string;
+      balanceAfter: string;
+      loanStatusChanged: boolean;
+    } | null = null;
 
     const txClient = this.prisma.direct ?? this.prisma;
     await txClient.$transaction(
@@ -600,7 +683,8 @@ export class MpesaCallbackProcessor extends WorkerHost {
         });
       }
 
-      if (loan.status === LoanStatus.APPROVED) {
+      const loanStatusChanged = loan.status === LoanStatus.APPROVED;
+      if (loanStatusChanged) {
         await tx.loan.update({
           where: { id: params.loanId },
           data: {
@@ -623,9 +707,39 @@ export class MpesaCallbackProcessor extends WorkerHost {
             callbackPayload: params.rawPayload,
           },
         });
+
+        auditData = {
+          balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+          balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+          loanStatusChanged,
+        };
       },
       { isolationLevel: 'Serializable' as const },
     );
+
+    if (auditData) {
+      this.audit.create({
+        tenantId: params.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MPESA.DISBURSEMENT.COMPLETED',
+        entityType: 'MpesaTransaction',
+        entityId: params.mpesaTxId,
+        oldValue: { status: 'PENDING', balanceBefore: auditData.balanceBefore },
+        newValue: {
+          status: 'COMPLETED',
+          balanceAfter: auditData.balanceAfter,
+          receipt: params.receipt,
+          amount: params.amount.toFixed(4),
+          loanMarkedDisbursed: auditData.loanStatusChanged,
+        },
+        metadata: {
+          reference,
+          loanId: params.loanId,
+          memberId: params.memberId,
+          transactionDate: params.transactionDate.toISOString(),
+        },
+      }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
+    }
   }
 
   // ─── DLQ handler ─────────────────────────────────────────────────────────
@@ -649,6 +763,21 @@ export class MpesaCallbackProcessor extends WorkerHost {
       },
       { removeOnFail: false, removeOnComplete: false },
     );
+
+    // Audit the DLQ transition — critical for manual reconciliation
+    this.audit.create({
+      tenantId: job.data.tenantId ?? 'UNRESOLVED',
+      actorId: 'SYSTEM',
+      action: 'MPESA.CALLBACK.DLQ',
+      entityType: 'MpesaCallback',
+      entityId: job.id ?? undefined,
+      metadata: {
+        callbackType: job.data.callbackType,
+        attemptsMade: job.attemptsMade,
+        failedReason: job.failedReason,
+        failedAt: new Date().toISOString(),
+      },
+    }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────

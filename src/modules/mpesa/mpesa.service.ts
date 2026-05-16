@@ -16,6 +16,7 @@ import { DarajaClientService } from './daraja-client.service';
 import { MpesaException, MpesaConfigException } from './exceptions/mpesa.exceptions';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
 import { maskPhone, buildMpesaRef } from './utils/mpesa.utils';
+import { AuditService } from '../audit/audit.service';
 import {
   MpesaCallbackJobPayload,
   MpesaDisbursementJobPayload,
@@ -49,6 +50,7 @@ export class MpesaService {
     private readonly redis: RedisService,
     private readonly idempotency: IdempotencyService,
     private readonly daraja: DarajaClientService,
+    private readonly audit: AuditService,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK)
     private readonly callbackQueue: Queue<MpesaCallbackJobPayload>,
     @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
@@ -150,6 +152,27 @@ export class MpesaService {
           `phone=${maskPhone(dto.phoneNumber)} amount=${amount} ` +
           `checkout=${darajaResp.CheckoutRequestID}`,
       );
+
+      this.audit.create({
+        tenantId,
+        actorId: actorUserId,
+        action: 'MPESA.DEPOSIT.INITIATED',
+        entityType: 'MpesaTransaction',
+        entityId: mpesaTx.id,
+        newValue: {
+          status: 'PENDING',
+          checkoutRequestId: darajaResp.CheckoutRequestID,
+          amount,
+          accountReference: accountRef,
+          triggerSource,
+        },
+        metadata: {
+          phone: maskPhone(dto.phoneNumber),
+          purpose: dto.purpose,
+          memberId,
+          idempotencyKey: idempotencyKey.trim(),
+        },
+      }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
 
       const result = {
         checkoutRequestId: darajaResp.CheckoutRequestID,
