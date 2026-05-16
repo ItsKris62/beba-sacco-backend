@@ -58,7 +58,7 @@ async function run() {
   // Upsert super admin user
   const superAdminUser = await p.user.upsert({
     where: { tenantId_email: { tenantId: tenant.id, email: 'superadmin@beba-sacco.com' } },
-    update: { passwordHash: superAdminHash, isActive: true, role: 'SUPER_ADMIN' },
+    update: { passwordHash: superAdminHash, isActive: true, role: 'SUPER_ADMIN', status: 'APPROVED' },
     create: {
       tenantId: tenant.id,
       email: 'superadmin@beba-sacco.com',
@@ -67,6 +67,7 @@ async function run() {
       lastName: 'Admin',
       phone: '+254700000000',
       role: 'SUPER_ADMIN',
+      status: 'APPROVED',
       isActive: true,
       emailVerified: true
     }
@@ -76,7 +77,7 @@ async function run() {
   // Upsert admin user
   const adminUser = await p.user.upsert({
     where: { tenantId_email: { tenantId: tenant.id, email: 'admin@beba-sacco.com' } },
-    update: { passwordHash: adminHash, isActive: true, tenantId: tenant.id },
+    update: { passwordHash: adminHash, isActive: true, status: 'APPROVED' },
     create: {
       tenantId: tenant.id,
       email: 'admin@beba-sacco.com',
@@ -85,6 +86,7 @@ async function run() {
       lastName: 'Admin',
       phone: '+254700000001',
       role: 'MANAGER',
+      status: 'APPROVED',
       isActive: true,
       emailVerified: true
     }
@@ -94,7 +96,7 @@ async function run() {
   // Upsert member user
   const memberUser = await p.user.upsert({
     where: { tenantId_email: { tenantId: tenant.id, email: 'member@beba-sacco.com' } },
-    update: { passwordHash: memberHash, isActive: true, tenantId: tenant.id },
+    update: { passwordHash: memberHash, isActive: true, status: 'APPROVED' },
     create: {
       tenantId: tenant.id,
       email: 'member@beba-sacco.com',
@@ -103,6 +105,7 @@ async function run() {
       lastName: 'Kamau',
       phone: '+254712345678',
       role: 'MEMBER',
+      status: 'APPROVED',
       isActive: true,
       emailVerified: true
     }
