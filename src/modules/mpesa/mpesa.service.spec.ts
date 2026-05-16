@@ -1,11 +1,12 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MpesaService } from './mpesa.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { MpesaTriggerSource } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
+import { MpesaTxType, MpesaTriggerSource, TransactionStatus } from '@prisma/client';
 import { DepositPurpose } from './dto/deposit-request.dto';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
@@ -16,6 +17,11 @@ const mockConfig = {
       'app.mpesa.stkRateLimitPerDay': 3,
       'app.mpesa.callbackUrl': 'https://api.example.com',
       'app.mpesa.webhookSecret': 'test-secret',
+      'app.mpesa.b2cShortcode': '600000',
+      'app.mpesa.initiatorName': 'testapi',
+      'app.mpesa.securityCredential': 'test-credential',
+      'app.mpesa.b2cResultUrl': 'https://api.example.com/mpesa/b2c/result',
+      'app.mpesa.b2cQueueTimeoutUrl': 'https://api.example.com/mpesa/b2c/timeout',
     };
     return map[key] ?? def;
   }),
@@ -27,6 +33,7 @@ const mockPrisma = {
   },
   mpesaTransaction: {
     create: jest.fn().mockResolvedValue({ id: 'mpesa-tx-1' }),
+    findFirst: jest.fn().mockResolvedValue(null),
   },
   account: {
     findFirst: jest.fn().mockResolvedValue({ id: 'acct-1', tenantId: 'tenant-1' }),
@@ -42,16 +49,26 @@ const mockDaraja = {
     MerchantRequestID: 'mr-001',
     CustomerMessage: 'Success',
   }),
+  initiateB2C: jest.fn().mockResolvedValue({
+    ConversationID: 'conv-001',
+    OriginatorConversationID: 'orig-001',
+    ResponseCode: '0',
+    ResponseDescription: 'Accept the service request successfully.',
+  }),
 } as unknown as DarajaClientService;
 
 const mockCallbackQueue = { add: jest.fn().mockResolvedValue({ id: 'job-1' }) };
-const mockDisbursementQueue = { add: jest.fn() };
+const mockDisbursementQueue = { add: jest.fn().mockResolvedValue({ id: 'disb-job-1' }) };
 const mockDlqQueue = { add: jest.fn() };
 const mockIdempotency = {
   checkAndReserve: jest.fn().mockResolvedValue({ status: 'RESERVED' }),
   complete: jest.fn().mockResolvedValue(undefined),
   release: jest.fn().mockResolvedValue(undefined),
 } as unknown as IdempotencyService;
+
+const mockAudit = {
+  create: jest.fn().mockResolvedValue(undefined),
+} as unknown as AuditService;
 
 function makeRedis(incrResult: number): RedisService {
   return {
@@ -62,6 +79,7 @@ function makeRedis(incrResult: number): RedisService {
     set: jest.fn().mockResolvedValue(true),
     getJson: jest.fn().mockResolvedValue(null),
     setJson: jest.fn().mockResolvedValue(true),
+    decrIfPositive: jest.fn().mockResolvedValue(0),
   } as unknown as RedisService;
 }
 
@@ -72,6 +90,7 @@ function makeService(incrResult = 1): MpesaService {
     makeRedis(incrResult),
     mockIdempotency,
     mockDaraja,
+    mockAudit,
     mockCallbackQueue as never,
     mockDisbursementQueue as never,
     mockDlqQueue as never,
@@ -85,7 +104,7 @@ const BASE_DTO = {
   accountRef: 'ACC-001',
 };
 
-// ─── Suite ───────────────────────────────────────────────────────────────────
+// ─── Suite: rounding + rate-limit atomicity [M-6, M-1] ───────────────────────
 
 describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
 
@@ -143,6 +162,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       redis,
       mockIdempotency,
       mockDaraja,
+      mockAudit,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
       mockDlqQueue as never,
@@ -163,6 +183,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       redis,
       mockIdempotency,
       mockDaraja,
+      mockAudit,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
       mockDlqQueue as never,
@@ -195,5 +216,315 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
     await expect(
       service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1'),
     ).resolves.toBeDefined();
+  });
+});
+
+// ─── Suite: initiateDeposit – SAVINGS full flow ───────────────────────────────
+
+describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
+  let service: MpesaService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockPrisma.member.findFirst as jest.Mock).mockResolvedValue({ id: 'member-1' });
+    (mockPrisma.account.findFirst as jest.Mock).mockResolvedValue({ id: 'acct-1', tenantId: 'tenant-1' });
+    (mockPrisma.mpesaTransaction.create as jest.Mock).mockResolvedValue({ id: 'mpesa-tx-1' });
+    (mockDaraja.initiateSTKPush as jest.Mock).mockResolvedValue({
+      CheckoutRequestID: 'ws_CO_001',
+      MerchantRequestID: 'mr-001',
+      CustomerMessage: 'Success. Request accepted for processing',
+    });
+    (mockIdempotency.checkAndReserve as jest.Mock).mockResolvedValue({ status: 'RESERVED' });
+    (mockIdempotency.complete as jest.Mock).mockResolvedValue(undefined);
+    (mockAudit.create as jest.Mock).mockResolvedValue(undefined);
+    service = makeService(1);
+  });
+
+  it('checks and reserves the idempotency key derived from tenant, member, and caller key', async () => {
+    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-key-1');
+
+    expect(mockIdempotency.checkAndReserve).toHaveBeenCalledTimes(1);
+    const [idemKey, tenantId] = (mockIdempotency.checkAndReserve as jest.Mock).mock.calls[0];
+    expect(idemKey).toBe('mpesa:stk:tenant-1:member-1:idem-key-1');
+    expect(tenantId).toBe('tenant-1');
+  });
+
+  it('calls initiateSTKPush with Math.round(amount) and the raw accountRef for SAVINGS', async () => {
+    const dto = { ...BASE_DTO, amount: 1500.7 };
+    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+
+    expect(mockDaraja.initiateSTKPush).toHaveBeenCalledTimes(1);
+    const stkArgs = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
+    expect(stkArgs.amount).toBe(1501); // Math.round(1500.7)
+    expect(stkArgs.accountReference).toBe('ACC-001');
+    expect(stkArgs.phoneNumber).toBe('254712345678');
+  });
+
+  it('creates a PENDING STK_PUSH MpesaTransaction with correct fields', async () => {
+    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+
+    expect(mockPrisma.mpesaTransaction.create).toHaveBeenCalledTimes(1);
+    const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
+    expect(data.status).toBe(TransactionStatus.PENDING);
+    expect(data.type).toBe(MpesaTxType.STK_PUSH);
+    expect(data.checkoutRequestId).toBe('ws_CO_001');
+    expect(data.merchantRequestId).toBe('mr-001');
+    expect(data.tenantId).toBe('tenant-1');
+    expect(data.memberId).toBe('member-1');
+    expect(data.phoneNumber).toBe('254712345678');
+    expect(data.accountReference).toBe('ACC-001');
+  });
+
+  it('emits an MPESA.DEPOSIT.INITIATED audit log with entity and tenant context', async () => {
+    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+
+    expect(mockAudit.create).toHaveBeenCalledTimes(1);
+    const auditArgs = (mockAudit.create as jest.Mock).mock.calls[0][0];
+    expect(auditArgs.action).toBe('MPESA.DEPOSIT.INITIATED');
+    expect(auditArgs.entityType).toBe('MpesaTransaction');
+    expect(auditArgs.entityId).toBe('mpesa-tx-1');
+    expect(auditArgs.tenantId).toBe('tenant-1');
+    expect(auditArgs.actorId).toBe('user-1');
+  });
+
+  it('returns checkoutRequestId, customerMessage, and mpesaTxId on success', async () => {
+    const result = await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+
+    expect(result).toEqual({
+      checkoutRequestId: 'ws_CO_001',
+      customerMessage: 'Success. Request accepted for processing',
+      mpesaTxId: 'mpesa-tx-1',
+    });
+  });
+
+  it('short-circuits and returns cached result when idempotency key is already COMPLETED', async () => {
+    const cached = { checkoutRequestId: 'ws_CO_cached', customerMessage: 'Cached', mpesaTxId: 'mpesa-tx-cached' };
+    (mockIdempotency.checkAndReserve as jest.Mock).mockResolvedValue({ status: 'COMPLETED', result: cached });
+
+    const result = await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+
+    expect(result).toEqual(cached);
+    expect(mockDaraja.initiateSTKPush).not.toHaveBeenCalled();
+    expect(mockPrisma.mpesaTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('throws BadRequestException without calling Daraja when idempotency key is PROCESSING', async () => {
+    (mockIdempotency.checkAndReserve as jest.Mock).mockResolvedValue({ status: 'PROCESSING' });
+
+    await expect(
+      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1'),
+    ).rejects.toThrow(BadRequestException);
+
+    expect(mockDaraja.initiateSTKPush).not.toHaveBeenCalled();
+  });
+
+  it('throws BadRequestException when no idempotency key is supplied', async () => {
+    await expect(
+      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, ''),
+    ).rejects.toThrow(BadRequestException);
+  });
+});
+
+// ─── Suite: queueLoanDisbursement ────────────────────────────────────────────
+
+describe('MpesaService.queueLoanDisbursement', () => {
+  const MOCK_LOAN = {
+    id: 'loan-1',
+    memberId: 'member-1',
+    loanNumber: 'LN-2025-000001',
+    principalAmount: { toString: () => '50000' },
+    member: {
+      user: { phoneNumber: '254712345678', phone: null },
+    },
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(MOCK_LOAN);
+    (mockDisbursementQueue.add as jest.Mock).mockResolvedValue({ id: 'disb-job-1' });
+  });
+
+  it('adds a disburse-loan job to the disbursement queue with the correct payload', async () => {
+    const service = makeService(1);
+    const result = await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-user-1');
+
+    expect(mockDisbursementQueue.add).toHaveBeenCalledTimes(1);
+    const [jobName, payload] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
+    expect(jobName).toBe('disburse-loan');
+    expect(payload).toMatchObject({
+      loanId: 'loan-1',
+      tenantId: 'tenant-1',
+      phone: '254712345678',
+      amount: 50000,
+      triggeredBy: 'officer-user-1',
+    });
+    expect(result.jobId).toBe('b2c-disburse-loan-1');
+  });
+
+  it('uses a deterministic jobId (b2c-disburse-{loanId}) for BullMQ deduplication', async () => {
+    const service = makeService(1);
+    await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1');
+
+    const [, , opts] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
+    expect(opts.jobId).toBe('b2c-disburse-loan-1');
+  });
+
+  it('prefers phoneNumber over phone when both are present on the user', async () => {
+    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue({
+      ...MOCK_LOAN,
+      member: { user: { phoneNumber: '254712345678', phone: '254700000000' } },
+    });
+    const service = makeService(1);
+
+    await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1');
+
+    const [, payload] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
+    expect(payload.phone).toBe('254712345678');
+  });
+
+  it('falls back to phone when phoneNumber is null', async () => {
+    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue({
+      ...MOCK_LOAN,
+      member: { user: { phoneNumber: null, phone: '254722000000' } },
+    });
+    const service = makeService(1);
+
+    await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1');
+
+    const [, payload] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
+    expect(payload.phone).toBe('254722000000');
+  });
+
+  it('throws NotFoundException without enqueueing when loan does not exist', async () => {
+    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(null);
+    const service = makeService(1);
+
+    await expect(
+      service.queueLoanDisbursement('nonexistent-loan', 'tenant-1', 'officer-1'),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(mockDisbursementQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('throws BadRequestException without enqueueing when member has no phone on file', async () => {
+    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue({
+      ...MOCK_LOAN,
+      member: { user: { phoneNumber: null, phone: null } },
+    });
+    const service = makeService(1);
+
+    await expect(
+      service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1'),
+    ).rejects.toThrow(BadRequestException);
+
+    expect(mockDisbursementQueue.add).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Suite: executeB2cDisbursement ───────────────────────────────────────────
+
+describe('MpesaService.executeB2cDisbursement', () => {
+  const MOCK_LOAN_RECORD = {
+    memberId: 'member-1',
+    loanNumber: 'LN-2025-000001',
+    principalAmount: { toString: () => '50000' },
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(MOCK_LOAN_RECORD);
+    (mockPrisma.mpesaTransaction.findFirst as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.mpesaTransaction.create as jest.Mock).mockResolvedValue({ id: 'b2c-tx-1' });
+    (mockDaraja.initiateB2C as jest.Mock).mockResolvedValue({
+      ConversationID: 'conv-001',
+      OriginatorConversationID: 'orig-001',
+      ResponseCode: '0',
+      ResponseDescription: 'Accept the service request successfully.',
+    });
+  });
+
+  it('calls initiateB2C with commandId BusinessPayment, the resolved phone, and amount', async () => {
+    const service = makeService(1);
+    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
+
+    expect(mockDaraja.initiateB2C).toHaveBeenCalledTimes(1);
+    const b2cArgs = (mockDaraja.initiateB2C as jest.Mock).mock.calls[0][0];
+    expect(b2cArgs.commandId).toBe('BusinessPayment');
+    expect(b2cArgs.partyB).toBe('254712345678');
+    expect(b2cArgs.amount).toBe(50000);
+  });
+
+  it('creates a MpesaTransaction with type B2C and status PENDING', async () => {
+    const service = makeService(1);
+    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
+
+    expect(mockPrisma.mpesaTransaction.create).toHaveBeenCalledTimes(1);
+    const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
+    expect(data.type).toBe(MpesaTxType.B2C);
+    expect(data.status).toBe(TransactionStatus.PENDING);
+    expect(data.tenantId).toBe('tenant-1');
+    expect(data.loanId).toBe('loan-1');
+    expect(data.phoneNumber).toBe('254712345678');
+    expect(data.conversationId).toBe('conv-001');
+    expect(data.memberId).toBe('member-1');
+  });
+
+  it('returns conversationId and mpesaTxId on success', async () => {
+    const service = makeService(1);
+    const result = await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
+
+    expect(result).toEqual({ conversationId: 'conv-001', mpesaTxId: 'b2c-tx-1' });
+  });
+
+  it('sets triggerSource SYSTEM when triggeredBy is the literal string "SYSTEM"', async () => {
+    const service = makeService(1);
+    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'SYSTEM');
+
+    const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
+    expect(data.triggerSource).toBe(MpesaTriggerSource.SYSTEM);
+  });
+
+  it('sets triggerSource OFFICER when triggeredBy is any non-SYSTEM value', async () => {
+    const service = makeService(1);
+    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-user-1');
+
+    const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
+    expect(data.triggerSource).toBe(MpesaTriggerSource.OFFICER);
+  });
+
+  it('skips Daraja and Prisma create when a PENDING disbursement already exists (idempotency guard)', async () => {
+    const existingTx = { id: 'existing-tx-1', conversationId: 'conv-existing', status: TransactionStatus.PENDING };
+    (mockPrisma.mpesaTransaction.findFirst as jest.Mock).mockResolvedValue(existingTx);
+    const service = makeService(1);
+
+    const result = await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
+
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+    expect(mockPrisma.mpesaTransaction.create).not.toHaveBeenCalled();
+    expect(result.conversationId).toBe('conv-existing');
+    expect(result.mpesaTxId).toBe('existing-tx-1');
+  });
+
+  it('skips Daraja and Prisma create when a COMPLETED disbursement already exists', async () => {
+    const completedTx = { id: 'completed-tx-1', conversationId: 'conv-completed', status: TransactionStatus.COMPLETED };
+    (mockPrisma.mpesaTransaction.findFirst as jest.Mock).mockResolvedValue(completedTx);
+    const service = makeService(1);
+
+    const result = await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
+
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+    expect(result.mpesaTxId).toBe('completed-tx-1');
+  });
+
+  it('throws NotFoundException without calling Daraja when loan does not exist in tenant', async () => {
+    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(null);
+    const service = makeService(1);
+
+    await expect(
+      service.executeB2cDisbursement('nonexistent-loan', 'tenant-1', '254712345678', 50000, 'officer-1'),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+    expect(mockPrisma.mpesaTransaction.create).not.toHaveBeenCalled();
   });
 });
