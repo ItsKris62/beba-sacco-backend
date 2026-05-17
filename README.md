@@ -91,7 +91,7 @@ WORKER_MODE=false
 METRICS_API_KEY=replace-with-32-plus-char-secret
 DATABASE_DIRECT_URL=postgres://user:pass@host/db
 FEATURE_EMAIL_VERIFICATION_ENFORCED=true
-PHASE_4_ENABLED=false
+FEATURE_ADVANCED_FINANCIAL_JOBS=false
 ```
 
 Set `WORKER_MODE=true` on the dedicated Render worker service. If queue

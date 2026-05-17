@@ -104,6 +104,8 @@ export default registerAs('app', () => ({
   },
   features: {
     emailVerificationEnforced: process.env.FEATURE_EMAIL_VERIFICATION_ENFORCED ?? 'true',
+    advancedFinancialJobs:
+      process.env.FEATURE_ADVANCED_FINANCIAL_JOBS ?? process.env.PHASE_4_ENABLED ?? 'false',
   },
 
   // Multi-Tenancy
