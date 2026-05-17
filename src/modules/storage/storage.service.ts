@@ -22,6 +22,7 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'image/png',
   'image/webp',
   'application/pdf',
+  'text/csv',
 ]);
 
 const UPLOAD_URL_TTL = 300; // 5 minutes

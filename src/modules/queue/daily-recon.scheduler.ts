@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { QUEUE_NAMES } from '../queue.constants';
+import { QUEUE_NAMES } from './queue.constants';
 
 @Injectable()
 export class DailyReconScheduler implements OnModuleInit {

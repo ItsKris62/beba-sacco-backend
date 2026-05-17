@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { DynamicModule, Module, Provider, Type } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QUEUE_NAMES } from './queue.constants';
@@ -18,11 +18,12 @@ import { LedgerIntegrityProcessor } from './processors/ledger-integrity.processo
 import { RepaymentScheduleProcessor } from './processors/repayment-schedule.processor';
 import { OutboundWebhookProcessor } from './processors/outbound-webhook.processor';
 import { ReportProcessor } from './processors/report.processor';
+import { DeadLetterAlertProcessor } from './dead-letter.processor';
 // Sprint 4 – cron-scheduled STK repayment
 import { MpesaRepaymentScheduler } from './processors/mpesa-repayment.scheduler';
 import { MpesaRepaymentProcessor } from './processors/mpesa-repayment.processor';
 import { DailyReconProcessor } from './processors/daily-recon.processor';
-import { DailyReconScheduler } from './schedulers/daily-recon.scheduler';
+import { DailyReconScheduler } from './daily-recon.scheduler';
 
 // Service dependencies needed by processors
 import { MpesaModule } from '../mpesa/mpesa.module';
@@ -34,6 +35,62 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
 import { ReportsModule } from '../reports/reports.module';
 import { StorageModule } from '../storage/storage.module';
 import { GuarantorValidationService } from '../loans/guarantor-validation.service';
+import { AlertsService } from '../alerts/alerts.service';
+
+export type QueueModuleMode = 'web' | 'worker';
+
+export interface QueueModuleOptions {
+  mode?: QueueModuleMode;
+}
+
+export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
+  MpesaCallbackProcessor,
+  GuarantorReminderProcessor,
+  GuarantorProcessor,
+  GuarantorExpiryConsumer,
+  AuditLogProcessor,
+  LoanDisburseProcessor,
+  EmailProcessor,
+  OutboundWebhookProcessor,
+  ReportProcessor,
+  MpesaRepaymentScheduler,
+  MpesaRepaymentProcessor,
+  DailyReconProcessor,
+  DailyReconScheduler,
+  DeadLetterAlertProcessor,
+];
+
+export const ADVANCED_FINANCIAL_QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
+  InterestAccrualProcessor,
+  MpesaReconciliationProcessor,
+  LedgerIntegrityProcessor,
+  RepaymentScheduleProcessor,
+];
+
+export function shouldRegisterQueueProcessors(options: QueueModuleOptions = {}): boolean {
+  if (options.mode === 'worker') {
+    return true;
+  }
+
+  return process.env.WORKER_MODE !== 'true';
+}
+
+export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Type<unknown>[] {
+  if (!shouldRegisterQueueProcessors(options)) {
+    return [];
+  }
+
+  const providers = [...QUEUE_PROCESSOR_PROVIDERS];
+  const advancedEnabled =
+    process.env.FEATURE_ADVANCED_FINANCIAL_JOBS === 'true' ||
+    process.env.PHASE_4_ENABLED === 'true';
+
+  if (advancedEnabled) {
+    providers.push(...ADVANCED_FINANCIAL_QUEUE_PROCESSOR_PROVIDERS);
+  }
+
+  return providers;
+}
 
 /**
  * Queue Module – BullMQ + dedicated Redis
@@ -170,27 +227,20 @@ import { GuarantorValidationService } from '../loans/guarantor-validation.servic
     // PlunkService is @Global but QueueModule is loaded before CommonServicesModule
     // resolves globally for processors — re-provide here to be explicit.
     PlunkService,
+    AlertsService,
     GuarantorValidationService,
-    MpesaCallbackProcessor,
-    GuarantorReminderProcessor,
-    GuarantorProcessor,
-    GuarantorExpiryConsumer,
-    AuditLogProcessor,
-    LoanDisburseProcessor,
-    EmailProcessor,
-    // Phase 4
-    InterestAccrualProcessor,
-    MpesaReconciliationProcessor,
-    LedgerIntegrityProcessor,
-    RepaymentScheduleProcessor,
-    OutboundWebhookProcessor,
-    ReportProcessor,
-    // Sprint 4
-    MpesaRepaymentScheduler,
-    MpesaRepaymentProcessor,
-    DailyReconProcessor,
-    DailyReconScheduler,
+    ...getQueueProcessorProviders({ mode: 'web' }),
   ],
   exports: [BullModule],
 })
-export class QueueModule {}
+export class QueueModule {
+  static forRoot(options: QueueModuleOptions = {}): DynamicModule {
+    const providers: Provider[] = getQueueProcessorProviders(options);
+
+    return {
+      module: QueueModule,
+      providers,
+      exports: [BullModule],
+    };
+  }
+}

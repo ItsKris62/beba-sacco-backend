@@ -1,6 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
+import { LoanStatus, MpesaTxType, TransactionStatus, TransactionType } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { StorageService } from '../../storage/storage.service';
 import { AlertsService } from '../../alerts/alerts.service';
@@ -28,22 +29,31 @@ export class DailyReconProcessor extends WorkerHost {
       // 1. Data Collection via native Prisma to enforce Phase 1.1 Tenant Isolation transparently
       const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000);
 
-      const stkPending = await this.prisma.transaction.count({
-        where: { type: 'STK_PUSH', status: 'PENDING', createdAt: { lt: fifteenMinsAgo } }
+      const stkPending = await this.prisma.mpesaTransaction.count({
+        where: {
+          type: MpesaTxType.STK_PUSH,
+          status: TransactionStatus.PENDING,
+          createdAt: { lt: fifteenMinsAgo },
+        }
       }).catch(() => 0); // Graceful fallback if migrations lag in target env
 
-      const b2cReconPending = await this.prisma.transaction.count({
-        where: { type: 'B2C', status: 'RECON_PENDING' }
+      const b2cReconPending = await this.prisma.mpesaTransaction.count({
+        where: { type: MpesaTxType.B2C, status: TransactionStatus.RECON_PENDING }
       }).catch(() => 0);
 
-      const b2cTimeout = await this.prisma.transaction.count({
-        where: { type: 'B2C', status: { in: ['TIMEOUT_REVERTED', 'FAILED'] } }
+      const b2cTimeout = await this.prisma.mpesaTransaction.count({
+        where: { type: MpesaTxType.B2C, status: TransactionStatus.FAILED }
       }).catch(() => 0);
 
       const loanMismatches = await this.prisma.loan.count({
         where: { 
-          status: 'DISBURSED',
-          transactions: { none: { type: 'B2C', status: 'COMPLETED' } }
+          status: LoanStatus.DISBURSED,
+          transactions: {
+            none: {
+              type: TransactionType.LOAN_DISBURSEMENT,
+              status: TransactionStatus.COMPLETED,
+            },
+          },
         }
       }).catch(() => 0);
 
@@ -62,7 +72,10 @@ export class DailyReconProcessor extends WorkerHost {
       let uploadSuccess = false;
       
       try {
-        const { uploadUrl } = await this.storage.getUploadUrlForKey({ objectKey: fileKey });
+        const { uploadUrl } = await this.storage.getUploadUrlForKey({
+          objectKey: fileKey,
+          contentType: 'text/csv',
+        });
         const uploadRes = await fetch(uploadUrl, {
           method: 'PUT',
           headers: { 'Content-Type': 'text/csv' },

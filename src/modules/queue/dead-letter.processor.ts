@@ -8,7 +8,7 @@ import { QUEUE_NAMES } from './queue.constants';
 @Injectable()
 export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DeadLetterAlertProcessor.name);
-  private redisClient: Redis;
+  private redisClient!: Redis;
   private queueEvents: QueueEvents[] = [];
   private dlqGauge: Gauge<string>;
   private alertedQueues = new Set<string>();
@@ -42,7 +42,7 @@ export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
       const qe = new QueueEvents(queue, { connection });
 
       qe.on('failed', () => this.checkQueueDepth(queue));
-      qe.on('retried', () => this.checkQueueDepth(queue));
+      qe.on('retries-exhausted', () => this.checkQueueDepth(queue));
       qe.on('removed', () => this.checkQueueDepth(queue));
 
       if (queue.toUpperCase().endsWith('DLQ')) {

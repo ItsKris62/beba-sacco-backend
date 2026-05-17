@@ -12,7 +12,7 @@ describe('DailyReconProcessor (e2e)', () => {
 
   beforeEach(async () => {
     mockPrisma = {
-      transaction: { count: jest.fn().mockResolvedValue(5) },
+      mpesaTransaction: { count: jest.fn().mockResolvedValue(5) },
       loan: { count: jest.fn().mockResolvedValue(2) },
     };
     
@@ -45,7 +45,7 @@ describe('DailyReconProcessor (e2e)', () => {
 
     expect(result.success).toBe(true);
     expect(result.fileKey).toContain('recon-reports/');
-    expect(mockPrisma.transaction.count).toHaveBeenCalledTimes(3); 
+    expect(mockPrisma.mpesaTransaction.count).toHaveBeenCalledTimes(3); 
     expect(mockPrisma.loan.count).toHaveBeenCalledTimes(1); 
     expect(mockStorage.getUploadUrlForKey).toHaveBeenCalled();
     expect(global.fetch).toHaveBeenCalledWith('http://localhost/mock-upload', expect.any(Object));
