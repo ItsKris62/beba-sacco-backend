@@ -49,6 +49,7 @@ export class JwtBlocklistService {
         'Token revocation temporarily unavailable — please try again',
       );
     }
+    await this.redis.set(`blocklist:${jti}`, '1', ttlSec);
     this.logger.log(`Token ${jti.slice(0, 8)}… added to blocklist (TTL ${ttlSec}s)`);
   }
 

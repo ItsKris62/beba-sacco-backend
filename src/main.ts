@@ -65,11 +65,26 @@ async function bootstrap() {
   // CORS must be registered before helmet so that OPTIONS preflight responses
   // include Access-Control-Allow-* headers before helmet can inspect them.
   // Without this order, browsers block the preflight and the POST never fires.
+  const configuredCorsOrigins = process.env.CORS_ORIGIN
+    ?.split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
   app.enableCors({
-    origin: configService.get<string[]>('app.cors.origin', ['http://localhost:3001']),
+    origin:
+      configuredCorsOrigins && configuredCorsOrigins.length > 0
+        ? configuredCorsOrigins
+        : configService.get<string[]>('app.cors.origin', ['http://localhost:3001']),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type', 'X-Tenant-ID', 'X-Request-ID', 'X-Idempotency-Key', 'X-Timezone', 'X-Screen-Res'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Tenant-ID',
+      'X-Request-ID',
+      'X-Idempotency-Key',
+      'X-Timezone',
+      'X-Screen-Res',
+    ],
     exposedHeaders: ['X-Request-ID'],
   });
 

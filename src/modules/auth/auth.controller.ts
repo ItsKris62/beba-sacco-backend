@@ -1,5 +1,6 @@
 import {
   Controller,
+  Get,
   Post,
   Patch,
   Body,
@@ -35,12 +36,13 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import type { AuthenticatedUser, JwtPayload } from './strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
-import { CookieRefreshGuard } from './guards/cookie-refresh.guard';
+import type { AuthProfileDto } from './auth.service';
 
 /** Typed request shape after TenantInterceptor + JwtStrategy run */
 interface TenantRequest extends Request {
   tenant: Tenant;
   user: AuthenticatedUser;
+  cookies: Record<string, string | undefined>;
 }
 
 /**
@@ -76,8 +78,8 @@ export class AuthController {
     res.cookie('refresh_token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      path: '/api/v1/auth',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      path: '/api/auth',
       maxAge: this.REFRESH_COOKIE_MAX_AGE_MS,
     });
   }
@@ -87,8 +89,8 @@ export class AuthController {
     res.clearCookie('refresh_token', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      path: '/api/v1/auth',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      path: '/api/auth',
     });
   }
 
@@ -127,7 +129,7 @@ export class AuthController {
   ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
     const data = await this.authService.login(loginDto, req.tenant.id, req.ip);
     this.setRefreshCookie(res, data.refreshToken);
-    return { success: true, data, error: null };
+    return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
   }
 
   // ─────────────────────────── REGISTER ───────────────────────────
@@ -149,14 +151,13 @@ export class AuthController {
   ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
     const data = await this.authService.register(registerDto, req.tenant.id, req.ip);
     this.setRefreshCookie(res, data.refreshToken);
-    return { success: true, data, error: null };
+    return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
   }
 
   // ─────────────────────────── REFRESH ───────────────────────────
 
   @Public()
   @SkipPasswordCheck()
-  @UseGuards(CookieRefreshGuard)
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @SkipThrottle()
@@ -174,7 +175,7 @@ export class AuthController {
     @Req() req: TenantRequest,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; data: RefreshTokenResponseDto; error: null }> {
-    const token = refreshDto.refreshToken;
+    const token = req.cookies?.refresh_token ?? refreshDto.refreshToken;
     if (!token) throw new UnauthorizedException('Refresh token required');
 
     const deviceInfo: DeviceInfo = {
@@ -195,7 +196,7 @@ export class AuthController {
   // ─────────────────────────── LOGOUT ───────────────────────────
 
   @Post('logout')
-  @HttpCode(HttpStatus.OK)
+  @HttpCode(HttpStatus.NO_CONTENT)
   @SkipThrottle()
   @SkipPasswordCheck()
   @UseGuards(JwtAuthGuard)
@@ -206,17 +207,33 @@ export class AuthController {
       'Clears the stored refresh token hash. ' +
       'The access token remains valid until its 15-min TTL.',
   })
-  @ApiResponse({ status: 200, description: 'Logged out successfully' })
+  @ApiResponse({ status: 204, description: 'Logged out successfully' })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
   async logout(
     @CurrentUser() user: AuthenticatedUser,
     @Req() req: TenantRequest,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<{ success: boolean; data: null; error: null }> {
+  ): Promise<void> {
     const jti = this.extractJti(req);
     await this.authService.logout(user.id, req.tenant.id, jti, req.ip);
     this.clearRefreshCookie(res);
-    return { success: true, data: null, error: null };
+  }
+
+  @Get('me')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get the current authenticated user profile',
+    description: 'Returns user profile and member details scoped to the current tenant.',
+  })
+  @ApiResponse({ status: 200, description: 'Current user profile' })
+  @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
+  async me(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: TenantRequest,
+  ): Promise<{ success: boolean; data: AuthProfileDto; error: null }> {
+    const data = await this.authService.getProfile(user.id, req.tenant.id);
+    return { success: true, data, error: null };
   }
 
   // ─────────────────────────── CHANGE PASSWORD ───────────────────────────

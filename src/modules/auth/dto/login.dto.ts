@@ -57,6 +57,11 @@ export class LoginResponseDto {
   @ApiProperty({ description: 'JWT refresh token (7 days) – store securely' })
   refreshToken!: string;
 
+  @ApiProperty({
+    description: 'Signals clients to remove localStorage refresh-token copies after cookie migration',
+  })
+  migrateRefreshToken!: boolean;
+
   @ApiProperty({ type: LoginUserDto })
   user!: LoginUserDto;
 }

@@ -35,6 +35,22 @@ interface PasswordResetPayload {
   nonce: string;
 }
 
+export interface AuthProfileDto {
+  id: string;
+  email: string;
+  phone: string | null;
+  role: UserRole;
+  tenantId: string;
+  firstName: string;
+  lastName: string;
+  mustChangePassword: boolean;
+  member: {
+    id: string;
+    memberNumber: string;
+    kycStatus: string;
+  } | null;
+}
+
 /**
  * Authentication Service
  *
@@ -257,6 +273,7 @@ export class AuthService {
     return {
       accessToken,
       refreshToken,
+      migrateRefreshToken: true,
       user: this.toUserDto(user),
     };
   }
@@ -356,6 +373,7 @@ export class AuthService {
     return {
       accessToken,
       refreshToken,
+      migrateRefreshToken: true,
       user: this.toUserDto(user),
     };
   }
@@ -500,12 +518,10 @@ export class AuthService {
     accessTokenJti?: string,
     ipAddress?: string,
   ): Promise<void> {
-    await tenantAsyncStorage.run(undefined, () =>
-      this.prisma.user.update({
-        where: { id: userId },
-        data: { refreshToken: null },
-      }),
-    );
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { refreshToken: null },
+    });
 
     // Phase 2: immediate revocation of access token
     if (accessTokenJti) {
@@ -520,6 +536,29 @@ export class AuthService {
       resourceId: userId,
       metadata: { accessTokenRevoked: !!accessTokenJti },
       ipAddress,
+    });
+  }
+
+  async getProfile(userId: string, tenantId: string): Promise<AuthProfileDto> {
+    return this.prisma.user.findFirstOrThrow({
+      where: { id: userId, tenantId },
+      select: {
+        id: true,
+        email: true,
+        phone: true,
+        role: true,
+        tenantId: true,
+        firstName: true,
+        lastName: true,
+        mustChangePassword: true,
+        member: {
+          select: {
+            id: true,
+            memberNumber: true,
+            kycStatus: true,
+          },
+        },
+      },
     });
   }
 
