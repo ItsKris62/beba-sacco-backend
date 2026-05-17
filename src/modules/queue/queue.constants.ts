@@ -7,6 +7,8 @@ export const QUEUE_NAMES = {
   MPESA_STK_REPAYMENT: 'mpesa.stk-repayment', // Cron-scheduled STK repayment initiation jobs
   MPESA_DISBURSEMENT: 'mpesa.disbursement', // B2C loan disbursement initiation
   MPESA_DISBURSEMENT_DLQ: 'mpesa.disbursement.dlq', // Dead-letter queue for B2C failures
+  MPESA_STK_EXPIRY: 'mpesa.stk-expiry',
+  MPESA_B2C_TIMEOUT: 'mpesa.b2c-timeout',
   MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq', // Dead-letter queue for callback failures
   LOAN_GUARANTOR_REMINDER: 'loan.guarantor.reminder',
   LOAN_GUARANTOR_EXPIRY: 'loan.guarantor.expiry',
@@ -76,6 +78,12 @@ export interface MpesaDisbursementJobPayload {
   amount: number;
   /** userId of officer or "SYSTEM" for automated disbursements */
   triggeredBy: string;
+}
+
+export interface MpesaB2cTimeoutJobPayload {
+  loanId: string;
+  tenantId: string;
+  conversationId: string;
 }
 
 export interface GuarantorReminderJobPayload {

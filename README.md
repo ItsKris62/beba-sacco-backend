@@ -84,6 +84,20 @@ npm run start:dev
 - **Swagger Docs**: http://localhost:3000/api/docs
 - **Health Check**: http://localhost:3000/api/health
 
+### Phase 1.4/1.5 + Phase 2 Environment Flags
+
+```bash
+WORKER_MODE=false
+METRICS_API_KEY=replace-with-32-plus-char-secret
+DATABASE_DIRECT_URL=postgres://user:pass@host/db
+FEATURE_EMAIL_VERIFICATION_ENFORCED=true
+PHASE_4_ENABLED=false
+```
+
+Set `WORKER_MODE=true` on the dedicated Render worker service. If queue
+processing needs to roll back to a single service, suspend the worker and set
+the web service to `WORKER_MODE=false`.
+
 ## 🔐 Security Features
 
 ✅ **Environment Validation** - Joi schema validation at startup  

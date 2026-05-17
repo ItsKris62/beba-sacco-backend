@@ -25,7 +25,8 @@ export const validationSchema = Joi.object({
       .pattern(/^https:\/\//)
       .required()
       .messages({
-        'string.pattern.base': 'APP_URL must use HTTPS in production (got HTTP or missing protocol)',
+        'string.pattern.base':
+          'APP_URL must use HTTPS in production (got HTTP or missing protocol)',
       }),
     otherwise: Joi.string().uri().required(),
   }),
@@ -36,6 +37,9 @@ export const validationSchema = Joi.object({
   //                              $transaction calls with explicit isolationLevel)
   DATABASE_URL: Joi.string().required(),
   DIRECT_URL: Joi.string().required(),
+  DATABASE_DIRECT_URL: Joi.string().optional(),
+  WORKER_MODE: Joi.boolean().truthy('true').falsy('false').default(false),
+  PHASE_4_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
 
   // ── JWT ────────────────────────────────────────────────────────────────────
   JWT_SECRET: Joi.string().min(64).required(),
@@ -56,11 +60,13 @@ export const validationSchema = Joi.object({
   // Required in production (Render Redis / Railway Redis).
   // When absent in dev, BullMQ falls back to the Upstash connection above.
   // Format: redis://:password@host:port  or  rediss://:password@host:port (TLS)
-  BULL_REDIS_URL: Joi.string().uri({ scheme: ['redis', 'rediss'] }).when('NODE_ENV', {
-    is: 'production',
-    then: Joi.required(),
-    otherwise: Joi.optional(),
-  }),
+  BULL_REDIS_URL: Joi.string()
+    .uri({ scheme: ['redis', 'rediss'] })
+    .when('NODE_ENV', {
+      is: 'production',
+      then: Joi.required(),
+      otherwise: Joi.optional(),
+    }),
 
   // ── Cloudflare R2 ──────────────────────────────────────────────────────────
   R2_ACCOUNT_ID: Joi.string().required(),
@@ -145,6 +151,7 @@ export const validationSchema = Joi.object({
   CORS_ORIGIN: Joi.string().required(),
   RATE_LIMIT_TTL: Joi.number().default(60),
   RATE_LIMIT_MAX: Joi.number().default(100),
+  METRICS_API_KEY: Joi.string().min(32).optional(),
 
   // Product rules must be explicitly enabled so loan-product configuration
   // controls guarantor counts, account type, coverage ratio, and savings limits.
@@ -157,6 +164,7 @@ export const validationSchema = Joi.object({
       'any.only': 'ENABLE_PRODUCT_RULES must be true for production loan-rule enforcement',
       'any.required': 'ENABLE_PRODUCT_RULES is required and must be true',
     }),
+  FEATURE_EMAIL_VERIFICATION_ENFORCED: Joi.boolean().truthy('true').falsy('false').default(true),
 
   // ── Multi-Tenancy ──────────────────────────────────────────────────────────
   DEFAULT_TENANT_ID: Joi.string().optional(),

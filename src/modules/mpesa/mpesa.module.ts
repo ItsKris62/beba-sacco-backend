@@ -6,6 +6,7 @@ import { MpesaService } from './mpesa.service';
 import { DarajaClientService } from './daraja-client.service';
 import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
+import { StkExpiryScheduler } from './jobs/stk-expiry.scheduler';
 import { MpesaStkTimeoutService } from './mpesa-stk-timeout.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
@@ -44,6 +45,8 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     BullModule.registerQueue(
       { name: QUEUE_NAMES.MPESA_CALLBACK },
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT },
+      { name: QUEUE_NAMES.MPESA_STK_EXPIRY },
+      { name: QUEUE_NAMES.MPESA_B2C_TIMEOUT },
       // DLQ queues — jobs are moved here after all retries are exhausted
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ },
       { name: QUEUE_NAMES.MPESA_CALLBACK_DLQ },
@@ -57,6 +60,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     // B2C disbursement processor lives here (not in QueueModule) because it
     // needs MpesaService and there is no circular dependency in this direction.
     MpesaDisbursementProcessor,
+    StkExpiryScheduler,
     MpesaStkTimeoutService,
     // PrismaService is @Global via PrismaModule, but listed explicitly so
     // this module is self-documenting about its dependencies.

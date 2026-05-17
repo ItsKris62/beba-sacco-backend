@@ -28,7 +28,7 @@ import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 
 /** JWT payload shape for password-reset tokens (separate from access tokens) */
 interface PasswordResetPayload {
-  sub: string;       // userId
+  sub: string; // userId
   email: string;
   purpose: 'password_reset';
   /** Random nonce stored as argon2 hash in DB — single-use enforcement */
@@ -104,7 +104,7 @@ export class AuthService {
 
   // ─────────────────────────── LOGIN ───────────────────────────
 
-  private readonly BLOCK_THRESHOLD = 5;   // auto-block after N failures
+  private readonly BLOCK_THRESHOLD = 5; // auto-block after N failures
   private readonly BLOCK_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
 
   /**
@@ -129,7 +129,13 @@ export class AuthService {
           const blockExpiry = new Date(Date.now() + this.BLOCK_DURATION_MS);
           await this.prisma.blockedIP.upsert({
             where: { tenantId_ipAddress: { tenantId, ipAddress: ip } },
-            create: { tenantId, ipAddress: ip, reason: 'Brute Force', expiresAt: blockExpiry, isActive: true },
+            create: {
+              tenantId,
+              ipAddress: ip,
+              reason: 'Brute Force',
+              expiresAt: blockExpiry,
+              isActive: true,
+            },
             update: { isActive: true, expiresAt: blockExpiry, blockedAt: new Date() },
           });
           this.logger.warn(`IP ${ip} auto-blocked after ${updated.attempts} failed login attempts`);
@@ -169,10 +175,7 @@ export class AuthService {
     const candidate = await tenantAsyncStorage.run(undefined, () =>
       this.prisma.user.findFirst({
         where: {
-          AND: [
-            credentialCondition,
-            { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] },
-          ],
+          AND: [credentialCondition, { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] }],
         },
         select: {
           id: true,
@@ -180,6 +183,7 @@ export class AuthService {
           passwordHash: true,
           role: true,
           isActive: true,
+          emailVerified: true,
           firstName: true,
           lastName: true,
           tenantId: true,
@@ -236,6 +240,27 @@ export class AuthService {
       });
       this.trackFailedAttemptAsync(tenantId, user.email ?? 'unknown', ipAddress);
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const enforceEmailVerification =
+      this.configService.get<string>('app.features.emailVerificationEnforced') !== 'false';
+    if (enforceEmailVerification && !user.emailVerified) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: 'LOGIN_ATTEMPT_UNVERIFIED_EMAIL',
+        resource: 'User',
+        resourceId: user.id,
+        metadata: {
+          reason: 'email_not_verified',
+          email: user.email,
+          attemptedAt: new Date().toISOString(),
+        },
+        ipAddress,
+      });
+      throw new UnauthorizedException(
+        'Email not verified. Please check your inbox or request a new verification link.',
+      );
     }
 
     const { accessToken, refreshToken } = this.generateTokens({
@@ -643,9 +668,7 @@ export class AuthService {
     });
 
     // Build reset URL — use APP_URL env or fall back to localhost
-    const appUrl =
-      this.configService.get<string>('app.appUrl') ??
-      'http://localhost:3000';
+    const appUrl = this.configService.get<string>('app.appUrl') ?? 'http://localhost:3000';
     const resetUrl = `${appUrl}/reset-password?token=${resetToken}`;
 
     this.enqueueEmail(
@@ -676,11 +699,7 @@ export class AuthService {
    * 6. New password meets complexity requirements (validated by DTO)
    * 7. Clear nonce hash + invalidate all sessions after successful reset
    */
-  async resetPassword(
-    dto: ResetPasswordDto,
-    tenantId: string,
-    ipAddress?: string,
-  ): Promise<void> {
+  async resetPassword(dto: ResetPasswordDto, tenantId: string, ipAddress?: string): Promise<void> {
     // Step 1: Verify JWT signature and expiry
     let payload: PasswordResetPayload;
     try {
@@ -761,8 +780,8 @@ export class AuthService {
       data: {
         passwordHash: newPasswordHash,
         mustChangePassword: false,
-        refreshToken: null,           // Invalidate all existing sessions
-        passwordResetToken: null,     // Single-use: clear nonce
+        refreshToken: null, // Invalidate all existing sessions
+        passwordResetToken: null, // Single-use: clear nonce
         passwordResetExpiry: null,
       },
     });
@@ -903,12 +922,11 @@ export class AuthService {
 
   // ─────────────────────────── PRIVATE HELPERS ───────────────────────────
 
-  private generateTokens(user: {
-    id: string;
-    email: string;
-    role: UserRole;
-    tenantId: string;
-  }): { accessToken: string; refreshToken: string; jti: string } {
+  private generateTokens(user: { id: string; email: string; role: UserRole; tenantId: string }): {
+    accessToken: string;
+    refreshToken: string;
+    jti: string;
+  } {
     const jti = uuidv4();
     const payload: JwtPayload = {
       sub: user.id,

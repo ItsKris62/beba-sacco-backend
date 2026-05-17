@@ -35,7 +35,7 @@ services:
     # ── Health check ─────────────────────────────────────────────────────────
     # Render will mark the deploy healthy only after this returns 200.
     # Unhealthy instances are replaced automatically.
-    healthCheckPath: /api/health/ping
+    healthCheckPath: /api/health
 
     # ── Auto-deploy ───────────────────────────────────────────────────────────
     # Triggers on every push to the connected branch (usually `main`).
@@ -62,6 +62,12 @@ services:
         sync: false
       - key: DIRECT_URL
         sync: false
+      - key: DATABASE_DIRECT_URL
+        sync: false
+      - key: WORKER_MODE
+        value: 'false'
+      - key: PHASE_4_ENABLED
+        value: 'false'
 
       # JWT — generate with: openssl rand -base64 64 | tr -d '\n'
       - key: JWT_SECRET
@@ -82,6 +88,10 @@ services:
         sync: false
       - key: REDIS_TLS
         value: 'true' # Upstash requires TLS
+      - key: REDIS_URL
+        sync: false
+      - key: BULL_REDIS_URL
+        sync: false
 
       # Cloudflare R2
       - key: R2_ACCOUNT_ID
@@ -154,6 +164,10 @@ services:
       # CORS — set to your Netlify frontend domain
       - key: CORS_ORIGIN
         sync: false # e.g. https://your-sacco.netlify.app
+      - key: METRICS_API_KEY
+        sync: false
+      - key: FEATURE_EMAIL_VERIFICATION_ENFORCED
+        value: 'true'
 
       # Loan product rules — must be true to enforce guarantor/savings rules
       - key: ENABLE_PRODUCT_RULES
@@ -168,6 +182,126 @@ services:
         value: 7
 
       # BullMQ concurrency (tune after load testing)
+      - key: BULLMQ_CONCURRENCY_ACCRUAL
+        value: 3
+      - key: BULLMQ_CONCURRENCY_RECON
+        value: 2
+      - key: BULLMQ_CONCURRENCY_LEDGER
+        value: 2
+      - key: BULLMQ_CONCURRENCY_WEBHOOK
+        value: 10
+
+  - type: worker
+    name: beba-sacco-worker
+    env: node
+    region: frankfurt
+    plan: starter
+    autoDeploy: false
+    buildCommand: npm ci --include=dev && npm run prisma:generate && npm run build
+    startCommand: node dist/worker
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_PREFIX
+        value: api
+      - key: APP_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: DATABASE_DIRECT_URL
+        sync: false
+      - key: WORKER_MODE
+        value: 'true'
+      - key: PHASE_4_ENABLED
+        value: 'false'
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ACCESS_EXPIRATION
+        value: 15m
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: JWT_REFRESH_EXPIRATION
+        value: 7d
+      - key: REDIS_HOST
+        sync: false
+      - key: REDIS_PORT
+        value: 6379
+      - key: REDIS_PASSWORD
+        sync: false
+      - key: REDIS_TLS
+        value: 'true'
+      - key: REDIS_URL
+        sync: false
+      - key: BULL_REDIS_URL
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: TINYBIRD_TOKEN
+        sync: false
+      - key: TINYBIRD_API_URL
+        value: https://api.europe-west2.gcp.tinybird.co
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+      - key: MPESA_CONSUMER_KEY
+        sync: false
+      - key: MPESA_CONSUMER_SECRET
+        sync: false
+      - key: MPESA_PASSKEY
+        sync: false
+      - key: MPESA_SHORTCODE
+        sync: false
+      - key: MPESA_B2C_SHORTCODE
+        sync: false
+      - key: MPESA_INITIATOR_NAME
+        sync: false
+      - key: MPESA_SECURITY_CREDENTIAL
+        sync: false
+      - key: MPESA_ENVIRONMENT
+        value: production
+      - key: MPESA_CALLBACK_URL
+        sync: false
+      - key: MPESA_B2C_RESULT_URL
+        sync: false
+      - key: MPESA_B2C_QUEUE_TIMEOUT_URL
+        sync: false
+      - key: MPESA_WEBHOOK_SECRET
+        sync: false
+      - key: MPESA_ALLOWED_IPS
+        value: '196.201.214.200,196.201.214.206,196.201.213.114,196.201.214.207,196.201.214.208,196.201.213.44,196.201.214.185,196.201.214.186'
+      - key: MPESA_STK_RATE_LIMIT_PER_DAY
+        value: 3
+      - key: PLUNK_API_KEY
+        sync: false
+      - key: PLUNK_SECRET_KEY
+        sync: false
+      - key: PLUNK_FROM_EMAIL
+        sync: false
+      - key: PLUNK_FROM_NAME
+        value: Beba SACCO
+      - key: CORS_ORIGIN
+        sync: false
+      - key: METRICS_API_KEY
+        sync: false
+      - key: FEATURE_EMAIL_VERIFICATION_ENFORCED
+        value: 'true'
+      - key: ENABLE_PRODUCT_RULES
+        value: 'true'
+      - key: SENTRY_AUTH_TOKEN
+        sync: false
+      - key: DATA_RETENTION_YEARS
+        value: 7
       - key: BULLMQ_CONCURRENCY_ACCRUAL
         value: 3
       - key: BULLMQ_CONCURRENCY_RECON

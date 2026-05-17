@@ -1,9 +1,4 @@
-import {
-  Injectable,
-  Logger,
-  BadRequestException,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -19,9 +14,11 @@ import { maskPhone, buildMpesaRef } from './utils/mpesa.utils';
 import { AuditService } from '../audit/audit.service';
 import {
   MpesaCallbackJobPayload,
+  MpesaB2cTimeoutJobPayload,
   MpesaDisbursementJobPayload,
   QUEUE_NAMES,
 } from '../queue/queue.constants';
+import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
 
 // ─── Redis key helpers ────────────────────────────────────────────────────────
 
@@ -55,6 +52,8 @@ export class MpesaService {
     private readonly callbackQueue: Queue<MpesaCallbackJobPayload>,
     @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
     private readonly disbursementQueue: Queue<MpesaDisbursementJobPayload>,
+    @InjectQueue(QUEUE_NAMES.MPESA_B2C_TIMEOUT)
+    private readonly b2cTimeoutQueue: Queue<MpesaB2cTimeoutJobPayload>,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)
     private readonly callbackDlqQueue: Queue,
   ) {}
@@ -83,7 +82,11 @@ export class MpesaService {
     const idemKey = `mpesa:stk:${tenantId}:${memberId}:${idempotencyKey.trim()}`;
     const idem = await this.idempotency.checkAndReserve(idemKey, tenantId, 24 * 60 * 60);
     if (idem.status === 'COMPLETED') {
-      return idem.result as { checkoutRequestId: string; customerMessage: string; mpesaTxId: string };
+      return idem.result as {
+        checkoutRequestId: string;
+        customerMessage: string;
+        mpesaTxId: string;
+      };
     }
     if (idem.status === 'PROCESSING') {
       throw new BadRequestException('STK push request is already processing');
@@ -153,26 +156,30 @@ export class MpesaService {
           `checkout=${darajaResp.CheckoutRequestID}`,
       );
 
-      this.audit.create({
-        tenantId,
-        actorId: actorUserId,
-        action: 'MPESA.DEPOSIT.INITIATED',
-        entityType: 'MpesaTransaction',
-        entityId: mpesaTx.id,
-        newValue: {
-          status: 'PENDING',
-          checkoutRequestId: darajaResp.CheckoutRequestID,
-          amount,
-          accountReference: accountRef,
-          triggerSource,
-        },
-        metadata: {
-          phone: maskPhone(dto.phoneNumber),
-          purpose: dto.purpose,
-          memberId,
-          idempotencyKey: idempotencyKey.trim(),
-        },
-      }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
+      this.audit
+        .create({
+          tenantId,
+          actorId: actorUserId,
+          action: 'MPESA.DEPOSIT.INITIATED',
+          entityType: 'MpesaTransaction',
+          entityId: mpesaTx.id,
+          newValue: {
+            status: 'PENDING',
+            checkoutRequestId: darajaResp.CheckoutRequestID,
+            amount,
+            accountReference: accountRef,
+            triggerSource,
+          },
+          metadata: {
+            phone: maskPhone(dto.phoneNumber),
+            purpose: dto.purpose,
+            memberId,
+            idempotencyKey: idempotencyKey.trim(),
+          },
+        })
+        .catch((e: unknown) =>
+          this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
+        );
 
       const result = {
         checkoutRequestId: darajaResp.CheckoutRequestID,
@@ -193,11 +200,7 @@ export class MpesaService {
       //   3. error.retryable — permanent Daraja rejections (bad credentials,
       //      invalid shortcode) also consume a slot since resubmitting
       //      immediately would fail again with no operator action.
-      if (
-        rateLimitSlotConsumed &&
-        error instanceof MpesaException &&
-        error.retryable
-      ) {
+      if (rateLimitSlotConsumed && error instanceof MpesaException && error.retryable) {
         await this.safeReleaseRateLimitSlot(rlKey, tenantId, memberId);
       }
       await this.idempotency.release(idemKey, tenantId);
@@ -251,6 +254,40 @@ export class MpesaService {
       `B2C disbursement queued | loan=${loanId} job=${jobId} phone=${maskPhone(phone)} amount=${amount}`,
     );
     return { jobId };
+  }
+
+  async getTransactionStatus(
+    checkoutRequestId: string,
+    userId: string,
+    tenantId: string,
+  ): Promise<MpesaTransactionStatusDto> {
+    const transaction = await this.prisma.client.mpesaTransaction.findFirst({
+      where: {
+        checkoutRequestId,
+        tenantId,
+        type: MpesaTxType.STK_PUSH,
+        member: { userId },
+      },
+      select: {
+        checkoutRequestId: true,
+        status: true,
+        amount: true,
+        updatedAt: true,
+        failureReason: true,
+      },
+    });
+
+    if (!transaction?.checkoutRequestId) {
+      throw new NotFoundException('M-Pesa transaction not found');
+    }
+
+    return {
+      checkoutRequestId: transaction.checkoutRequestId,
+      status: transaction.status,
+      amount: transaction.amount.toString(),
+      lastUpdated: transaction.updatedAt,
+      failureReason: transaction.failureReason ?? undefined,
+    };
   }
 
   // ─── Direct B2C (called by the disbursement processor) ─────────────────
@@ -341,6 +378,17 @@ export class MpesaService {
         `phone=${maskPhone(phone)} conversation=${darajaResp.ConversationID} amount=${amount}`,
     );
 
+    await this.b2cTimeoutQueue.add(
+      'b2c-timeout-check',
+      { loanId, tenantId, conversationId: darajaResp.ConversationID },
+      {
+        delay: 30 * 60 * 1000,
+        jobId: `b2c-timeout:${darajaResp.ConversationID}`,
+        removeOnComplete: true,
+        removeOnFail: false,
+      },
+    );
+
     return {
       conversationId: darajaResp.ConversationID,
       mpesaTxId: mpesaTx.id,
@@ -424,7 +472,7 @@ export class MpesaService {
     const newCount = await this.redis.decrIfPositive(rlKey);
     this.logger.warn(
       `STK rate-limit slot restored (retryable Daraja error) | ` +
-      `tenant=${tenantId} member=${memberId} newCount=${newCount}`,
+        `tenant=${tenantId} member=${memberId} newCount=${newCount}`,
     );
   }
 

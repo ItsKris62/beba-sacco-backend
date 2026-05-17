@@ -28,6 +28,14 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    */
   readonly direct: PrismaClient;
 
+  get client(): PrismaClient {
+    return this as unknown as PrismaClient;
+  }
+
+  get directClient(): PrismaClient {
+    return this.direct;
+  }
+
   constructor() {
     super({
       log:

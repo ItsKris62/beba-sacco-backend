@@ -1,8 +1,9 @@
-import { Controller, Get, Res } from '@nestjs/common';
+import { Controller, Get, Res, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Response } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
+import { MetricsApiKeyGuard } from '../../common/guards/metrics-api-key.guard';
 import { MetricsService } from './metrics.service';
 
 /**
@@ -21,6 +22,7 @@ export class MetricsController {
   constructor(private readonly metrics: MetricsService) {}
 
   @Public()
+  @UseGuards(MetricsApiKeyGuard)
   @Get()
   @ApiOperation({ summary: 'Prometheus metrics scrape endpoint' })
   @ApiExcludeEndpoint()

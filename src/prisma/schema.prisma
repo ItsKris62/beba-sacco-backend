@@ -556,7 +556,7 @@ model Document {
 
   reviewedById    String?
   reviewedAt      DateTime?
-  rejectionReason String? @db.Text
+  rejectionReason String?   @db.Text
   expiresAt       DateTime?
 
   createdAt DateTime @default(now())
@@ -661,12 +661,13 @@ model Loan {
   gracePeriodMonths Int     @default(0) // Copied from product at application time
   monthlyInstalment Decimal @db.Decimal(18, 4) // Pre-calculated at application (excludes grace period)
 
-  appliedAt   DateTime  @default(now())
-  approvedAt  DateTime?
-  approvedBy  String? // userId
-  disbursedAt DateTime?
-  disbursedBy String? // userId
-  dueDate     DateTime? // Final repayment due date
+  appliedAt                 DateTime  @default(now())
+  approvedAt                DateTime?
+  approvedBy                String? // userId
+  disbursedAt               DateTime?
+  disbursedBy               String? // userId
+  dueDate                   DateTime? // Final repayment due date
+  disbursementFailureReason String?   @db.Text
 
   // Repayment tracking (updated on each repayment transaction)
   totalRepaid        Decimal @default(0) @db.Decimal(18, 4)
@@ -712,15 +713,15 @@ model LoanGuarantor {
   recoveredAmount  Decimal         @default(0) @db.Decimal(18, 4)
   recoveryDate     DateTime?
 
-  invitedAt     DateTime  @default(now())
-  expiresAt     DateTime?
-  respondedAt   DateTime?
-  holdPlacedAt  DateTime?
-  holdReleasedAt DateTime?
+  invitedAt       DateTime  @default(now())
+  expiresAt       DateTime?
+  respondedAt     DateTime?
+  holdPlacedAt    DateTime?
+  holdReleasedAt  DateTime?
   decidedByUserId String?
-  decisionSource String?
-  notes         String?   @db.Text // Reason for decline, etc.
-  auditMetadata Json?
+  decisionSource  String?
+  notes           String?   @db.Text // Reason for decline, etc.
+  auditMetadata   Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -782,7 +783,7 @@ model MpesaTransaction {
 
   // ── Business-entity links (set at initiation for fast callback lookup) ──
   memberId        String?
-  member          Member?   @relation(fields: [memberId], references: [id])
+  member          Member? @relation(fields: [memberId], references: [id])
   loanId          String? // present for repayments and disbursements
   loanRepaymentId String? // set when a specific LoanRepayment record is created
 
@@ -812,6 +813,7 @@ model MpesaTransaction {
   status             TransactionStatus @default(PENDING)
   resultCode         Int?
   resultDesc         String?
+  failureReason      String?
   mpesaReceiptNumber String? // M-Pesa transaction ID from Safaricom
   transactionDate    DateTime? // When Safaricom processed the payment
 
@@ -1788,8 +1790,8 @@ model KYCRequirement {
   id           String  @id @default(uuid())
   tenantId     String
   tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  documentType String  // Matches DocumentType enum values: e.g. "NATIONAL_ID_FRONT"
-  kycStage     String  // Matches KycStatus enum values: e.g. "PENDING_REVIEW"
+  documentType String // Matches DocumentType enum values: e.g. "NATIONAL_ID_FRONT"
+  kycStage     String // Matches KycStatus enum values: e.g. "PENDING_REVIEW"
   isRequired   Boolean @default(true)
 
   createdAt DateTime @default(now())

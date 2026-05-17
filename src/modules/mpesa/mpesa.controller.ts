@@ -1,5 +1,6 @@
 import {
   Controller,
+  Get,
   Post,
   Body,
   Param,
@@ -36,12 +37,9 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
-import {
-  isStkCallback,
-  isC2bCallback,
-  isB2cCallback,
-} from './dto/mpesa-callback.dto';
+import { isStkCallback, isC2bCallback, isB2cCallback } from './dto/mpesa-callback.dto';
 import { MpesaExceptionFilter } from './filters/mpesa-exception.filter';
+import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -88,12 +86,12 @@ export class MpesaController implements OnModuleInit {
       if (this.isProduction) {
         this.logger.warn(
           '⚠️  MPESA_WEBHOOK_SECRET is not set in production. ' +
-          'All incoming Daraja callbacks will be rejected until this is configured.',
+            'All incoming Daraja callbacks will be rejected until this is configured.',
         );
       } else {
         this.logger.warn(
           'MPESA_WEBHOOK_SECRET not configured — HMAC signature validation is DISABLED. ' +
-          'Safe for sandbox/staging only.',
+            'Safe for sandbox/staging only.',
         );
       }
     }
@@ -114,17 +112,35 @@ export class MpesaController implements OnModuleInit {
   @ApiOperation({
     summary: 'Member deposit or loan repayment via M-Pesa (STK Push)',
     description:
-      'Sends an STK Push prompt to the member\'s phone. ' +
+      "Sends an STK Push prompt to the member's phone. " +
       'Set purpose=SAVINGS and accountRef to the account number for a deposit. ' +
       'Set purpose=LOAN_REPAYMENT and accountRef to the loan number for a repayment. ' +
       'Result delivered asynchronously.',
   })
   @ApiResponse({ status: 200, description: 'STK Push initiated', type: DepositInitiatedResponse })
-  @ApiResponse({ status: 400, description: 'Rate limit exceeded, invalid phone, or account not found' })
+  @ApiResponse({
+    status: 400,
+    description: 'Rate limit exceeded, invalid phone, or account not found',
+  })
   @ApiResponse({ status: 401, description: 'Unauthenticated' })
   @ApiResponse({ status: 403, description: 'Insufficient role' })
-  @ApiResponse({ status: 503, description: 'M-Pesa temporarily unavailable — retryable', schema: { properties: { statusCode: { type: 'number' }, error: { type: 'string' }, message: { type: 'string' }, retryable: { type: 'boolean' } } } })
-  @ApiHeader({ name: 'X-Idempotency-Key', required: true, description: 'Required to prevent duplicate STK prompts on retry' })
+  @ApiResponse({
+    status: 503,
+    description: 'M-Pesa temporarily unavailable — retryable',
+    schema: {
+      properties: {
+        statusCode: { type: 'number' },
+        error: { type: 'string' },
+        message: { type: 'string' },
+        retryable: { type: 'boolean' },
+      },
+    },
+  })
+  @ApiHeader({
+    name: 'X-Idempotency-Key',
+    required: true,
+    description: 'Required to prevent duplicate STK prompts on retry',
+  })
   async memberDeposit(
     @Body() dto: MemberDepositDto,
     @CurrentTenant() tenant: Tenant,
@@ -133,7 +149,14 @@ export class MpesaController implements OnModuleInit {
   ): Promise<DepositInitiatedResponse> {
     const triggerSource =
       actor.role === UserRole.MEMBER ? MpesaTriggerSource.MEMBER : MpesaTriggerSource.OFFICER;
-    return this.mpesaService.initiateDeposit(dto, tenant.id, actor.id, actor.id, triggerSource, idempotencyKey);
+    return this.mpesaService.initiateDeposit(
+      dto,
+      tenant.id,
+      actor.id,
+      actor.id,
+      triggerSource,
+      idempotencyKey,
+    );
   }
 
   // ─── Admin: queue B2C disbursement ──────────────────────────────────────
@@ -157,7 +180,11 @@ export class MpesaController implements OnModuleInit {
       'after Safaricom confirms the B2C payment.',
   })
   @ApiParam({ name: 'loanId', description: 'Loan UUID' })
-  @ApiResponse({ status: 202, description: 'Disbursement job queued', type: DisbursementQueuedResponse })
+  @ApiResponse({
+    status: 202,
+    description: 'Disbursement job queued',
+    type: DisbursementQueuedResponse,
+  })
   @ApiResponse({ status: 404, description: 'Loan not found' })
   @ApiResponse({ status: 403, description: 'Insufficient role' })
   async queueDisbursement(
@@ -166,6 +193,26 @@ export class MpesaController implements OnModuleInit {
     @CurrentUser() actor: AuthenticatedUser,
   ): Promise<DisbursementQueuedResponse> {
     return this.mpesaService.queueLoanDisbursement(loanId, tenant.id, actor.id);
+  }
+
+  @Get('transactions/:checkoutRequestId/status')
+  @Roles(
+    UserRole.MEMBER,
+    UserRole.TELLER,
+    UserRole.MANAGER,
+    UserRole.TENANT_ADMIN,
+    UserRole.SUPER_ADMIN,
+  )
+  @ApiOperation({ summary: 'Get M-Pesa STK transaction status for polling' })
+  @ApiParam({ name: 'checkoutRequestId', description: 'M-Pesa checkout request ID' })
+  @ApiResponse({ status: 200, description: 'Transaction status', type: MpesaTransactionStatusDto })
+  @ApiResponse({ status: 404, description: 'Transaction not found' })
+  async getTransactionStatus(
+    @Param('checkoutRequestId') checkoutRequestId: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<MpesaTransactionStatusDto> {
+    return this.mpesaService.getTransactionStatus(checkoutRequestId, actor.id, tenant.id);
   }
 
   // ─── Admin: replay a DLQ job ─────────────────────────────────────────────
@@ -194,9 +241,7 @@ export class MpesaController implements OnModuleInit {
   @ApiResponse({ status: 200, description: 'Job re-enqueued', type: DlqRequeueResponse })
   @ApiResponse({ status: 404, description: 'Job not found in DLQ' })
   @ApiResponse({ status: 403, description: 'Insufficient role' })
-  async requeueDlqJob(
-    @Param('jobId') jobId: string,
-  ): Promise<DlqRequeueResponse> {
+  async requeueDlqJob(@Param('jobId') jobId: string): Promise<DlqRequeueResponse> {
     return this.mpesaService.requeueFromDlq(jobId);
   }
 
@@ -227,7 +272,11 @@ export class MpesaController implements OnModuleInit {
 
     if (isStkCallback(body)) {
       const checkoutId = body.Body.stkCallback.CheckoutRequestID;
-      await this.mpesaService.enqueueCallback(body as Record<string, unknown>, 'STK_PUSH', checkoutId);
+      await this.mpesaService.enqueueCallback(
+        body as Record<string, unknown>,
+        'STK_PUSH',
+        checkoutId,
+      );
     } else if (isC2bCallback(body)) {
       await this.mpesaService.enqueueCallback(body as Record<string, unknown>, 'C2B', body.TransID);
     } else if (isB2cCallback(body)) {
@@ -257,7 +306,7 @@ export class MpesaController implements OnModuleInit {
       if (this.isProduction) {
         throw new ServiceUnavailableException(
           'MPESA_WEBHOOK_SECRET is not configured. ' +
-          'Set the environment variable and redeploy before processing live callbacks.',
+            'Set the environment variable and redeploy before processing live callbacks.',
         );
       }
       // Non-production: permissive — sandbox callbacks have no secret
@@ -266,10 +315,7 @@ export class MpesaController implements OnModuleInit {
 
     if (!signature || !rawBody) return false;
 
-    const expected = crypto
-      .createHmac('sha256', this.webhookSecret)
-      .update(rawBody)
-      .digest('hex');
+    const expected = crypto.createHmac('sha256', this.webhookSecret).update(rawBody).digest('hex');
 
     const expectedBuf = Buffer.from(expected, 'hex');
     let sigBuf: Buffer;

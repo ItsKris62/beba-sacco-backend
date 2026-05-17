@@ -9,6 +9,8 @@ export default registerAs('app', () => ({
   appVersion: process.env.APP_VERSION || '1.0.0',
   /** Frontend base URL — used to build password reset links in emails */
   appUrl: process.env.APP_URL || 'http://localhost:3001',
+  workerMode: process.env.WORKER_MODE === 'true',
+  metricsApiKey: process.env.METRICS_API_KEY,
 
   // Database
   databaseUrl: process.env.DATABASE_URL,
@@ -75,7 +77,10 @@ export default registerAs('app', () => ({
     b2cQueueTimeoutUrl: process.env.MPESA_B2C_QUEUE_TIMEOUT_URL || process.env.MPESA_CALLBACK_URL,
     environment: process.env.MPESA_ENVIRONMENT || 'sandbox',
     webhookSecret: process.env.MPESA_WEBHOOK_SECRET,
-    allowedIps: (process.env.MPESA_ALLOWED_IPS || '').split(',').map((ip) => ip.trim()).filter(Boolean),
+    allowedIps: (process.env.MPESA_ALLOWED_IPS || '')
+      .split(',')
+      .map((ip) => ip.trim())
+      .filter(Boolean),
     stkRateLimitPerDay: parseInt(process.env.MPESA_STK_RATE_LIMIT_PER_DAY || '3', 10),
   },
 
@@ -96,6 +101,9 @@ export default registerAs('app', () => ({
   },
   productRules: {
     enabled: process.env.ENABLE_PRODUCT_RULES === 'true',
+  },
+  features: {
+    emailVerificationEnforced: process.env.FEATURE_EMAIL_VERIFICATION_ENFORCED ?? 'true',
   },
 
   // Multi-Tenancy
