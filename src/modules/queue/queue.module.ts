@@ -9,6 +9,7 @@ import { GuarantorReminderProcessor } from './processors/guarantor-reminder.proc
 import { GuarantorProcessor } from './processors/guarantor.processor';
 import { GuarantorExpiryConsumer } from './processors/guarantor-expiry.consumer';
 import { AuditLogProcessor } from './processors/audit-log.processor';
+import { AuditQueueProcessor } from './processors/audit-queue.processor';
 import { LoanDisburseProcessor } from './processors/loan-disburse.processor';
 import { EmailProcessor } from './processors/email.processor';
 // Phase 4 processors
@@ -49,6 +50,7 @@ export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   GuarantorProcessor,
   GuarantorExpiryConsumer,
   AuditLogProcessor,
+  AuditQueueProcessor,
   LoanDisburseProcessor,
   EmailProcessor,
   OutboundWebhookProcessor,
@@ -200,6 +202,8 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION_DLQ },
       { name: QUEUE_NAMES.AUDIT_LOG },
+      { name: QUEUE_NAMES.AUDIT_PERSIST },
+      { name: QUEUE_NAMES.AUDIT_PERSIST_DLQ },
       { name: QUEUE_NAMES.LOAN_DISBURSE },
       { name: QUEUE_NAMES.EMAIL },
       // Phase 4

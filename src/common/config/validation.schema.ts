@@ -130,6 +130,8 @@ export const validationSchema = Joi.object({
   // - absent in production → 503 on any incoming Daraja webhook
   // - absent in non-production → warning logged, validation skipped (sandbox safe)
   MPESA_WEBHOOK_SECRET: Joi.string().min(32).optional(),
+  MPESA_CALLBACK_REPLAY_TTL_SECONDS: Joi.number().integer().min(60).default(900),
+  MPESA_CALLBACK_MAX_SKEW_SECONDS: Joi.number().integer().min(30).default(300),
   // Comma-separated Safaricom IP allowlist (required in production for MpesaIpGuard)
   MPESA_ALLOWED_IPS: Joi.string().when('NODE_ENV', {
     is: 'production',
@@ -153,6 +155,8 @@ export const validationSchema = Joi.object({
   RATE_LIMIT_TTL: Joi.number().default(60),
   RATE_LIMIT_MAX: Joi.number().default(100),
   METRICS_API_KEY: Joi.string().min(32).optional(),
+  IDEMPOTENCY_TTL_SECONDS: Joi.number().integer().min(60).default(3600),
+  AUDIT_HMAC_SECRET: Joi.string().min(32).optional(),
 
   // Product rules must be explicitly enabled so loan-product configuration
   // controls guarantor counts, account type, coverage ratio, and savings limits.

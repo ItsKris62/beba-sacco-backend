@@ -3,7 +3,16 @@ import { NextFunction, Request, Response } from 'express';
 import { TenantStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 
-const TENANT_SKIP_PATTERNS = ['/health', '/docs', '/docs-json', '/favicon.ico', '/api/metrics', '/metrics'];
+const TENANT_SKIP_PATTERNS = [
+  '/health',
+  '/docs',
+  '/docs-json',
+  '/favicon.ico',
+  '/api/metrics',
+  '/metrics',
+  '/api/mpesa/callback',
+  '/api/v1/mpesa/callback',
+];
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface JwtTenantClaim {

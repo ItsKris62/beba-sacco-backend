@@ -1,8 +1,8 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { Job } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { AuditService } from '../audit.service';
 
 export const AUDIT_RETENTION_QUEUE = 'audit.retention';
 export const AUDIT_RETENTION_JOB = 'run-retention-policy';
@@ -17,19 +17,14 @@ const FINANCIAL_ACTION_PREFIXES = [
   'SAVINGS.',
   'WELFARE.',
   'DISBURSEMENT.',
+  'MPESA.',
 ];
-
-// Sentinel prefix stored in requestId to mark a log as archived
-const ARCHIVED_SENTINEL = 'ARCHIVED:';
 
 @Processor(AUDIT_RETENTION_QUEUE)
 export class AuditRetentionProcessor extends WorkerHost {
   private readonly logger = new Logger(AuditRetentionProcessor.name);
 
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly auditService: AuditService,
-  ) {
+  constructor(private readonly prisma: PrismaService) {
     super();
   }
 
@@ -39,75 +34,54 @@ export class AuditRetentionProcessor extends WorkerHost {
       return;
     }
 
-    this.logger.log('Starting audit retention policy run…');
     const now = new Date();
-
-    // Non-financial: mark logs older than 2 years as archived via requestId sentinel
-    const nonFinancialCutoff = new Date(now);
-    nonFinancialCutoff.setFullYear(now.getFullYear() - NON_FINANCIAL_RETENTION_YEARS);
-
     const financialActions = await this.getFinancialActions();
 
-    const nonFinancialResult = await this.prisma.auditLog.updateMany({
+    const nonFinancialCutoff = this.yearsAgo(now, NON_FINANCIAL_RETENTION_YEARS);
+    const nonFinancialCounts = await this.prisma.auditLog.groupBy({
+      by: ['tenantId'],
       where: {
         timestamp: { lt: nonFinancialCutoff },
-        NOT: [
-          { requestId: { startsWith: ARCHIVED_SENTINEL } },
-          { action: { in: financialActions } },
-        ],
+        NOT: [{ action: { in: financialActions } }],
       },
-      data: {
-        requestId: `${ARCHIVED_SENTINEL}${nonFinancialCutoff.toISOString()}`,
-      },
+      _count: { _all: true },
     });
+    for (const row of nonFinancialCounts) {
+      await this.createArchiveManifest({
+        tenantId: row.tenantId,
+        archiveClass: 'NON_FINANCIAL',
+        cutoff: nonFinancialCutoff,
+        rowCount: row._count._all,
+      });
+    }
 
-    this.logger.log(`Archived ${nonFinancialResult.count} non-financial audit logs (>2 years)`);
-
-    // Financial: archive logs older than 7 years
-    const financialCutoff = new Date(now);
-    financialCutoff.setFullYear(now.getFullYear() - FINANCIAL_RETENTION_YEARS);
-
-    const financialLogs = await this.prisma.auditLog.findMany({
+    const financialCutoff = this.yearsAgo(now, FINANCIAL_RETENTION_YEARS);
+    const financialCounts = await this.prisma.auditLog.groupBy({
+      by: ['tenantId'],
       where: {
         timestamp: { lt: financialCutoff },
         action: { in: financialActions },
-        NOT: { requestId: { startsWith: ARCHIVED_SENTINEL } },
       },
-      take: 1000,
+      _count: { _all: true },
     });
-
-    let financialArchived = 0;
-    for (const log of financialLogs) {
-      const archivePath = await this.archiveToStorage({
-        id: log.id,
-        tenantId: log.tenantId,
-        timestamp: log.timestamp,
+    for (const row of financialCounts) {
+      await this.createArchiveManifest({
+        tenantId: row.tenantId,
+        archiveClass: 'FINANCIAL',
+        cutoff: financialCutoff,
+        rowCount: row._count._all,
       });
-
-      await this.prisma.auditLog.update({
-        where: { id: log.id },
-        data: { requestId: `${ARCHIVED_SENTINEL}${archivePath}` },
-      });
-      financialArchived++;
     }
 
-    this.logger.log(`Archived ${financialArchived} financial audit logs (>7 years) to storage`);
+    this.logger.log(
+      `Audit retention manifests created: nonFinancialTenants=${nonFinancialCounts.length}, financialTenants=${financialCounts.length}`,
+    );
+  }
 
-    await this.auditService.create({
-      tenantId: 'SYSTEM',
-      userId: 'SYSTEM',
-      action: 'AUDIT.RETENTION.COMPLETED',
-      resource: 'AuditLog',
-      metadata: {
-        nonFinancialArchived: nonFinancialResult.count,
-        financialArchived,
-        runAt: now.toISOString(),
-        nonFinancialCutoff: nonFinancialCutoff.toISOString(),
-        financialCutoff: financialCutoff.toISOString(),
-      },
-    });
-
-    this.logger.log('Audit retention policy run completed');
+  private yearsAgo(now: Date, years: number): Date {
+    const cutoff = new Date(now);
+    cutoff.setFullYear(now.getFullYear() - years);
+    return cutoff;
   }
 
   private async getFinancialActions(): Promise<string[]> {
@@ -123,16 +97,41 @@ export class AuditRetentionProcessor extends WorkerHost {
       );
   }
 
-  // TODO: Phase 4 – replace stub with actual MinIO/S3 upload
-  private async archiveToStorage(log: {
-    id: string;
+  private async createArchiveManifest(input: {
     tenantId: string;
-    timestamp: Date;
+    archiveClass: string;
+    cutoff: Date;
+    rowCount: number;
   }): Promise<string> {
-    const year = log.timestamp.getFullYear();
-    const month = String(log.timestamp.getMonth() + 1).padStart(2, '0');
-    const archivePath = `audit-archive/${log.tenantId}/${year}/${month}/${log.id}.json`;
-    this.logger.debug(`[STUB] Would archive log ${log.id} to ${archivePath}`);
-    return archivePath;
+    const year = input.cutoff.getFullYear();
+    const month = String(input.cutoff.getMonth() + 1).padStart(2, '0');
+    const objectUri = `worm://audit-archive/${input.tenantId}/${input.archiveClass.toLowerCase()}/${year}/${month}/manifest.json`;
+    const manifestPayload = JSON.stringify({
+      ...input,
+      cutoff: input.cutoff.toISOString(),
+      objectUri,
+    });
+
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      INSERT INTO audit_archive_manifests (
+        "tenantId",
+        "archiveClass",
+        "cutoffAt",
+        "objectUri",
+        "rowCount",
+        "manifestHash"
+      )
+      VALUES (
+        ${input.tenantId},
+        ${input.archiveClass},
+        ${input.cutoff},
+        ${objectUri},
+        ${input.rowCount},
+        encode(digest(${manifestPayload}, 'sha256'), 'hex')
+      )
+      RETURNING id
+    `);
+
+    return rows[0]?.id ?? objectUri;
   }
 }

@@ -81,11 +81,12 @@ async function bootstrap() {
       'Authorization',
       'X-Tenant-ID',
       'X-Request-ID',
+      'X-Correlation-Id',
       'X-Idempotency-Key',
       'X-Timezone',
       'X-Screen-Res',
     ],
-    exposedHeaders: ['X-Request-ID'],
+    exposedHeaders: ['X-Request-ID', 'X-Correlation-Id', 'X-Idempotency-Key', 'X-Idempotency-Replayed'],
   });
 
   app.use(

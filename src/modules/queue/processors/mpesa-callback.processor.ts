@@ -60,13 +60,19 @@ export class MpesaCallbackProcessor extends WorkerHost {
   // ─── Main dispatcher ──────────────────────────────────────────────────────
 
   async process(job: Job<MpesaCallbackJobPayload>): Promise<void> {
-    const { callbackPayload, callbackType } = job.data;
-    this.logger.log(`Processing mpesa callback | job=${job.id} type=${callbackType}`);
+    const { callbackPayload, callbackType, tenantId, correlationId } = job.data;
+    this.logger.log(
+      `Processing mpesa callback | job=${job.id} type=${callbackType} tenant=${tenantId} correlation=${correlationId ?? ''}`,
+    );
 
     if (isStkCallback(callbackPayload)) {
       await this.handleStkCallback(callbackPayload as unknown as StkCallbackPayload, job.id ?? '');
     } else if (isC2bCallback(callbackPayload)) {
-      await this.handleC2bCallback(callbackPayload as unknown as C2bCallbackPayload, job.id ?? '');
+      await this.handleC2bCallback(
+        callbackPayload as unknown as C2bCallbackPayload,
+        job.id ?? '',
+        tenantId,
+      );
     } else if (isB2cCallback(callbackPayload)) {
       await this.handleB2cCallback(callbackPayload as unknown as B2cCallbackPayload, job.id ?? '');
     } else {
@@ -168,7 +174,11 @@ export class MpesaCallbackProcessor extends WorkerHost {
 
   // ─── C2B result (direct paybill payment) ─────────────────────────────────
 
-  private async handleC2bCallback(body: C2bCallbackPayload, jobId: string): Promise<void> {
+  private async handleC2bCallback(
+    body: C2bCallbackPayload,
+    jobId: string,
+    resolvedTenantId?: string,
+  ): Promise<void> {
     const { TransID, TransAmount, BillRefNumber, MSISDN, TransTime } = body;
 
     // Layer 3: reference is built at create time so a duplicate TransID simply
@@ -190,7 +200,12 @@ export class MpesaCallbackProcessor extends WorkerHost {
     // but NOT globally — a findFirst without tenantId would non-deterministically
     // credit whichever tenant's record the DB returns first.
     const accounts = await this.prisma.account.findMany({
-      where: { accountNumber: BillRefNumber },
+      where: {
+        accountNumber: BillRefNumber,
+        ...(resolvedTenantId && resolvedTenantId !== 'resolve-in-processor'
+          ? { tenantId: resolvedTenantId }
+          : {}),
+      },
       select: { id: true, balance: true, memberId: true, tenantId: true },
     });
 
@@ -200,7 +215,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
       );
       await this.prisma.mpesaTransaction.create({
         data: {
-          tenantId: 'UNRESOLVED',
+          tenantId: resolvedTenantId && resolvedTenantId !== 'resolve-in-processor' ? resolvedTenantId : 'UNRESOLVED',
           type: MpesaTxType.C2B,
           triggerSource: MpesaTriggerSource.MEMBER,
           phoneNumber: MSISDN,
@@ -228,7 +243,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
       );
       await this.prisma.mpesaTransaction.create({
         data: {
-          tenantId: 'UNRESOLVED',
+          tenantId: resolvedTenantId && resolvedTenantId !== 'resolve-in-processor' ? resolvedTenantId : 'UNRESOLVED',
           type: MpesaTxType.C2B,
           triggerSource: MpesaTriggerSource.MEMBER,
           phoneNumber: MSISDN,

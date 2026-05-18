@@ -359,20 +359,23 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users                User[]
-  auditLogs            AuditLog[]
-  members              Member[]
-  accounts             Account[]
-  loanProducts         LoanProduct[]
-  loans                Loan[]
-  transactions         Transaction[]
-  guarantors           LoanGuarantor[]
-  counter              TenantCounter?
-  webhookSubscriptions WebhookSubscription[]
-  dataImportLogs       DataImportLog[]
-  reportJobs           ReportJob[]
-  documents            Document[]
-  kycRequirements      KYCRequirement[]
+  users                 User[]
+  auditLogs             AuditLog[]
+  auditEvents           AuditEvent[]
+  auditChainHead        AuditChainHead?
+  auditArchiveManifests AuditArchiveManifest[]
+  members               Member[]
+  accounts              Account[]
+  loanProducts          LoanProduct[]
+  loans                 Loan[]
+  transactions          Transaction[]
+  guarantors            LoanGuarantor[]
+  counter               TenantCounter?
+  webhookSubscriptions  WebhookSubscription[]
+  dataImportLogs        DataImportLog[]
+  reportJobs            ReportJob[]
+  documents             Document[]
+  kycRequirements       KYCRequirement[]
 
   @@index([slug])
   @@index([status])
@@ -481,6 +484,66 @@ model AuditLog {
   @@index([action])
   @@index([entityType])
   @@index([timestamp])
+  @@schema("public")
+}
+
+model AuditEvent {
+  id            String   @id @default(uuid())
+  correlationId String
+  timestamp     DateTime @default(now())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  userId String?
+  role   String?
+
+  action       String
+  resourceType String?
+  resourceId   String?
+  oldState     Json?
+  newState     Json?
+  metadata     Json?
+  ip           String?
+  userAgent    String?
+  endpoint     String?
+  method       String?
+  statusCode   Int
+  success      Boolean
+  errorCode    String?
+
+  prevHash  String @db.Text
+  eventHash String @db.Text
+  signature String @db.Text
+
+  @@unique([tenantId, eventHash])
+  @@index([tenantId, timestamp(sort: Desc)])
+  @@index([correlationId])
+  @@schema("public")
+}
+
+model AuditChainHead {
+  tenantId  String   @id
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lastHash  String   @db.Text
+  sequence  BigInt   @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@schema("public")
+}
+
+model AuditArchiveManifest {
+  id           String   @id @default(uuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  archiveClass String
+  cutoffAt     DateTime
+  objectUri    String   @db.Text
+  rowCount     Int
+  manifestHash String   @db.Text
+  createdAt    DateTime @default(now())
+
+  @@index([tenantId, cutoffAt(sort: Desc)])
+  @@map("audit_archive_manifests")
   @@schema("public")
 }
 

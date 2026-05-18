@@ -8,6 +8,7 @@ import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
 import { StkExpiryScheduler } from './jobs/stk-expiry.scheduler';
 import { MpesaStkTimeoutService } from './mpesa-stk-timeout.service';
+import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
@@ -56,6 +57,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
   providers: [
     DarajaClientService,
     MpesaService,
+    MpesaTenantResolverService,
     MpesaIpGuard,
     // B2C disbursement processor lives here (not in QueueModule) because it
     // needs MpesaService and there is no circular dependency in this direction.
@@ -66,6 +68,6 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     // this module is self-documenting about its dependencies.
     PrismaService,
   ],
-  exports: [MpesaService, DarajaClientService],
+  exports: [MpesaService, DarajaClientService, MpesaTenantResolverService],
 })
 export class MpesaModule {}

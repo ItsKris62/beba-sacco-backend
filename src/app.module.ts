@@ -20,7 +20,7 @@ import { MpesaExceptionFilter } from './modules/mpesa/filters/mpesa-exception.fi
 import { JwtAuthGuard } from './common/guards/jwt.guard';
 import { RBACGuard } from './common/guards/rbac.guard';
 import { TenantInterceptor } from './common/interceptors/tenant.interceptor';
-import { AuditInterceptor } from './common/interceptors/audit.interceptor';
+import { GlobalAuditInterceptor } from './common/interceptors/global-audit.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 // Feature Modules
@@ -201,7 +201,7 @@ import { AuditService } from './modules/audit/audit.service';
     // ── Global Interceptors (order matters) ───────────────────
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: TenantInterceptor },
-    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: GlobalAuditInterceptor },
     { provide: APP_INTERCEPTOR, useClass: ApiVersionInterceptor },
 
     // ── Global Filters ────────────────────────────────────────

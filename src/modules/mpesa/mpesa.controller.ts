@@ -1,4 +1,4 @@
-import {
+﻿import {
   Controller,
   Get,
   Post,
@@ -12,7 +12,6 @@ import {
   UseGuards,
   Logger,
   ServiceUnavailableException,
-  OnModuleInit,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -27,6 +26,7 @@ import { RawBodyRequest } from '@nestjs/common';
 import { Request } from 'express';
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
+import { v4 as uuidv4 } from 'uuid';
 import { UserRole, MpesaTriggerSource } from '@prisma/client';
 import { MpesaService } from './mpesa.service';
 import { MemberDepositDto } from './dto/deposit-request.dto';
@@ -37,11 +37,11 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
-import { isStkCallback, isC2bCallback, isB2cCallback } from './dto/mpesa-callback.dto';
 import { MpesaExceptionFilter } from './filters/mpesa-exception.filter';
 import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
+import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 
-// ─── Response shapes ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Response shapes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class DepositInitiatedResponse {
   checkoutRequestId!: string;
@@ -60,7 +60,7 @@ class DlqRequeueResponse {
 
 const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @ApiTags('M-Pesa')
 @ApiBearerAuth()
@@ -68,7 +68,7 @@ const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
 @UseFilters(MpesaExceptionFilter)
 @Controller('mpesa')
-export class MpesaController implements OnModuleInit {
+export class MpesaController {
   private readonly logger = new Logger(MpesaController.name);
   private readonly webhookSecret: string | undefined;
   private readonly isProduction: boolean;
@@ -76,6 +76,7 @@ export class MpesaController implements OnModuleInit {
   constructor(
     private readonly mpesaService: MpesaService,
     private readonly config: ConfigService,
+    private readonly tenantResolver: MpesaTenantResolverService,
   ) {
     this.webhookSecret = this.config.get<string>('app.mpesa.webhookSecret');
     this.isProduction = this.config.get<string>('app.nodeEnv') === 'production';
@@ -85,19 +86,19 @@ export class MpesaController implements OnModuleInit {
     if (!this.webhookSecret) {
       if (this.isProduction) {
         this.logger.warn(
-          '⚠️  MPESA_WEBHOOK_SECRET is not set in production. ' +
+          'âš ï¸  MPESA_WEBHOOK_SECRET is not set in production. ' +
             'All incoming Daraja callbacks will be rejected until this is configured.',
         );
       } else {
         this.logger.warn(
-          'MPESA_WEBHOOK_SECRET not configured — HMAC signature validation is DISABLED. ' +
+          'MPESA_WEBHOOK_SECRET not configured â€” HMAC signature validation is DISABLED. ' +
             'Safe for sandbox/staging only.',
         );
       }
     }
   }
 
-  // ─── Member deposit / repayment ──────────────────────────────────────────
+  // â”€â”€â”€ Member deposit / repayment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * POST /api/mpesa/members/deposit
@@ -126,7 +127,7 @@ export class MpesaController implements OnModuleInit {
   @ApiResponse({ status: 403, description: 'Insufficient role' })
   @ApiResponse({
     status: 503,
-    description: 'M-Pesa temporarily unavailable — retryable',
+    description: 'M-Pesa temporarily unavailable â€” retryable',
     schema: {
       properties: {
         statusCode: { type: 'number' },
@@ -159,14 +160,14 @@ export class MpesaController implements OnModuleInit {
     );
   }
 
-  // ─── Admin: queue B2C disbursement ──────────────────────────────────────
+  // â”€â”€â”€ Admin: queue B2C disbursement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * POST /api/mpesa/loans/:loanId/disburse
    *
    * Queues a B2C loan disbursement. Normally triggered by the loan-approval
    * workflow; this endpoint lets officers manually trigger after a failure.
-   * The job is idempotent (same loanId → same BullMQ jobId).
+   * The job is idempotent (same loanId â†’ same BullMQ jobId).
    */
   @Post('loans/:loanId/disburse')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
@@ -215,13 +216,13 @@ export class MpesaController implements OnModuleInit {
     return this.mpesaService.getTransactionStatus(checkoutRequestId, actor.id, tenant.id);
   }
 
-  // ─── Admin: replay a DLQ job ─────────────────────────────────────────────
+  // â”€â”€â”€ Admin: replay a DLQ job â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * POST /api/mpesa/admin/dlq/:jobId/requeue
    *
    * Moves a failed callback job from MPESA_CALLBACK_DLQ back into the live
-   * mpesa.callback queue for replay. Use only after manual investigation —
+   * mpesa.callback queue for replay. Use only after manual investigation â€”
    * DLQ jobs failed for a reason and blind replays can cause double-posting.
    *
    * Access: TENANT_ADMIN, MANAGER only.
@@ -245,7 +246,7 @@ export class MpesaController implements OnModuleInit {
     return this.mpesaService.requeueFromDlq(jobId);
   }
 
-  // ─── Unified Daraja callback ──────────────────────────────────────────────
+  // â”€â”€â”€ Unified Daraja callback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * POST /api/mpesa/callback
@@ -259,36 +260,24 @@ export class MpesaController implements OnModuleInit {
   @UseGuards(MpesaIpGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Unified Safaricom Daraja callback (STK / C2B / B2C)' })
+  @ApiHeader({ name: 'X-Mpesa-Signature', required: false, description: 'HMAC-SHA256 over raw callback body' })
+  @ApiHeader({ name: 'X-Mpesa-Timestamp', required: false, description: 'Callback timestamp used for replay protection' })
   @ApiResponse({ status: 200, description: 'Callback acknowledged' })
   async unifiedCallback(
     @Req() req: RawBodyRequest<Request>,
     @Body() body: Record<string, unknown>,
     @Headers('x-mpesa-signature') signature?: string,
+    @Headers('x-mpesa-timestamp') mpesaTimestamp?: string,
+    @Headers('x-daraja-timestamp') darajaTimestamp?: string,
   ) {
-    if (!this.isSignatureValid(req.rawBody, signature)) {
-      this.logger.warn('Unified callback: invalid HMAC signature – discarding');
-      return DARAJA_ACK;
-    }
-
-    if (isStkCallback(body)) {
-      const checkoutId = body.Body.stkCallback.CheckoutRequestID;
-      await this.mpesaService.enqueueCallback(
-        body as Record<string, unknown>,
-        'STK_PUSH',
-        checkoutId,
-      );
-    } else if (isC2bCallback(body)) {
-      await this.mpesaService.enqueueCallback(body as Record<string, unknown>, 'C2B', body.TransID);
-    } else if (isB2cCallback(body)) {
-      const convId = body.Result.ConversationID;
-      const isTimeout =
-        body.Result.ResultCode === 17 || body.Result.ResultDesc?.includes('timeout');
-      await this.mpesaService.enqueueCallback(
-        body as Record<string, unknown>,
-        isTimeout ? 'B2C_TIMEOUT' : 'B2C_RESULT',
-        convId,
-      );
-    }
+    const correlationId = uuidv4();
+    void this.acceptCallbackAsync({
+      rawBody: req.rawBody,
+      body,
+      signature,
+      timestamp: mpesaTimestamp ?? darajaTimestamp,
+      correlationId,
+    });
     return DARAJA_ACK;
   }
 
@@ -299,8 +288,52 @@ export class MpesaController implements OnModuleInit {
    * Behavior when MPESA_WEBHOOK_SECRET is absent:
    *  - Non-production: logs a warning and skips validation (sandbox safe).
    *  - Production: throws ServiceUnavailableException so Daraja retries and
-   *    operators are alerted immediately — no unvalidated webhooks go through.
+   *    operators are alerted immediately â€” no unvalidated webhooks go through.
    */
+  private async acceptCallbackAsync(params: {
+    rawBody?: Buffer;
+    body: Record<string, unknown>;
+    signature?: string;
+    timestamp?: string;
+    correlationId: string;
+  }): Promise<void> {
+    try {
+      const valid = await this.tenantResolver.validateCallback({
+        rawBody: params.rawBody,
+        payload: params.body,
+        signature: params.signature,
+        timestamp: params.timestamp,
+      });
+
+      if (!valid) {
+        return;
+      }
+
+      const resolved = await this.tenantResolver.resolveTenant(params.body);
+      if (!resolved) {
+        this.logger.warn(`M-Pesa callback accepted but tenant unresolved correlation=${params.correlationId}`);
+        return;
+      }
+
+      await this.mpesaService.enqueueCallback(
+        {
+          ...params.body,
+          tenantId: resolved.tenantId,
+          correlationId: params.correlationId,
+        },
+        resolved.callbackType,
+        resolved.uniqueId,
+        resolved.tenantId,
+        params.correlationId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `M-Pesa callback async accept failed correlation=${params.correlationId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
+  }
+
   private isSignatureValid(rawBody: Buffer | undefined, signature: string | undefined): boolean {
     if (!this.webhookSecret) {
       if (this.isProduction) {
@@ -309,7 +342,7 @@ export class MpesaController implements OnModuleInit {
             'Set the environment variable and redeploy before processing live callbacks.',
         );
       }
-      // Non-production: permissive — sandbox callbacks have no secret
+      // Non-production: permissive â€” sandbox callbacks have no secret
       return true;
     }
 

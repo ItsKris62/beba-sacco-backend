@@ -401,11 +401,13 @@ export class MpesaService {
     payload: Record<string, unknown>,
     callbackType: MpesaCallbackJobPayload['callbackType'],
     uniqueId: string,
+    tenantId = 'resolve-in-processor',
+    correlationId?: string,
   ): Promise<void> {
     const jobId = `${callbackType.toLowerCase().replace('_', '-')}-${uniqueId}`;
     await this.callbackQueue.add(
       'process-callback',
-      { tenantId: 'resolve-in-processor', callbackPayload: payload, callbackType },
+      { tenantId, correlationId, callbackPayload: payload, callbackType },
       {
         jobId,
         attempts: 3,
@@ -414,7 +416,9 @@ export class MpesaService {
         removeOnFail: false,
       },
     );
-    this.logger.log(`Callback enqueued | type=${callbackType} jobId=${jobId}`);
+    this.logger.log(
+      `JOB_ENQUEUED queue=${QUEUE_NAMES.MPESA_CALLBACK} type=${callbackType} jobId=${jobId} tenant=${tenantId} correlation=${correlationId ?? ''}`,
+    );
   }
 
   // ─── DLQ admin: requeue a failed callback job ───────────────────────────

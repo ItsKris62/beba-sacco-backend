@@ -3,18 +3,20 @@
  * Import from here instead of using string literals.
  */
 export const QUEUE_NAMES = {
-  MPESA_CALLBACK: 'mpesa.callback',
+  MPESA_CALLBACK: 'mpesa:callback',
   MPESA_STK_REPAYMENT: 'mpesa.stk-repayment', // Cron-scheduled STK repayment initiation jobs
   MPESA_DISBURSEMENT: 'mpesa.disbursement', // B2C loan disbursement initiation
   MPESA_DISBURSEMENT_DLQ: 'mpesa.disbursement.dlq', // Dead-letter queue for B2C failures
   MPESA_STK_EXPIRY: 'mpesa.stk-expiry',
   MPESA_B2C_TIMEOUT: 'mpesa.b2c-timeout',
-  MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq', // Dead-letter queue for callback failures
+  MPESA_CALLBACK_DLQ: 'mpesa:callback:dlq', // Dead-letter queue for callback failures
   LOAN_GUARANTOR_REMINDER: 'loan.guarantor.reminder',
   LOAN_GUARANTOR_EXPIRY: 'loan.guarantor.expiry',
   GUARANTOR_VALIDATION: 'loan.guarantor.validation',
   GUARANTOR_VALIDATION_DLQ: 'loan.guarantor.validation.dlq',
   AUDIT_LOG: 'audit.log',
+  AUDIT_PERSIST: 'audit:persist',
+  AUDIT_PERSIST_DLQ: 'audit:persist:dlq',
   LOAN_DISBURSE: 'loan.disburse',
   EMAIL: 'email',
   // Phase 4 – Financial Operations
@@ -63,6 +65,7 @@ export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
 
 export interface MpesaCallbackJobPayload {
   tenantId: string;
+  correlationId?: string;
   /** Raw Daraja callback payload (STK, C2B, or B2C result) */
   callbackPayload: Record<string, unknown>;
   /** Discriminator so the processor routes to the right handler */
@@ -136,6 +139,27 @@ export interface AuditLogJobPayload {
   ipAddress?: string;
   userAgent?: string;
   requestId?: string;
+}
+
+export interface AuditPersistJobPayload {
+  correlationId: string;
+  timestamp?: string;
+  tenantId: string;
+  userId?: string | null;
+  role?: string | null;
+  action: string;
+  resourceType?: string | null;
+  resourceId?: string | null;
+  oldState?: Record<string, unknown> | null;
+  newState?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+  ip?: string | null;
+  userAgent?: string | null;
+  endpoint?: string | null;
+  method?: string | null;
+  statusCode: number;
+  success: boolean;
+  errorCode?: string | null;
 }
 
 export interface LoanDisburseJobPayload {

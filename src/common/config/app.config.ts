@@ -35,6 +35,10 @@ export default registerAs('app', () => ({
     restToken: process.env.UPSTASH_REDIS_REST_TOKEN,
   },
 
+  idempotency: {
+    ttlSeconds: parseInt(process.env.IDEMPOTENCY_TTL_SECONDS || '3600', 10),
+  },
+
   // Redis for BullMQ queues – must be a connection-based provider (no command-count billing)
   // Use Render Redis, Railway Redis, or any provider without per-command limits.
   // When unset in dev, BullMQ falls back to the Upstash config above.
@@ -77,11 +81,17 @@ export default registerAs('app', () => ({
     b2cQueueTimeoutUrl: process.env.MPESA_B2C_QUEUE_TIMEOUT_URL || process.env.MPESA_CALLBACK_URL,
     environment: process.env.MPESA_ENVIRONMENT || 'sandbox',
     webhookSecret: process.env.MPESA_WEBHOOK_SECRET,
+    callbackReplayTtlSeconds: parseInt(process.env.MPESA_CALLBACK_REPLAY_TTL_SECONDS || '900', 10),
+    callbackMaxSkewSeconds: parseInt(process.env.MPESA_CALLBACK_MAX_SKEW_SECONDS || '300', 10),
     allowedIps: (process.env.MPESA_ALLOWED_IPS || '')
       .split(',')
       .map((ip) => ip.trim())
       .filter(Boolean),
     stkRateLimitPerDay: parseInt(process.env.MPESA_STK_RATE_LIMIT_PER_DAY || '3', 10),
+  },
+
+  audit: {
+    hmacSecret: process.env.AUDIT_HMAC_SECRET,
   },
 
   // Plunk Transactional Email
