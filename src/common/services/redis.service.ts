@@ -38,7 +38,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     if (rawHost !== host) {
       this.logger.warn(
         `Redis: REDIS_HOST had a protocol prefix — stripped to "${host}". ` +
-        `Fix REDIS_HOST in your env vars to remove the "https://" prefix.`,
+          `Fix REDIS_HOST in your env vars to remove the "https://" prefix.`,
       );
     }
 
@@ -48,7 +48,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     this.logger.log(
       `Redis: initialising connection → host="${host}" port=${port} tls=${tls} ` +
-      `password=${password ? '[SET]' : '[NOT SET]'}`,
+        `password=${password ? '[SET]' : '[NOT SET]'}`,
     );
 
     // Set to true on WRONGPASS — stops retryStrategy immediately so we don't
@@ -96,7 +96,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
           redisAuthFailed = true;
           this.logger.error(
             `Redis: authentication failed (WRONGPASS) — stopping all retries. ` +
-            `Fix REDIS_PASSWORD in your env vars (get it from console.upstash.com → database → Connect).`,
+              `Fix REDIS_PASSWORD in your env vars (get it from console.upstash.com → database → Connect).`,
           );
           this.client.disconnect();
         }
@@ -166,6 +166,33 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       await this.client.del(key);
     } catch (err) {
       this.logger.warn(`Redis DEL failed for key "${key}": ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Atomically delete a key only when its current value matches the expected value.
+   * Used for one-time feature-flagged upload tokens.
+   */
+  async consumeIfValue(
+    key: string,
+    expectedValue: string,
+  ): Promise<'consumed' | 'missing' | 'mismatch'> {
+    const script = [
+      'local v = redis.call("GET", KEYS[1])',
+      'if not v then return 0 end',
+      'if v ~= ARGV[1] then return -1 end',
+      'redis.call("DEL", KEYS[1])',
+      'return 1',
+    ].join('\n');
+
+    try {
+      const result: unknown = await this.client.eval(script, 1, key, expectedValue);
+      if (result === 1) return 'consumed';
+      if (result === -1) return 'mismatch';
+      return 'missing';
+    } catch (err) {
+      this.logger.warn(`Redis consumeIfValue failed for key "${key}": ${(err as Error).message}`);
+      return 'missing';
     }
   }
 
@@ -275,9 +302,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       const result: unknown = await this.client.eval(script, 1, key);
       return typeof result === 'number' ? result : 0;
     } catch (err) {
-      this.logger.warn(
-        `Redis decrIfPositive failed for key "${key}": ${(err as Error).message}`,
-      );
+      this.logger.warn(`Redis decrIfPositive failed for key "${key}": ${(err as Error).message}`);
       return 0;
     }
   }

@@ -1,98 +1,67 @@
-import { Controller, Get, HttpException } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import {
-  HealthCheck,
-  HealthCheckService,
-  PrismaHealthIndicator,
-  MemoryHealthIndicator,
-  DiskHealthIndicator,
-  HealthIndicatorResult,
-} from '@nestjs/terminus';
+import { Controller, Get, HttpException, HttpStatus } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { HealthCheck } from '@nestjs/terminus';
 import { SkipThrottle } from '@nestjs/throttler';
-import { PrismaClient } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
+import { FeatureFlags, FEATURE_FLAG_NAMES } from '../../config/feature-flags';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { StorageService } from '../storage/storage.service';
 
-/**
- * Health Check Controller
- *
- * @SkipThrottle() – health probes from load balancers / Render / uptime monitors
- * must not count against the global rate limit bucket.
- *
- * Both endpoints are @Public() (no JWT required).
- *
- * TODO: Phase 2 – expose OpenTelemetry metrics at /metrics
- */
+type DependencyCheck = {
+  status: 'ok' | 'error';
+  critical: boolean;
+  latencyMs?: number;
+  error?: string;
+  stack?: string;
+  [key: string]: unknown;
+};
+
 @ApiTags('Health')
 @SkipThrottle()
 @Controller('health')
 export class HealthController {
   constructor(
-    private readonly health: HealthCheckService,
-    private readonly prismaHealth: PrismaHealthIndicator,
-    private readonly memory: MemoryHealthIndicator,
-    private readonly disk: DiskHealthIndicator,
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly storage: StorageService,
   ) {}
 
-  /** Custom Redis health check — uses PING command with a 2 s timeout guard */
-  private async redisCheck(): Promise<HealthIndicatorResult> {
-    const ok = await Promise.race([
-      this.redis.ping(),
-      new Promise<false>((resolve) => setTimeout(() => resolve(false), 2000)),
-    ]);
-    return {
-      redis: ok ? { status: 'up' } : { status: 'down', message: 'Redis PING timed out or failed' },
-    };
-  }
-
-  private async r2Check(): Promise<HealthIndicatorResult> {
-    try {
-      await Promise.race([
-        this.storage.healthCheck(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('R2 health check timed out')), 2000)),
-      ]);
-      return { r2: { status: 'up' } };
-    } catch (err) {
-      return {
-        r2: {
-          status: 'down',
-          message: err instanceof Error ? err.message : String(err),
-        },
-      };
-    }
-  }
-
   @Public()
   @Get()
   @HealthCheck()
-  @ApiOperation({ summary: 'Full health check (DB, memory, disk)' })
-  @ApiResponse({ status: 200, description: 'All systems healthy' })
-  @ApiResponse({ status: 503, description: 'One or more systems degraded' })
-  check() {
-    return this.health.check([
-      // Database connectivity — cast to PrismaClient so terminus typing is satisfied
-      () => this.prismaHealth.pingCheck('database', this.prisma as unknown as PrismaClient),
-
-      // Redis connectivity
-      () => this.redisCheck(),
-
-      // R2 / S3-compatible object storage connectivity
-      () => this.r2Check(),
-
-      // Heap: alert above 150 MB
-      () => this.memory.checkHeap('memory_heap', 150 * 1024 * 1024),
-
-      // RSS: alert above 300 MB
-      () => this.memory.checkRSS('memory_rss', 300 * 1024 * 1024),
-
-      // Disk: warn if less than 50 % free
-      () => this.disk.checkStorage('storage', { path: '/', thresholdPercent: 0.5 }),
+  @ApiOperation({ summary: 'Readiness check with dependency verification' })
+  @ApiResponse({ status: 200, description: 'All critical systems are healthy' })
+  @ApiResponse({ status: 503, description: 'One or more critical systems failed' })
+  async check() {
+    const checks = await Promise.allSettled([
+      this.checkDatabase(),
+      this.checkRedis(),
+      this.checkStorage(),
+      this.checkFeatureFlags(),
     ]);
+
+    const results = {
+      status: 'ok' as 'ok' | 'error',
+      timestamp: new Date().toISOString(),
+      version: process.env.npm_package_version ?? 'unknown',
+      checks: {
+        database: this.formatCheck(checks[0], true),
+        redis: this.formatCheck(checks[1], true),
+        storage: this.formatCheck(checks[2], true),
+        featureFlags: this.formatCheck(checks[3], false),
+      },
+    };
+
+    const hasCriticalFailure = Object.values(results.checks).some(
+      (check) => check.status === 'error' && check.critical,
+    );
+
+    if (hasCriticalFailure) {
+      throw new HttpException({ ...results, status: 'error' }, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
+    return results;
   }
 
   @Public()
@@ -100,12 +69,12 @@ export class HealthController {
   @ApiOperation({ summary: 'Lightweight liveness probe' })
   @ApiResponse({
     status: 200,
-    description: 'Returns ok + uptime + timestamp',
+    description: 'Returns ok, uptime, and timestamp',
     schema: {
       example: {
         status: 'ok',
         uptime: 123.45,
-        timestamp: '2025-01-15T12:00:00.000Z',
+        timestamp: '2026-05-20T12:00:00.000Z',
       },
     },
   })
@@ -117,17 +86,11 @@ export class HealthController {
     };
   }
 
-  /**
-   * Phase 4 – Synthetic end-to-end health probe.
-   * Runs DB + Redis + tenant table checks.
-   * Returns 200 only if all pass; 503 on any failure.
-   * Pinged every 2 minutes by uptime monitors.
-   */
   @Public()
   @Get('synthetic')
   @ApiOperation({
-    summary: 'Synthetic e2e health probe (Phase 4)',
-    description: 'DB + Redis + tenant table checks. Returns 200 only if all pass.',
+    summary: 'Synthetic end-to-end health probe',
+    description: 'Database, Redis, and tenant table checks. Returns 503 on any failure.',
   })
   @ApiResponse({ status: 200, description: 'All synthetic checks passed' })
   @ApiResponse({ status: 503, description: 'One or more checks failed' })
@@ -136,7 +99,6 @@ export class HealthController {
       {};
     let allPass = true;
 
-    // 1. DB connectivity
     const dbStart = Date.now();
     try {
       await this.prisma.$queryRaw`SELECT 1`;
@@ -146,7 +108,6 @@ export class HealthController {
       allPass = false;
     }
 
-    // 2. Redis round-trip
     const redisStart = Date.now();
     try {
       const testKey = `health:synthetic:${Date.now()}`;
@@ -159,7 +120,6 @@ export class HealthController {
       allPass = false;
     }
 
-    // 3. Tenant table readable
     const tenantStart = Date.now();
     try {
       await this.prisma.tenant.count();
@@ -179,7 +139,66 @@ export class HealthController {
       checks: results,
     };
 
-    if (!allPass) throw new HttpException(body, 503);
+    if (!allPass) throw new HttpException(body, HttpStatus.SERVICE_UNAVAILABLE);
     return body;
+  }
+
+  private async checkDatabase() {
+    return this.measureLatency(async () => {
+      await this.prisma.$queryRaw`SELECT 1`;
+      return { status: 'ok' as const };
+    });
+  }
+
+  private async checkRedis() {
+    return this.measureLatency(async () => {
+      const ok = await this.redis.ping();
+      if (!ok) throw new Error('Redis PING failed');
+      return { status: 'ok' as const };
+    });
+  }
+
+  private async checkStorage() {
+    return this.measureLatency(async () => {
+      await this.storage.healthCheck();
+      return { status: 'ok' as const };
+    });
+  }
+
+  private async checkFeatureFlags() {
+    return {
+      status: 'ok' as const,
+      loaded: FEATURE_FLAG_NAMES.length,
+      sample: {
+        SECURE_UPLOAD_V2: FeatureFlags.SECURE_UPLOAD_V2,
+        VIRUS_SCAN: FeatureFlags.VIRUS_SCAN,
+      },
+    };
+  }
+
+  private formatCheck(
+    result: PromiseSettledResult<Record<string, unknown>>,
+    critical: boolean,
+  ): DependencyCheck {
+    if (result.status === 'fulfilled') {
+      return { status: 'ok', critical, ...result.value };
+    }
+
+    const reason =
+      result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+    return {
+      status: 'error',
+      critical,
+      error: reason.message,
+      stack: process.env.NODE_ENV === 'development' ? reason.stack : undefined,
+    };
+  }
+
+  private async measureLatency<T extends Record<string, unknown>>(
+    fn: () => Promise<T>,
+  ): Promise<T & { latencyMs: number }> {
+    const start = Date.now();
+    const result = await fn();
+    return { ...result, latencyMs: Date.now() - start };
   }
 }

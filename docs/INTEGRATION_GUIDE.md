@@ -52,10 +52,10 @@ Do not update or delete `AuditEvent` rows. Retention creates manifests only.
 
 Use connection-based Redis for BullMQ through `BULL_REDIS_URL`. The new queues are:
 
-- `mpesa:callback`
-- `mpesa:callback:dlq`
-- `audit:persist`
-- `audit:persist:dlq`
+- `mpesa-callback`
+- `mpesa-callback-dlq`
+- `audit-persist`
+- `audit-persist-dlq`
 
 All audit writes use retries and dead-letter routing. HTTP request handling never waits for audit persistence.
 

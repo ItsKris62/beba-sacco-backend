@@ -98,6 +98,21 @@ Set `WORKER_MODE=true` on the dedicated Render worker service. If queue
 processing needs to roll back to a single service, suspend the worker and set
 the web service to `WORKER_MODE=false`.
 
+### Phase 0 Hardening Flags and Rollback
+
+Phase 0 security hardening is controlled by Render environment flags:
+
+```bash
+FEATURE_SECURE_UPLOAD_V2=false
+FEATURE_VIRUS_SCAN=false
+FEATURE_RLS_ENFORCEMENT=false
+FEATURE_KYC_STATUS_ALIAS=false
+FEATURE_VIRUS_SCAN_CANARY_TENANTS=
+```
+
+Keep these disabled until staging validation is complete. Rollback procedure:
+[`docs/ROLLBACK.md`](docs/ROLLBACK.md).
+
 ## 🔐 Security Features
 
 ✅ **Environment Validation** - Joi schema validation at startup  

@@ -54,8 +54,9 @@ export class RequestDocumentUploadUrlDto {
   fileSize?: number;
 
   @ApiPropertyOptional({
-    description: 'Optional frontend SHA-256 checksum for integrity tracking',
-    example: 'f'.repeat(64),
+    description:
+      'SHA-256 hex checksum of the selected file. Optional in legacy mode; verified server-side when FEATURE_SECURE_UPLOAD_V2 is enabled.',
+    example: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
   })
   @IsOptional()
   @IsString()
@@ -76,11 +77,20 @@ export class DocumentUploadUrlResponseDto {
   @ApiProperty()
   objectKey!: string;
 
-  @ApiProperty({ example: 3600 })
+  @ApiProperty({
+    example: 900,
+    description: '900 when FEATURE_SECURE_UPLOAD_V2 is enabled; 3600 in legacy mode.',
+  })
   expiresIn!: number;
 
   @ApiProperty({ example: MAX_DOCUMENT_UPLOAD_BYTES })
   maxBytes!: number;
+
+  @ApiPropertyOptional({
+    description: 'Present only when FEATURE_SECURE_UPLOAD_V2 is enabled',
+    example: 'f'.repeat(64),
+  })
+  uploadToken?: string;
 }
 
 export class ConfirmDocumentUploadDto {
@@ -96,6 +106,15 @@ export class ConfirmDocumentUploadDto {
   @IsString()
   @Matches(/^[a-f0-9]{64}$/i, { message: 'checksum must be a 64-character SHA-256 hex digest' })
   checksum?: string;
+
+  @ApiPropertyOptional({
+    description: 'Required only when FEATURE_SECURE_UPLOAD_V2 is enabled',
+    example: 'b'.repeat(64),
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/i, { message: 'uploadToken must be a 64-character hex token' })
+  uploadToken?: string;
 }
 
 export class ReviewDocumentDto {
@@ -130,7 +149,37 @@ export class AdminRequestDocumentUploadUrlDto extends RequestDocumentUploadUrlDt
 }
 
 export class AdminConfirmDocumentUploadDto extends ConfirmDocumentUploadDto {
-  @ApiProperty({ format: 'uuid', description: 'The UUID of the member to confirm the document upload for' })
+  @ApiProperty({
+    format: 'uuid',
+    description: 'The UUID of the member to confirm the document upload for',
+  })
   @IsUUID()
   memberId!: string;
+}
+
+export class AdminConfirmDocumentUploadByIdDto {
+  @ApiProperty({
+    format: 'uuid',
+    description: 'The UUID of the member to confirm the document upload for',
+  })
+  @IsUUID()
+  memberId!: string;
+
+  @ApiPropertyOptional({
+    description: 'SHA-256 checksum calculated by the client after file selection',
+    example: 'a'.repeat(64),
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/i, { message: 'checksum must be a 64-character SHA-256 hex digest' })
+  checksum?: string;
+
+  @ApiPropertyOptional({
+    description: 'Required only when FEATURE_SECURE_UPLOAD_V2 is enabled',
+    example: 'b'.repeat(64),
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/i, { message: 'uploadToken must be a 64-character hex token' })
+  uploadToken?: string;
 }

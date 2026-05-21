@@ -3,6 +3,7 @@ import {
   Logger,
   BadRequestException,
   ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -82,7 +83,7 @@ export class StorageService {
     if (!ALLOWED_CONTENT_TYPES.has(params.contentType)) {
       throw new BadRequestException(
         `Unsupported content type "${params.contentType}". ` +
-        `Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}`,
+          `Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}`,
       );
     }
 
@@ -114,7 +115,7 @@ export class StorageService {
     if (!ALLOWED_CONTENT_TYPES.has(params.contentType)) {
       throw new BadRequestException(
         `Unsupported content type "${params.contentType}". ` +
-        `Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}`,
+          `Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}`,
       );
     }
 
@@ -166,7 +167,7 @@ export class StorageService {
     if (actualBytes > ceiling) {
       throw new BadRequestException(
         `File exceeds declared size by >5% ` +
-        `(declared ${declaredSizeBytes} B, stored ${actualBytes} B)`,
+          `(declared ${declaredSizeBytes} B, stored ${actualBytes} B)`,
       );
     }
   }
@@ -221,6 +222,25 @@ export class StorageService {
   }
 
   /**
+   * Stream object bytes from storage without writing to local disk.
+   * Used by secure document confirmation to compute server-side checksums.
+   */
+  async getFileStream(key: string): Promise<AsyncIterable<Uint8Array>> {
+    const command = new GetObjectCommand({ Bucket: this.bucketName, Key: key });
+    const response = await this.s3Client.send(command);
+    if (!response.Body) {
+      throw new NotFoundException('Stored object body was not found');
+    }
+
+    const body = response.Body as unknown;
+    if (this.isAsyncIterable(body)) {
+      return body;
+    }
+
+    throw new BadRequestException('Stored object body is not streamable');
+  }
+
+  /**
    * Phase 6 – Upload a Buffer directly to storage (server-side upload).
    * Used by: FeatureStoreService (ML exports), DSARService (encrypted ZIPs).
    *
@@ -239,5 +259,11 @@ export class StorageService {
     });
     await this.s3Client.send(command);
     this.logger.log(`Uploaded buffer to ${key} (${body.length} bytes)`);
+  }
+
+  private isAsyncIterable(value: unknown): value is AsyncIterable<Uint8Array> {
+    return (
+      !!value && typeof (value as AsyncIterable<Uint8Array>)[Symbol.asyncIterator] === 'function'
+    );
   }
 }

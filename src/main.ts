@@ -81,12 +81,19 @@ async function bootstrap() {
       'Authorization',
       'X-Tenant-ID',
       'X-Request-ID',
+      'X-Correlation-ID',
       'X-Correlation-Id',
       'X-Idempotency-Key',
       'X-Timezone',
       'X-Screen-Res',
     ],
-    exposedHeaders: ['X-Request-ID', 'X-Correlation-Id', 'X-Idempotency-Key', 'X-Idempotency-Replayed'],
+    exposedHeaders: [
+      'X-Request-ID',
+      'X-Correlation-ID',
+      'X-Correlation-Id',
+      'X-Idempotency-Key',
+      'X-Idempotency-Replayed',
+    ],
   });
 
   app.use(
@@ -157,6 +164,15 @@ async function bootstrap() {
         description: 'SACCO tenant UUID (required on all non-health routes)',
       },
       'X-Tenant-ID',
+    )
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'X-Correlation-ID',
+        in: 'header',
+        description: 'Optional request tracing ID returned in API responses and logs',
+      },
+      'X-Correlation-ID',
     )
     .addTag('Authentication', 'Login, register, token refresh, logout')
     .addTag('Tenants', 'Multi-tenant SACCO management (SUPER_ADMIN only)')

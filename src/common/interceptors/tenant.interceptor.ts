@@ -12,6 +12,7 @@ import { TenantStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { tenantAsyncStorage } from '../services/tenant-context.service';
 import type { AuthenticatedUser } from '../../modules/auth/strategies/jwt.strategy';
+import { FeatureFlags } from '../../config/feature-flags';
 
 /**
  * Routes that do NOT require X-Tenant-ID.
@@ -54,17 +55,23 @@ export class TenantInterceptor implements NestInterceptor {
     }>();
 
     // Skip infra/swagger routes
-    const shouldSkip = TENANT_SKIP_PATTERNS.some((pattern) =>
-      request.url.includes(pattern),
-    );
+    const shouldSkip = TENANT_SKIP_PATTERNS.some((pattern) => request.url.includes(pattern));
     if (shouldSkip) {
       return next.handle();
     }
 
     if (request.tenant && request.tenantId) {
       const existingTenant = request.tenant as { id: string; slug?: string };
+      const requestUser = (request as unknown as { user?: AuthenticatedUser }).user;
       return tenantAsyncStorage.run(
-        { tenantId: existingTenant.id, tenantSlug: existingTenant.slug },
+        {
+          tenantId: existingTenant.id,
+          tenantSlug: existingTenant.slug,
+          userId: requestUser?.id,
+          role: requestUser?.role,
+          rlsEnabled: FeatureFlags.isEnabled('RLS_ENFORCEMENT', existingTenant.id),
+          bypassRls: requestUser?.role === UserRole.SUPER_ADMIN,
+        },
         () => next.handle(),
       );
     }
@@ -77,8 +84,7 @@ export class TenantInterceptor implements NestInterceptor {
     }
 
     // Basic UUID format validation — prevents obviously malformed values
-    const UUID_REGEX =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!UUID_REGEX.test(tenantId)) {
       throw new BadRequestException('X-Tenant-ID must be a valid UUID');
     }
@@ -128,7 +134,14 @@ export class TenantInterceptor implements NestInterceptor {
     // Run the rest of the request pipeline inside AsyncLocalStorage
     // so Prisma middleware can auto-inject tenantId into every query.
     return tenantAsyncStorage.run(
-      { tenantId: tenant.id, tenantSlug: tenant.slug },
+      {
+        tenantId: tenant.id,
+        tenantSlug: tenant.slug,
+        userId: requestUser?.id,
+        role: requestUser?.role,
+        rlsEnabled: FeatureFlags.isEnabled('RLS_ENFORCEMENT', tenant.id),
+        bypassRls: isSuperAdmin,
+      },
       () => next.handle(),
     );
   }

@@ -10,11 +10,25 @@ Sentry.init({
   
   environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV ?? 'production',
   sendDefaultPii: true,
-  // Optional: Set tracesSampleRate to 1.0 to capture 100% of transactions for performance monitoring
-  tracesSampleRate: 0.1,
+  tracesSampleRate: Number.parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE ?? '0.1'),
   
   // Scrub sensitive request fields before the event reaches the Sentry dashboard.
-  beforeSend(event) {
+  beforeSend(event, hint) {
+    const originalException = hint.originalException;
+    if (
+      originalException instanceof Error &&
+      originalException.message.includes('ResizeObserver')
+    ) {
+      return null;
+    }
+
+    const tenantId =
+      (event.tags?.['sacco.tenant_id'] as string | undefined) ??
+      (event.tags?.tenant_id as string | undefined);
+    if (tenantId) {
+      event.fingerprint = ['{{ default }}', tenantId];
+    }
+
     const data = event.request?.data;
     if (data && typeof data === 'object' && !Array.isArray(data)) {
       const SENSITIVE_FIELDS = [
@@ -25,6 +39,8 @@ Sentry.init({
         'refreshToken',
         'token',        // password-reset JWT
         'accessTokenJti',
+        'checksum',
+        'uploadToken',
       ];
       const scrubbed = { ...(data as Record<string, unknown>) };
       let changed = false;

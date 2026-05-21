@@ -1,7 +1,14 @@
-import { BadRequestException, ForbiddenException, Injectable, NestMiddleware, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NestMiddleware,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { NextFunction, Request, Response } from 'express';
 import { TenantStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FeatureFlags } from '../../config/feature-flags';
 
 const TENANT_SKIP_PATTERNS = [
   '/health',
@@ -16,6 +23,7 @@ const TENANT_SKIP_PATTERNS = [
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface JwtTenantClaim {
+  sub?: string;
   tenantId?: string;
   role?: string;
 }
@@ -24,7 +32,11 @@ interface JwtTenantClaim {
 export class TenantMiddleware implements NestMiddleware {
   constructor(private readonly prisma: PrismaService) {}
 
-  async use(req: Request & { tenant?: unknown; tenantId?: string }, _res: Response, next: NextFunction): Promise<void> {
+  async use(
+    req: Request & { tenant?: unknown; tenantId?: string },
+    _res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (TENANT_SKIP_PATTERNS.some((pattern) => req.path.includes(pattern))) {
       next();
       return;
@@ -82,7 +94,25 @@ export class TenantMiddleware implements NestMiddleware {
 
     req.tenant = tenant;
     req.tenantId = tenant.id;
+    await this.setRlsSessionContext(tenant.id, jwtClaim);
     next();
+  }
+
+  private async setRlsSessionContext(
+    tenantId: string,
+    jwtClaim: JwtTenantClaim | null,
+  ): Promise<void> {
+    const rlsEnabled = FeatureFlags.isEnabled('RLS_ENFORCEMENT', tenantId);
+    const bypassRls = jwtClaim?.role === UserRole.SUPER_ADMIN;
+
+    await this.prisma.$executeRaw`
+      SELECT
+        set_config('app.current_tenant_id', ${tenantId}, false),
+        set_config('app.current_user_id', ${jwtClaim?.sub ?? ''}, false),
+        set_config('app.current_user_role', ${jwtClaim?.role ?? ''}, false),
+        set_config('app.rls_enabled', ${rlsEnabled ? 'true' : 'false'}, false),
+        set_config('app.bypass_rls', ${bypassRls ? 'true' : 'false'}, false)
+    `;
   }
 
   private decodeBearerTenant(authorization?: string): JwtTenantClaim | null {

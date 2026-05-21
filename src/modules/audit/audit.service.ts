@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { createHash } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FeatureFlags } from '../../config/feature-flags';
 
 export interface CreateAuditLogDto {
   tenantId: string;
@@ -80,6 +81,8 @@ export class AuditService {
 
   /**
    * Persist an audit event.
+   * AuditLog rows are immutable at the database layer; Phase 2 migration
+   * blocks UPDATE and DELETE with AUDIT_IMMUTABLE.
    * This is synchronous — call via fire-and-forget (.catch) from hot paths.
    */
   async create(dto: CreateAuditLogDto): Promise<void> {
@@ -91,6 +94,12 @@ export class AuditService {
     const metadata = {
       ...(dto.metadata ?? {}),
       ...(requestedActorId === 'SYSTEM' && { actorId: 'SYSTEM' }),
+      featureFlags: {
+        secureUpload: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', dto.tenantId),
+        rlsEnforcement: FeatureFlags.isEnabled('RLS_ENFORCEMENT', dto.tenantId),
+        kycStatusAlias: FeatureFlags.isEnabled('KYC_STATUS_ALIAS', dto.tenantId),
+      },
+      ...(dto.requestId && { correlationId: dto.requestId }),
     };
 
     const prevEntry = await this.prisma.auditLog.findFirst({
@@ -102,7 +111,19 @@ export class AuditService {
     const timestamp = new Date();
     const payload = dto.payload ?? metadata;
     const entryHash = createHash('sha256')
-      .update(JSON.stringify({ tenantId: dto.tenantId, actorId, action: dto.action, entityType, entityId, payload, prevHash, timestamp }), 'utf8')
+      .update(
+        JSON.stringify({
+          tenantId: dto.tenantId,
+          actorId,
+          action: dto.action,
+          entityType,
+          entityId,
+          payload,
+          prevHash,
+          timestamp,
+        }),
+        'utf8',
+      )
       .digest('hex');
 
     await this.prisma.auditLog.create({
@@ -260,9 +281,11 @@ export class AuditService {
     });
   }
 
-  private serializeEntry(entry: Prisma.AuditLogGetPayload<{
-    include: { user: { select: { firstName: true; lastName: true; email: true } } };
-  }>): AuditLogEntry {
+  private serializeEntry(
+    entry: Prisma.AuditLogGetPayload<{
+      include: { user: { select: { firstName: true; lastName: true; email: true } } };
+    }>,
+  ): AuditLogEntry {
     return {
       ...entry,
       userId: entry.actorId,

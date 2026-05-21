@@ -69,6 +69,19 @@ services:
       - key: FEATURE_ADVANCED_FINANCIAL_JOBS
         value: 'false'
 
+      # Phase 0 hardening flags. Missing/false means disabled.
+      # Set in Render dashboard for instant rollback without a code change.
+      - key: FEATURE_SECURE_UPLOAD_V2
+        sync: false
+      - key: FEATURE_VIRUS_SCAN
+        sync: false
+      - key: FEATURE_RLS_ENFORCEMENT
+        sync: false
+      - key: FEATURE_KYC_STATUS_ALIAS
+        sync: false
+      - key: FEATURE_VIRUS_SCAN_CANARY_TENANTS
+        sync: false
+
       # JWT — generate with: openssl rand -base64 64 | tr -d '\n'
       - key: JWT_SECRET
         sync: false
@@ -216,6 +229,16 @@ services:
         value: 'true'
       - key: FEATURE_ADVANCED_FINANCIAL_JOBS
         value: 'false'
+      - key: FEATURE_SECURE_UPLOAD_V2
+        sync: false
+      - key: FEATURE_VIRUS_SCAN
+        sync: false
+      - key: FEATURE_RLS_ENFORCEMENT
+        sync: false
+      - key: FEATURE_KYC_STATUS_ALIAS
+        sync: false
+      - key: FEATURE_VIRUS_SCAN_CANARY_TENANTS
+        sync: false
       - key: JWT_SECRET
         sync: false
       - key: JWT_ACCESS_EXPIRATION

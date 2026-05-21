@@ -1,5 +1,4 @@
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
-import type { IncomingMessage } from 'http';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD, APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
@@ -7,6 +6,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { CommonServicesModule } from './common/services/common-services.module';
 import { SentryModule, SentryGlobalFilter } from '@sentry/nestjs/setup';
+import { createPinoHttpOptions } from './common/logging/pino.config';
 
 // Config
 import appConfig from './common/config/app.config';
@@ -22,6 +22,7 @@ import { RBACGuard } from './common/guards/rbac.guard';
 import { TenantInterceptor } from './common/interceptors/tenant.interceptor';
 import { GlobalAuditInterceptor } from './common/interceptors/global-audit.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { SentryInterceptor } from './common/sentry/sentry.interceptor';
 
 // Feature Modules
 import { AuthModule } from './modules/auth/auth.module';
@@ -105,30 +106,7 @@ import { AuditService } from './modules/audit/audit.service';
 
     // ── Structured Logging (nestjs-pino) ───────────────────────
     LoggerModule.forRoot({
-      pinoHttp: {
-        level: process.env.NODE_ENV !== 'production' ? 'debug' : 'info',
-        // Silent in test to prevent noise during jest runs
-        ...(process.env.NODE_ENV === 'test' && { level: 'silent' }),
-        // Pretty-print in dev; JSON in production (consumed by log aggregators)
-        transport:
-          process.env.NODE_ENV === 'development'
-            ? { target: 'pino-pretty', options: { colorize: true, singleLine: false } }
-            : undefined,
-        // Attach X-Request-ID from our middleware to every log line
-        customProps: (req: IncomingMessage) => ({
-          requestId: (req.headers['x-request-id'] as string | undefined) ?? '',
-        }),
-        redact: [
-          'req.headers.authorization',
-          'req.body.password',
-          'req.body.currentPassword',
-          'req.body.newPassword',
-          'req.body.confirmPassword',
-          'req.body.refreshToken',
-          'req.body.token',        // password-reset JWT contains nonce
-          'req.body.accessTokenJti',
-        ],
-      },
+      pinoHttp: createPinoHttpOptions(),
     }),
 
     // ── Prisma (Global) ────────────────────────────────────────
@@ -199,6 +177,7 @@ import { AuditService } from './modules/audit/audit.service';
     { provide: APP_GUARD, useClass: RBACGuard },
 
     // ── Global Interceptors (order matters) ───────────────────
+    { provide: APP_INTERCEPTOR, useClass: SentryInterceptor },
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: TenantInterceptor },
     { provide: APP_INTERCEPTOR, useClass: GlobalAuditInterceptor },

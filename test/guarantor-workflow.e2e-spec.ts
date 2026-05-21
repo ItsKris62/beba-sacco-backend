@@ -234,3 +234,7 @@ describe('Guarantor workflow phases 1-3', () => {
     expect(new Decimal(after?.lockedBalance.toString() ?? '0').equals(lockedBefore)).toBe(true);
   });
 });
+
+function expect(status: any) {
+  throw new Error('Function not implemented.');
+}

@@ -1,0 +1,42 @@
+alerts:
+  - name: "SACCO: High Error Rate"
+    condition: "sum(error_count) > 10 over 5m"
+    actions:
+      - type: slack
+        channel: "#sacco-alerts"
+      - type: pagerduty
+        service: "beba-sacco-production"
+    tags:
+      - key: "sacco.tenant_id"
+        operator: "exists"
+
+  - name: "SACCO: Upload Integrity Failures"
+    condition: "count_if(message =~ /FILE_INTEGRITY_CHECK_FAILED/) > 3 over 10m"
+    actions:
+      - type: slack
+        channel: "#sacco-security"
+      - type: email
+        recipients:
+          - "security@beba.test"
+    tags:
+      - key: "sacco.operation"
+        value: "documents.verifyChecksum"
+
+  - name: "SACCO: Audit Immutability Violations"
+    condition: "count_if(message =~ /AUDIT_IMMUTABLE/) > 0 over 1m"
+    actions:
+      - type: pagerduty
+        service: "beba-sacco-critical"
+        priority: "P1"
+    tags:
+      - key: "environment"
+        value: "production"
+
+  - name: "SACCO: KYC Approval Failures"
+    condition: "count_if(message =~ /MEMBER.KYC_UPDATE|MEMBER.KYC_APPROVE/) > 5 over 10m"
+    actions:
+      - type: slack
+        channel: "#sacco-uat"
+    tags:
+      - key: "sacco.operation"
+        operator: "exists"

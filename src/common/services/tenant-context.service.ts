@@ -13,6 +13,10 @@ import { AsyncLocalStorage } from 'async_hooks';
 export interface TenantContextStore {
   tenantId: string;
   tenantSlug?: string;
+  userId?: string;
+  role?: string;
+  rlsEnabled?: boolean;
+  bypassRls?: boolean;
 }
 
 export const tenantAsyncStorage = new AsyncLocalStorage<TenantContextStore | undefined>();

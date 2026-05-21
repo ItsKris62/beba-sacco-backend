@@ -1,10 +1,15 @@
-import {
-  Injectable, Logger, NotFoundException, BadRequestException,
-} from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { AccountType, DocumentStatus, DocumentType, KycStatus, LoanStatus, UserRole } from '@prisma/client';
+import {
+  AccountType,
+  DocumentStatus,
+  DocumentType,
+  KycStatus,
+  LoanStatus,
+  UserRole,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
@@ -12,6 +17,9 @@ import { QUEUE_NAMES, type EmailJobPayload } from '../queue/queue.constants';
 import { UpdateKycDto } from './dto/update-kyc.dto';
 import { ReviewMemberDto, ReviewAction } from './dto/review-member.dto';
 import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
+import { FeatureFlags } from '../../config/feature-flags';
+import { resolveKycStatus, toBusinessStatus } from '../members/member.types';
+import { recordSaccoMetric } from '../../common/sentry/sacco-tracing';
 
 const STATS_CACHE_TTL = 60; // 60 seconds
 const REQUIRED_KYC_DOCUMENT_TYPES: DocumentType[] = [
@@ -53,8 +61,11 @@ export class AdminService {
     const cacheKey = `admin:stats:${tenantId}`;
     const cached = await this.redis.get(cacheKey);
     if (cached) {
-      try { return JSON.parse(cached) as ReturnType<typeof this.computeDashboardStats>; }
-      catch { /* fallthrough to fresh query */ }
+      try {
+        return JSON.parse(cached) as ReturnType<typeof this.computeDashboardStats>;
+      } catch {
+        /* fallthrough to fresh query */
+      }
     }
 
     const stats = await this.computeDashboardStats(tenantId);
@@ -73,10 +84,7 @@ export class AdminService {
    * Paginated transaction list scoped to a tenant.
    * SUPER_ADMIN may pass tenantId = undefined to query across all tenants.
    */
-  async getTransactions(
-    tenantId: string | undefined,
-    query: GetTransactionsQueryDto,
-  ) {
+  async getTransactions(tenantId: string | undefined, query: GetTransactionsQueryDto) {
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 20));
     const skip = (page - 1) * limit;
@@ -163,7 +171,13 @@ export class AdminService {
       this.prisma.loan.count({
         where: {
           tenantId,
-          status: { in: [LoanStatus.PENDING_APPROVAL, LoanStatus.PENDING_GUARANTORS, LoanStatus.PENDING_REVIEW] },
+          status: {
+            in: [
+              LoanStatus.PENDING_APPROVAL,
+              LoanStatus.PENDING_GUARANTORS,
+              LoanStatus.PENDING_REVIEW,
+            ],
+          },
         },
       }),
       this.prisma.loan.count({ where: { tenantId, status: LoanStatus.DEFAULTED } }),
@@ -184,8 +198,7 @@ export class AdminService {
       new Decimal(0),
     );
 
-    const defaultRate =
-      totalLoans > 0 ? ((defaultedLoans / totalLoans) * 100).toFixed(2) : '0.00';
+    const defaultRate = totalLoans > 0 ? ((defaultedLoans / totalLoans) * 100).toFixed(2) : '0.00';
 
     return {
       members: {
@@ -368,9 +381,7 @@ export class AdminService {
       },
     });
     if (!member) {
-      throw new NotFoundException(
-        'Pending member not found — may already have been reviewed',
-      );
+      throw new NotFoundException('Pending member not found — may already have been reviewed');
     }
 
     if (dto.action === ReviewAction.APPROVE) {
@@ -426,7 +437,11 @@ export class AdminService {
           memberNumber: member.memberNumber,
         } satisfies EmailJobPayload)
         .catch((e: unknown) => this.logger.error('Email enqueue failed (non-fatal)', e));
-
+      recordSaccoMetric('sacco.kyc.approved', 1, {
+        tenantId,
+        memberId,
+        flow: 'reviewMember',
+      });
     } else {
       if (!dto.reason?.trim()) {
         throw new BadRequestException('A rejection reason is required');
@@ -456,10 +471,7 @@ export class AdminService {
       .create({
         tenantId,
         userId: actor.id,
-        action:
-          dto.action === ReviewAction.APPROVE
-            ? 'MEMBER.KYC_APPROVE'
-            : 'MEMBER.KYC_REJECT',
+        action: dto.action === ReviewAction.APPROVE ? 'MEMBER.KYC_APPROVE' : 'MEMBER.KYC_REJECT',
         resource: 'Member',
         resourceId: memberId,
         metadata: {
@@ -486,6 +498,14 @@ export class AdminService {
     updatedBy: string,
     ipAddress?: string,
   ) {
+    const aliasStatus = this.resolveRequestedKycStatus(tenantId, dto);
+    const effectiveVerified =
+      aliasStatus === KycStatus.APPROVED
+        ? true
+        : aliasStatus === KycStatus.REJECTED
+          ? false
+          : dto.verified;
+
     const member = await this.prisma.member.findFirst({
       where: { id: memberId, tenantId },
       select: { id: true, userId: true },
@@ -494,23 +514,29 @@ export class AdminService {
 
     // Snapshot before state for audit
     const before = await this.prisma.member.findFirst({
-      where: { id: memberId },
-      select: { nationalId: true, kraPin: true, employer: true, occupation: true, dateOfBirth: true },
+      where: { id: memberId, tenantId },
+      select: {
+        nationalId: true,
+        kraPin: true,
+        employer: true,
+        occupation: true,
+        dateOfBirth: true,
+      },
     });
 
-    if (dto.verified === true) {
+    if (effectiveVerified === true) {
       if (!dto.documentIds?.length) {
         throw new BadRequestException('Approved KYC document IDs are required for approval');
       }
       await this.assertApprovedKycDocuments(tenantId, memberId, dto.documentIds);
       this.assertKycChecklistComplete(dto.checklist);
     }
-    if (dto.verified === false && !dto.notes?.trim()) {
+    if (effectiveVerified === false && !dto.notes?.trim()) {
       throw new BadRequestException('Reviewer notes are required when rejecting KYC');
     }
 
     const updatedMember = await this.prisma.$transaction(async (tx) => {
-      const reviewedAt = dto.verified === undefined ? undefined : new Date();
+      const reviewedAt = effectiveVerified === undefined && !aliasStatus ? undefined : new Date();
       const memberUpdate = await tx.member.update({
         where: { id: memberId },
         data: {
@@ -521,31 +547,40 @@ export class AdminService {
           ...(dto.dateOfBirth !== undefined && { dateOfBirth: new Date(dto.dateOfBirth) }),
           ...(dto.checklist !== undefined && { kycChecklist: dto.checklist }),
           ...(dto.notes !== undefined && { kycReviewNotes: dto.notes.trim() }),
-          ...(dto.verified === true && {
+          ...(effectiveVerified === true && {
             kycStatus: KycStatus.APPROVED,
             kycReviewedAt: reviewedAt,
             kycReviewedByUserId: updatedBy,
             kycRejectionReason: null,
           }),
-          ...(dto.verified === false && {
+          ...(effectiveVerified === false && {
             kycStatus: KycStatus.REJECTED,
             kycReviewedAt: reviewedAt,
             kycReviewedByUserId: updatedBy,
             kycRejectionReason: dto.notes?.trim(),
           }),
+          ...(aliasStatus &&
+            effectiveVerified === undefined && {
+              kycStatus: aliasStatus,
+              kycReviewedAt: reviewedAt,
+              kycReviewedByUserId: updatedBy,
+              kycRejectionReason: null,
+            }),
         },
         include: {
           user: { select: { firstName: true, lastName: true, email: true } },
         },
       });
 
-      if (dto.verified === true) {
+      if (effectiveVerified === true) {
         const existingAccounts = await tx.account.findMany({
           where: { tenantId, memberId, accountType: { in: [AccountType.FOSA, AccountType.BOSA] } },
           select: { accountType: true },
         });
         const existingTypes = new Set(existingAccounts.map((account) => account.accountType));
-        const missingTypes = [AccountType.FOSA, AccountType.BOSA].filter((type) => !existingTypes.has(type));
+        const missingTypes = [AccountType.FOSA, AccountType.BOSA].filter(
+          (type) => !existingTypes.has(type),
+        );
 
         if (missingTypes.length > 0) {
           const counter = await tx.tenantCounter.upsert({
@@ -555,16 +590,18 @@ export class AdminService {
             select: { accountSeq: true },
           });
           const firstSeq = counter.accountSeq - missingTypes.length + 1;
-          await Promise.all(missingTypes.map((accountType, index) =>
-            tx.account.create({
-              data: {
-                tenantId,
-                memberId,
-                accountNumber: `ACC-${accountType}-${String(firstSeq + index).padStart(6, '0')}`,
-                accountType,
-              },
-            }),
-          ));
+          await Promise.all(
+            missingTypes.map((accountType, index) =>
+              tx.account.create({
+                data: {
+                  tenantId,
+                  memberId,
+                  accountNumber: `ACC-${accountType}-${String(firstSeq + index).padStart(6, '0')}`,
+                  accountType,
+                },
+              }),
+            ),
+          );
         }
       }
 
@@ -579,24 +616,68 @@ export class AdminService {
       });
     }
 
-    await this.audit.create({
-      tenantId,
-      userId: updatedBy,
-      action: 'MEMBER.KYC_UPDATE',
-      resource: 'Member',
-      resourceId: memberId,
-      metadata: {
-        before,
-        after: {
-          ...dto,
-          documentIds: dto.documentIds?.map((id) => ({ id })),
+    await this.audit
+      .create({
+        tenantId,
+        userId: updatedBy,
+        action: 'MEMBER.KYC_UPDATE',
+        resource: 'Member',
+        resourceId: memberId,
+        metadata: {
+          before,
+          after: {
+            ...dto,
+            documentIds: dto.documentIds?.map((id) => ({ id })),
+          },
+          kycDecision:
+            dto.verified === undefined ? 'PROFILE_UPDATE' : dto.verified ? 'APPROVED' : 'REJECTED',
+          kycStatusAliasEnabled: FeatureFlags.isEnabled('KYC_STATUS_ALIAS', tenantId),
+          requestedStatus: dto.statusAlias ?? dto.status,
         },
-        kycDecision: dto.verified === undefined ? 'PROFILE_UPDATE' : dto.verified ? 'APPROVED' : 'REJECTED',
-      },
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+        ipAddress,
+      })
+      .catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-    return updatedMember;
+    if (effectiveVerified === true) {
+      recordSaccoMetric('sacco.kyc.approved', 1, {
+        tenantId,
+        memberId,
+        flow: 'updateKyc',
+      });
+    }
+
+    return this.withBusinessKycStatus(updatedMember, tenantId);
+  }
+
+  private resolveRequestedKycStatus(tenantId: string, dto: UpdateKycDto): KycStatus | undefined {
+    if (!FeatureFlags.isEnabled('KYC_STATUS_ALIAS', tenantId)) {
+      return undefined;
+    }
+
+    const requested = dto.statusAlias ?? dto.status;
+    if (!requested) return undefined;
+
+    try {
+      return resolveKycStatus(requested);
+    } catch (error) {
+      throw new BadRequestException(
+        error instanceof Error ? error.message : 'Unsupported KYC status',
+      );
+    }
+  }
+
+  private withBusinessKycStatus<T extends { kycStatus?: KycStatus | string }>(
+    member: T,
+    tenantId: string,
+  ): T {
+    if (!FeatureFlags.isEnabled('KYC_STATUS_ALIAS', tenantId) || !member.kycStatus) {
+      return member;
+    }
+
+    return {
+      ...member,
+      kycStatus: toBusinessStatus(member.kycStatus),
+    };
   }
 
   private assertKycChecklistComplete(checklist?: Record<string, boolean>): void {
@@ -634,7 +715,10 @@ export class AdminService {
     }
   }
 
-  private async assertMemberHasApprovedKycDocuments(tenantId: string, memberId: string): Promise<void> {
+  private async assertMemberHasApprovedKycDocuments(
+    tenantId: string,
+    memberId: string,
+  ): Promise<void> {
     const documents = await this.prisma.document.findMany({
       where: {
         tenantId,
@@ -648,7 +732,9 @@ export class AdminService {
     const approvedTypes = new Set(documents.map((document) => document.type));
     const missing = REQUIRED_KYC_DOCUMENT_TYPES.filter((type) => !approvedTypes.has(type));
     if (missing.length > 0) {
-      throw new BadRequestException(`Cannot approve KYC until required documents are approved: ${missing.join(', ')}`);
+      throw new BadRequestException(
+        `Cannot approve KYC until required documents are approved: ${missing.join(', ')}`,
+      );
     }
   }
 }

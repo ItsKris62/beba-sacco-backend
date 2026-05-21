@@ -154,6 +154,13 @@ export class TestAppFactory {
         return true;
       },
       del: async (key: string) => { store.delete(key); },
+      consumeIfValue: async (key: string, expectedValue: string) => {
+        const value = store.get(key);
+        if (value === undefined) return 'missing';
+        if (value !== expectedValue) return 'mismatch';
+        store.delete(key);
+        return 'consumed';
+      },
       exists: async (key: string) => store.has(key),
       delPattern: async (pattern: string) => {
         const keys = [...store.keys()].filter((key) => matches(pattern, key));

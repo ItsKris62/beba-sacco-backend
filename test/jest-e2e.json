@@ -11,9 +11,9 @@
     "^@modules/(.*)$": "<rootDir>/../src/modules/$1",
     "^@prisma/client$": "<rootDir>/../node_modules/@prisma/client",
     "^@prisma/client/(.*)$": "<rootDir>/../node_modules/@prisma/client/$1",
+    "^@prisma/instrumentation$": "<rootDir>/../node_modules/@prisma/instrumentation/dist/index.js",
     "^@prisma/(.*)$": "<rootDir>/../src/prisma/$1"
   },
   "setupFilesAfterEnv": ["<rootDir>/helpers/test-setup.ts"],
   "testTimeout": 60000
 }
-

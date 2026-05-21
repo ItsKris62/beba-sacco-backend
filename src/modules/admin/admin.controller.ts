@@ -17,11 +17,13 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
+import { ApiErrorExamples } from '../../common/swagger/error-response-examples';
 
 @ApiTags('Admin')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+@ApiHeader({ name: 'X-Correlation-ID', required: false, description: 'Optional request tracing ID' })
 @Controller('admin')
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
@@ -127,8 +129,11 @@ export class AdminController {
     description: 'Review recorded',
     schema: { example: { success: true, action: 'APPROVE' } },
   })
-  @ApiResponse({ status: 400, description: 'Rejection reason missing' })
-  @ApiResponse({ status: 404, description: 'Pending member not found or already reviewed' })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.badUploadRequest })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 404, ...ApiErrorExamples.notFound })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
   reviewMember(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ReviewMemberDto,
@@ -151,7 +156,11 @@ export class AdminController {
       'approves or rejects KYC using approved documentIds, notes, and a boolean checklist. Approval creates missing FOSA/BOSA accounts.',
   })
   @ApiResponse({ status: 200, description: 'KYC updated' })
-  @ApiResponse({ status: 404, description: 'Member not found' })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.badUploadRequest })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 404, ...ApiErrorExamples.notFound })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
   updateKyc(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateKycDto,

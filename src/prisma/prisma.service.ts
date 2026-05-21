@@ -6,7 +6,7 @@ import {
   INestApplication,
 } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
-import { applyPrismaTenantExtension } from './prisma-tenant.extension';
+import { applyPrismaTenantExtension, TENANT_SCOPED_MODELS } from './prisma-tenant.extension';
 
 /**
  * Prisma Service - Database Connection Manager
@@ -123,6 +123,34 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   async resetToPublicSchema(): Promise<void> {
     await this.$executeRawUnsafe('SET search_path TO public');
     this.logger.debug('Reset to public schema');
+  }
+
+  /**
+   * Create an explicitly tenant-scoped Prisma extension for jobs or utilities
+   * that run outside the HTTP AsyncLocalStorage request context.
+   */
+  forContext(tenantId: string, options: { bypassRls?: boolean } = {}) {
+    return this.$extends({
+      name: 'explicit-tenant-context',
+      query: {
+        $allModels: {
+          async $allOperations({ model, args, query }) {
+            const scopedArgs = args as { where?: Record<string, unknown>; data?: unknown };
+            if (
+              !options.bypassRls &&
+              model &&
+              (TENANT_SCOPED_MODELS as readonly string[]).includes(model)
+            ) {
+              scopedArgs.where = {
+                ...(scopedArgs.where ?? {}),
+                tenantId,
+              };
+            }
+            return query(scopedArgs);
+          },
+        },
+      },
+    });
   }
 
   /**

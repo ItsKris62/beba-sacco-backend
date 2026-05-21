@@ -28,12 +28,14 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { DocumentsService } from './documents.service';
-import { ReviewDocumentDto } from './dto/document.dto';
+import { AdminConfirmDocumentUploadByIdDto, ReviewDocumentDto } from './dto/document.dto';
+import { ApiErrorExamples } from '../../common/swagger/error-response-examples';
 
 @ApiTags('KYC Documents')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+@ApiHeader({ name: 'X-Correlation-ID', required: false, description: 'Optional request tracing ID' })
 @Controller('admin/kyc/documents')
 export class AdminDocumentsController {
   constructor(private readonly documents: DocumentsService) {}
@@ -42,7 +44,8 @@ export class AdminDocumentsController {
   @Roles(UserRole.MEMBER)
   @ApiOperation({
     summary: 'List tenant-scoped KYC documents',
-    description: 'Service-level permissions allow TENANT_ADMIN, MANAGER, CHAIRMAN, LOAN_OFFICER, and AUDITOR to view.',
+    description:
+      'Service-level permissions allow TENANT_ADMIN, MANAGER, CHAIRMAN, LOAN_OFFICER, and AUDITOR to view.',
   })
   @ApiQuery({ name: 'status', required: false, enum: DocumentStatus })
   @ApiQuery({ name: 'memberId', required: false, type: String })
@@ -74,7 +77,8 @@ export class AdminDocumentsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Approve or reject a KYC document (synchronous)',
-    description: 'Only MANAGER and CHAIRMAN may approve or reject, enforced inside the service as exact-role policy.',
+    description:
+      'Only MANAGER and CHAIRMAN may approve or reject, enforced inside the service as exact-role policy.',
   })
   @ApiResponse({ status: 200, description: 'Document review recorded' })
   reviewDocument(
@@ -92,7 +96,8 @@ export class AdminDocumentsController {
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Enqueue async KYC document review (recommended)',
-    description: 'Enqueues the approve/reject action to BullMQ. Returns 202 with jobId immediately. ' +
+    description:
+      'Enqueues the approve/reject action to BullMQ. Returns 202 with jobId immediately. ' +
       'The worker updates member KYC status, auto-provisions accounts on full approval, and sends email.',
   })
   @ApiResponse({ status: 202, description: 'Review job enqueued' })
@@ -107,6 +112,16 @@ export class AdminDocumentsController {
   @Post('upload-url')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @ApiOperation({ summary: 'Request upload URL for a member document' })
+  @ApiResponse({
+    status: 201,
+    description: 'Pre-signed upload URL. uploadToken is present only in secure mode.',
+  })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.badUploadRequest })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 413, ...ApiErrorExamples.payloadTooLarge })
+  @ApiResponse({ status: 429, ...ApiErrorExamples.rateLimited })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
   requestUploadUrl(
     @Body() dto: import('./dto/document.dto').AdminRequestDocumentUploadUrlDto,
     @CurrentTenant() tenant: Tenant,
@@ -119,6 +134,13 @@ export class AdminDocumentsController {
   @Post('confirm-upload')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @ApiOperation({ summary: 'Confirm upload for a member document' })
+  @ApiResponse({ status: 201, description: 'Upload confirmed' })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.checksumFailed })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 404, ...ApiErrorExamples.notFound })
+  @ApiResponse({ status: 409, ...ApiErrorExamples.uploadTokenConflict })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
   confirmUpload(
     @Body() dto: import('./dto/document.dto').AdminConfirmDocumentUploadDto,
     @CurrentTenant() tenant: Tenant,
@@ -126,5 +148,25 @@ export class AdminDocumentsController {
     @Req() req: Request,
   ) {
     return this.documents.confirmAdminUpload(tenant.id, actor, dto, req.ip);
+  }
+
+  @Post(':id/confirm')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Confirm upload for a member document by document ID' })
+  @ApiResponse({ status: 201, description: 'Upload confirmed' })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.checksumFailed })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 404, ...ApiErrorExamples.notFound })
+  @ApiResponse({ status: 409, ...ApiErrorExamples.uploadTokenConflict })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
+  confirmUploadById(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AdminConfirmDocumentUploadByIdDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.documents.confirmAdminUpload(tenant.id, actor, { ...dto, documentId: id }, req.ip);
   }
 }

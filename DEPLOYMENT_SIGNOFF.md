@@ -204,6 +204,7 @@ LOW      │            │ R-03, R-06    │ R-08        │
 | Deliverable | File Path | Status |
 |-------------|-----------|--------|
 | Compliance checklist | `backend/docs/compliance-checklist.md` | ✅ Complete |
+| Rollback runbook | `backend/docs/ROLLBACK.md` | Complete |
 | SASRA/ODPC/CBK validator service | `backend/src/modules/compliance/kenya-compliance-validator.service.ts` | ✅ Complete |
 | Monitoring setup (Sentry + Slack) | `backend/src/monitoring/monitoring-setup.ts` | ✅ Complete |
 | Environment verification script | `backend/scripts/render-env-verify.sh` | ✅ Complete |

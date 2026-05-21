@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -8,15 +9,12 @@ import {
 import { InjectQueue } from '@nestjs/bullmq';
 import { Cron } from '@nestjs/schedule';
 import { Queue } from 'bullmq';
+import { createHash, randomBytes } from 'crypto';
+import * as Sentry from '@sentry/nestjs';
 import { v4 as uuidv4 } from 'uuid';
-import {
-  AccountType,
-  DocumentStatus,
-  DocumentType,
-  KycStatus,
-  UserRole,
-} from '@prisma/client';
+import { AccountType, DocumentStatus, DocumentType, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FeatureFlags } from '../../config/feature-flags';
 import { AuditService } from '../audit/audit.service';
 import { StorageService } from '../storage/storage.service';
 import {
@@ -28,9 +26,10 @@ import {
 } from './dto/document.dto';
 import { DOCUMENT_ORPHAN_CLEANUP_JOB, QUEUE_NAMES } from '../queue/queue.constants';
 import type { KycReviewJobPayload } from '../kyc/kyc-review.processor';
+import { recordSaccoMetric, withSaccoSpan } from '../../common/sentry/sacco-tracing';
 
-const UPLOAD_URL_TTL_SECONDS = 3600;
-const UPLOAD_TTL_MS = UPLOAD_URL_TTL_SECONDS * 1000;
+const LEGACY_UPLOAD_URL_TTL_SECONDS = 3600;
+const SECURE_UPLOAD_URL_TTL_SECONDS = 900;
 
 const REQUIRED_KYC_DOCUMENT_TYPES: DocumentType[] = [
   DocumentType.NATIONAL_ID_FRONT,
@@ -39,12 +38,7 @@ const REQUIRED_KYC_DOCUMENT_TYPES: DocumentType[] = [
   DocumentType.MEMBER_FORM,
 ];
 
-const ALLOWED_MIME_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'application/pdf',
-]);
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
 
 const REVIEW_ROLES = new Set<UserRole>([UserRole.MANAGER, UserRole.CHAIRMAN]);
 const VIEW_ROLES = new Set<UserRole>([
@@ -72,13 +66,19 @@ export class DocumentsService {
   @Cron('*/15 * * * *')
   async enqueueOrphanCleanup(): Promise<void> {
     await this.cleanupQueue
-      .add(DOCUMENT_ORPHAN_CLEANUP_JOB, { queuedAt: new Date().toISOString() }, {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 2000 },
-        removeOnComplete: 100,
-      })
+      .add(
+        DOCUMENT_ORPHAN_CLEANUP_JOB,
+        { queuedAt: new Date().toISOString() },
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 2000 },
+          removeOnComplete: 100,
+        },
+      )
       .catch((err: unknown) =>
-        this.logger.warn(`Document cleanup enqueue failed: ${err instanceof Error ? err.message : String(err)}`),
+        this.logger.warn(
+          `Document cleanup enqueue failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
       );
   }
 
@@ -91,10 +91,12 @@ export class DocumentsService {
     this.assertUploadPayload(dto);
     const member = await this.resolveMemberForUser(tenantId, userId);
 
+    const uploadTtlSeconds = this.uploadUrlTtlSeconds(tenantId);
     const version = await this.nextDocumentVersion(tenantId, member.id, dto.type);
     const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType);
-    const expiresAt = new Date(Date.now() + UPLOAD_TTL_MS);
+    const expiresAt = new Date(Date.now() + uploadTtlSeconds * 1000);
     const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
+    const secureUpload = this.secureUploadTokenFields(tenantId, expiresAt);
 
     const document = await this.prisma.document.create({
       data: {
@@ -102,7 +104,9 @@ export class DocumentsService {
         memberId: member.id,
         uploadedById: userId,
         objectKey,
-        originalFileName: this.cleanFileName(dto.originalFileName ?? `${dto.type.toLowerCase()}.${this.extensionFor(dto.mimeType)}`),
+        originalFileName: this.cleanFileName(
+          dto.originalFileName ?? `${dto.type.toLowerCase()}.${this.extensionFor(dto.mimeType)}`,
+        ),
         mimeType: dto.mimeType,
         sizeBytes: declaredSizeBytes,
         checksum: dto.checksum ?? null,
@@ -110,6 +114,8 @@ export class DocumentsService {
         status: DocumentStatus.PENDING_UPLOAD,
         version,
         expiresAt,
+        ...this.odpcComplianceFields(member),
+        ...secureUpload.data,
       },
       select: { id: true, objectKey: true },
     });
@@ -124,12 +130,21 @@ export class DocumentsService {
       });
     }
 
-    const signed = await this.storage.getUploadUrlForKey({
-      objectKey,
-      contentType: dto.mimeType,
-      expiresIn: UPLOAD_URL_TTL_SECONDS,
-    });
-
+    const signed = await this.withSentrySpan(
+      'documents.generateUploadUrl',
+      'storage.s3.presign',
+      {
+        tenantId,
+        docType: dto.type,
+        secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
+      },
+      () =>
+        this.storage.getUploadUrlForKey({
+          objectKey,
+          contentType: dto.mimeType,
+          expiresIn: uploadTtlSeconds,
+        }),
+    );
     await this.auditSafe({
       tenantId,
       userId,
@@ -143,8 +158,15 @@ export class DocumentsService {
         mimeType: dto.mimeType,
         declaredSizeBytes,
         expiresAt: expiresAt.toISOString(),
+        secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
       },
       ipAddress,
+    });
+
+    this.incrementSentryMetric('document.upload_intent.created', {
+      docType: dto.type,
+      tenantId,
+      secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
     });
 
     return {
@@ -154,6 +176,7 @@ export class DocumentsService {
       objectKey: signed.objectKey,
       expiresIn: signed.expiresIn,
       maxBytes: MAX_DOCUMENT_UPLOAD_BYTES,
+      ...(secureUpload.uploadToken && { uploadToken: secureUpload.uploadToken }),
     };
   }
 
@@ -164,6 +187,17 @@ export class DocumentsService {
     ipAddress?: string,
   ) {
     const member = await this.resolveMemberForUser(tenantId, userId);
+    if (FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId)) {
+      return this.confirmSecureUpload({
+        tenantId,
+        memberId: member.id,
+        actorId: userId,
+        dto,
+        actorScope: 'MEMBER',
+        ipAddress,
+      });
+    }
+
     const document = await this.prisma.document.findFirst({
       where: {
         id: dto.documentId,
@@ -179,14 +213,23 @@ export class DocumentsService {
     }
 
     this.assertObjectKeyOwnership(document.objectKey, tenantId, member.id);
-    const metadata = await this.storage.headFile(document.objectKey).catch((err: unknown) => {
-      this.logger.warn(`HEAD failed for ${document.objectKey}: ${err instanceof Error ? err.message : String(err)}`);
+    const metadata = await this.withSentrySpan(
+      'documents.confirmUpload.headObject',
+      'storage.s3.head',
+      { tenantId, docType: document.type },
+      () => this.storage.headFile(document.objectKey),
+    ).catch((err: unknown) => {
+      this.logger.warn(
+        `HEAD failed for ${document.objectKey}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       throw new BadRequestException('Uploaded object was not found in storage');
     });
 
     const storedMimeType = this.normalizeMimeType(metadata.contentType);
     if (storedMimeType !== document.mimeType) {
-      throw new BadRequestException(`Uploaded MIME type mismatch. Expected ${document.mimeType}, got ${storedMimeType ?? 'unknown'}`);
+      throw new BadRequestException(
+        `Uploaded MIME type mismatch. Expected ${document.mimeType}, got ${storedMimeType ?? 'unknown'}`,
+      );
     }
     if (metadata.contentLength < 1) {
       throw new BadRequestException('Uploaded document is empty');
@@ -199,16 +242,22 @@ export class DocumentsService {
     // Verify stored size doesn't exceed declared size by more than 5%
     await this.storage.validateUploadedSize(document.objectKey, document.sizeBytes);
 
-    const updated = await this.prisma.document.update({
-      where: { id: document.id },
-      data: {
-        status: DocumentStatus.PENDING_REVIEW,
-        sizeBytes: metadata.contentLength,
-        checksum: dto.checksum ?? document.checksum,
-        expiresAt: null,
-      },
-      include: { member: { select: { id: true, kycStatus: true } } },
-    });
+    const updated = await this.withSentrySpan(
+      'documents.confirmUpload.persist',
+      'db.prisma',
+      { tenantId, docType: document.type },
+      () =>
+        this.prisma.document.update({
+          where: { id: document.id },
+          data: {
+            status: DocumentStatus.PENDING_REVIEW,
+            sizeBytes: metadata.contentLength,
+            checksum: dto.checksum ?? document.checksum,
+            expiresAt: null,
+          },
+          include: { member: { select: { id: true, kycStatus: true } } },
+        }),
+    );
 
     await this.syncMemberReviewReadiness(tenantId, member.id);
 
@@ -228,6 +277,20 @@ export class DocumentsService {
       ipAddress,
     });
 
+    this.incrementSentryMetric('document.upload_confirmed', {
+      docType: document.type,
+      tenantId,
+      secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
+      virusScanQueued: FeatureFlags.isEnabled('VIRUS_SCAN', tenantId),
+    });
+    recordSaccoMetric('sacco.document.confirmed', 1, {
+      docType: document.type,
+      tenantId,
+      status: DocumentStatus.PENDING_REVIEW,
+      actorScope: 'MEMBER',
+      secureUploadV2: false,
+    });
+
     return this.serializeDocument(updated);
   }
 
@@ -239,17 +302,19 @@ export class DocumentsService {
   ): Promise<DocumentUploadUrlResponseDto> {
     this.assertCanView(actor.role); // Admins that can view can also upload on behalf of member
     this.assertUploadPayload(dto);
-    
+
     const member = await this.prisma.member.findFirst({
       where: { id: dto.memberId, tenantId },
-      select: { id: true, kycStatus: true },
+      select: { id: true, kycStatus: true, consentUpdatedAt: true },
     });
     if (!member) throw new NotFoundException('Member profile not found');
 
+    const uploadTtlSeconds = this.uploadUrlTtlSeconds(tenantId);
     const version = await this.nextDocumentVersion(tenantId, member.id, dto.type);
     const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType);
-    const expiresAt = new Date(Date.now() + UPLOAD_TTL_MS);
+    const expiresAt = new Date(Date.now() + uploadTtlSeconds * 1000);
     const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
+    const secureUpload = this.secureUploadTokenFields(tenantId, expiresAt);
 
     const document = await this.prisma.document.create({
       data: {
@@ -257,7 +322,9 @@ export class DocumentsService {
         memberId: member.id,
         uploadedById: actor.id,
         objectKey,
-        originalFileName: this.cleanFileName(dto.originalFileName ?? `${dto.type.toLowerCase()}.${this.extensionFor(dto.mimeType)}`),
+        originalFileName: this.cleanFileName(
+          dto.originalFileName ?? `${dto.type.toLowerCase()}.${this.extensionFor(dto.mimeType)}`,
+        ),
         mimeType: dto.mimeType,
         sizeBytes: declaredSizeBytes,
         checksum: dto.checksum ?? null,
@@ -265,6 +332,8 @@ export class DocumentsService {
         status: DocumentStatus.PENDING_UPLOAD,
         version,
         expiresAt,
+        ...this.odpcComplianceFields(member),
+        ...secureUpload.data,
       },
       select: { id: true, objectKey: true },
     });
@@ -279,12 +348,22 @@ export class DocumentsService {
       });
     }
 
-    const signed = await this.storage.getUploadUrlForKey({
-      objectKey,
-      contentType: dto.mimeType,
-      expiresIn: UPLOAD_URL_TTL_SECONDS,
-    });
-
+    const signed = await this.withSentrySpan(
+      'documents.generateAdminUploadUrl',
+      'storage.s3.presign',
+      {
+        tenantId,
+        docType: dto.type,
+        actorRole: actor.role,
+        secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
+      },
+      () =>
+        this.storage.getUploadUrlForKey({
+          objectKey,
+          contentType: dto.mimeType,
+          expiresIn: uploadTtlSeconds,
+        }),
+    );
     await this.auditSafe({
       tenantId,
       userId: actor.id,
@@ -299,8 +378,16 @@ export class DocumentsService {
         declaredSizeBytes,
         expiresAt: expiresAt.toISOString(),
         actorScope: 'ADMIN',
+        secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
       },
       ipAddress,
+    });
+
+    this.incrementSentryMetric('document.upload_intent.created', {
+      docType: dto.type,
+      tenantId,
+      actorScope: 'ADMIN',
+      secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
     });
 
     return {
@@ -310,6 +397,7 @@ export class DocumentsService {
       objectKey: signed.objectKey,
       expiresIn: signed.expiresIn,
       maxBytes: MAX_DOCUMENT_UPLOAD_BYTES,
+      ...(secureUpload.uploadToken && { uploadToken: secureUpload.uploadToken }),
     };
   }
 
@@ -326,6 +414,18 @@ export class DocumentsService {
     });
     if (!member) throw new NotFoundException('Member profile not found');
 
+    if (FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId)) {
+      return this.confirmSecureUpload({
+        tenantId,
+        memberId: member.id,
+        actorId: actor.id,
+        actorRole: actor.role,
+        dto,
+        actorScope: 'ADMIN',
+        ipAddress,
+      });
+    }
+
     const document = await this.prisma.document.findFirst({
       where: {
         id: dto.documentId,
@@ -341,14 +441,23 @@ export class DocumentsService {
     }
 
     this.assertObjectKeyOwnership(document.objectKey, tenantId, member.id);
-    const metadata = await this.storage.headFile(document.objectKey).catch((err: unknown) => {
-      this.logger.warn(`HEAD failed for ${document.objectKey}: ${err instanceof Error ? err.message : String(err)}`);
+    const metadata = await this.withSentrySpan(
+      'documents.confirmAdminUpload.headObject',
+      'storage.s3.head',
+      { tenantId, docType: document.type, actorRole: actor.role },
+      () => this.storage.headFile(document.objectKey),
+    ).catch((err: unknown) => {
+      this.logger.warn(
+        `HEAD failed for ${document.objectKey}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       throw new BadRequestException('Uploaded object was not found in storage');
     });
 
     const storedMimeType = this.normalizeMimeType(metadata.contentType);
     if (storedMimeType !== document.mimeType) {
-      throw new BadRequestException(`Uploaded MIME type mismatch. Expected ${document.mimeType}, got ${storedMimeType ?? 'unknown'}`);
+      throw new BadRequestException(
+        `Uploaded MIME type mismatch. Expected ${document.mimeType}, got ${storedMimeType ?? 'unknown'}`,
+      );
     }
     if (metadata.contentLength < 1) {
       throw new BadRequestException('Uploaded document is empty');
@@ -360,16 +469,22 @@ export class DocumentsService {
 
     await this.storage.validateUploadedSize(document.objectKey, document.sizeBytes);
 
-    const updated = await this.prisma.document.update({
-      where: { id: document.id },
-      data: {
-        status: DocumentStatus.PENDING_REVIEW,
-        sizeBytes: metadata.contentLength,
-        checksum: dto.checksum ?? document.checksum,
-        expiresAt: null,
-      },
-      include: { member: { select: { id: true, kycStatus: true } } },
-    });
+    const updated = await this.withSentrySpan(
+      'documents.confirmAdminUpload.persist',
+      'db.prisma',
+      { tenantId, docType: document.type, actorRole: actor.role },
+      () =>
+        this.prisma.document.update({
+          where: { id: document.id },
+          data: {
+            status: DocumentStatus.PENDING_REVIEW,
+            sizeBytes: metadata.contentLength,
+            checksum: dto.checksum ?? document.checksum,
+            expiresAt: null,
+          },
+          include: { member: { select: { id: true, kycStatus: true } } },
+        }),
+    );
 
     await this.syncMemberReviewReadiness(tenantId, member.id);
 
@@ -388,6 +503,21 @@ export class DocumentsService {
         actorScope: 'ADMIN',
       },
       ipAddress,
+    });
+
+    this.incrementSentryMetric('document.upload_confirmed', {
+      docType: document.type,
+      tenantId,
+      actorScope: 'ADMIN',
+      secureUploadV2: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId),
+      virusScanQueued: FeatureFlags.isEnabled('VIRUS_SCAN', tenantId),
+    });
+    recordSaccoMetric('sacco.document.confirmed', 1, {
+      docType: document.type,
+      tenantId,
+      status: DocumentStatus.PENDING_REVIEW,
+      actorScope: 'ADMIN',
+      secureUploadV2: false,
     });
 
     return this.serializeDocument(updated);
@@ -481,7 +611,12 @@ export class DocumentsService {
       action: 'DOCUMENT.DOWNLOAD',
       resource: 'Document',
       resourceId: document.id,
-      metadata: { memberId: document.memberId, actorScope: 'ADMIN', actorRole: actor.role, type: document.type },
+      metadata: {
+        memberId: document.memberId,
+        actorScope: 'ADMIN',
+        actorRole: actor.role,
+        type: document.type,
+      },
       ipAddress,
     });
     return { downloadUrl, expiresIn: 300 };
@@ -509,16 +644,23 @@ export class DocumentsService {
     if (!document) throw new NotFoundException('Pending review document not found');
 
     const reviewedAt = new Date();
-    const updated = await this.prisma.document.update({
-      where: { id: document.id },
-      data: {
-        status: dto.status,
-        reviewedById: actor.id,
-        reviewedAt,
-        rejectionReason: dto.status === DocumentStatus.REJECTED ? dto.rejectionReason?.trim() : null,
-      },
-      include: { member: { select: { id: true, kycStatus: true } } },
-    });
+    const updated = await this.withSentrySpan(
+      'kyc.reviewDocument.persist',
+      'db.prisma',
+      { tenantId, status: dto.status, actorRole: actor.role },
+      () =>
+        this.prisma.document.update({
+          where: { id: document.id },
+          data: {
+            status: dto.status,
+            reviewedById: actor.id,
+            reviewedAt,
+            rejectionReason:
+              dto.status === DocumentStatus.REJECTED ? dto.rejectionReason?.trim() : null,
+          },
+          include: { member: { select: { id: true, kycStatus: true } } },
+        }),
+    );
 
     await this.syncMemberKycDecision(tenantId, updated.memberId, updated.type, dto, actor.id);
 
@@ -536,6 +678,13 @@ export class DocumentsService {
         rejectionReason: dto.rejectionReason,
       },
       ipAddress,
+    });
+
+    this.incrementSentryMetric('document.reviewed', {
+      docType: updated.type,
+      tenantId,
+      status: dto.status,
+      actorRole: actor.role,
     });
 
     return this.serializeDocument(updated);
@@ -564,11 +713,29 @@ export class DocumentsService {
     const action: KycReviewJobPayload['action'] =
       dto.status === DocumentStatus.APPROVED ? 'APPROVED' : 'REJECTED';
 
-    const job = await this.kycReviewQueue.add(
-      'review',
-      { docId: documentId, reviewerId: actor.id, action, tenantId, rejectionReason: dto.rejectionReason },
-      { attempts: 5, backoff: { type: 'exponential', delay: 2000 }, removeOnComplete: 100 },
+    const job = await this.withSentrySpan(
+      'kyc.enqueueReview',
+      'queue.bullmq.add',
+      { tenantId, action, actorRole: actor.role },
+      () =>
+        this.kycReviewQueue.add(
+          'review',
+          {
+            docId: documentId,
+            reviewerId: actor.id,
+            action,
+            tenantId,
+            rejectionReason: dto.rejectionReason,
+          },
+          { attempts: 5, backoff: { type: 'exponential', delay: 2000 }, removeOnComplete: 100 },
+        ),
     );
+
+    this.incrementSentryMetric('kyc.review.queued', {
+      tenantId,
+      action,
+      actorRole: actor.role,
+    });
 
     return { status: 'QUEUED', jobId: job.id };
   }
@@ -585,9 +752,13 @@ export class DocumentsService {
 
     let deleted = 0;
     for (const document of expired) {
-      await this.storage.deleteFile(document.objectKey).catch((err: unknown) =>
-        this.logger.warn(`Storage delete failed for expired document ${document.id}: ${err instanceof Error ? err.message : String(err)}`),
-      );
+      await this.storage
+        .deleteFile(document.objectKey)
+        .catch((err: unknown) =>
+          this.logger.warn(
+            `Storage delete failed for expired document ${document.id}: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
       await this.prisma.document.update({
         where: { id: document.id },
         data: {
@@ -602,6 +773,196 @@ export class DocumentsService {
       this.logger.log(`Cleaned up ${deleted} expired document upload intents`);
     }
     return { deleted };
+  }
+
+  private async confirmSecureUpload(args: {
+    tenantId: string;
+    memberId: string;
+    actorId: string;
+    actorRole?: UserRole;
+    dto: ConfirmDocumentUploadDto;
+    actorScope: 'MEMBER' | 'ADMIN';
+    ipAddress?: string;
+  }) {
+    const { tenantId, memberId, actorId, actorRole, dto, actorScope, ipAddress } = args;
+
+    if (!dto.uploadToken) {
+      throw new BadRequestException('uploadToken is required when secure upload is enabled');
+    }
+    if (!dto.checksum) {
+      throw new BadRequestException('checksum is required when secure upload is enabled');
+    }
+
+    const document = await this.prisma.document.findFirst({
+      where: {
+        id: dto.documentId,
+        tenantId,
+        memberId,
+      },
+    });
+    if (!document) throw new NotFoundException('Pending upload document not found');
+    if (document.status !== DocumentStatus.PENDING_UPLOAD) {
+      this.logger.warn('Secure upload confirmation rejected: document is no longer pending upload');
+      throw new ConflictException('INVALID_UPLOAD_TOKEN');
+    }
+
+    this.assertObjectKeyOwnership(document.objectKey, tenantId, memberId);
+    const metadata = await this.withSentrySpan(
+      'documents.confirmSecureUpload.headObject',
+      'storage.s3.head',
+      { tenantId, docType: document.type, actorScope },
+      () => this.storage.headFile(document.objectKey),
+    ).catch((err: unknown) => {
+      this.logger.warn(
+        `HEAD failed for ${document.objectKey}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new BadRequestException('Uploaded object was not found in storage');
+    });
+
+    const storedMimeType = this.normalizeMimeType(metadata.contentType);
+    if (storedMimeType !== document.mimeType) {
+      throw new BadRequestException(
+        `Uploaded MIME type mismatch. Expected ${document.mimeType}, got ${storedMimeType ?? 'unknown'}`,
+      );
+    }
+    if (metadata.contentLength < 1) {
+      throw new BadRequestException('Uploaded document is empty');
+    }
+    if (metadata.contentLength > MAX_DOCUMENT_UPLOAD_BYTES) {
+      await this.storage.deleteFile(document.objectKey).catch(() => undefined);
+      throw new BadRequestException(`Uploaded document exceeds ${MAX_DOCUMENT_UPLOAD_BYTES} bytes`);
+    }
+
+    await this.storage.validateUploadedSize(document.objectKey, document.sizeBytes);
+
+    const confirmedAt = new Date();
+    const updatedCount = await this.withSentrySpan(
+      'documents.confirmSecureUpload.atomicUpdate',
+      'db.prisma',
+      { tenantId, docType: document.type, actorScope },
+      () =>
+        this.prisma.document.updateMany({
+          where: {
+            id: dto.documentId,
+            tenantId,
+            memberId,
+            status: DocumentStatus.PENDING_UPLOAD,
+            uploadToken: dto.uploadToken,
+            uploadTokenExpires: { gt: confirmedAt },
+            uploadConfirmed: false,
+          },
+          data: {
+            status: DocumentStatus.PENDING_REVIEW,
+            uploadConfirmed: true,
+            uploadToken: null,
+            uploadTokenExpires: null,
+            checksum: dto.checksum,
+            confirmedAt,
+            expiresAt: null,
+            sizeBytes: metadata.contentLength,
+          },
+        }),
+    );
+
+    if (updatedCount.count === 0) {
+      this.logger.warn('Secure upload confirmation rejected: invalid, expired, or used token');
+      throw new ConflictException('INVALID_UPLOAD_TOKEN');
+    }
+
+    const updated = await this.prisma.document.findUniqueOrThrow({
+      where: { id: dto.documentId },
+      include: { member: { select: { id: true, kycStatus: true } } },
+    });
+
+    await this.verifyChecksumServerSide(updated, dto.checksum);
+    await this.syncMemberReviewReadiness(tenantId, memberId);
+
+    await this.auditSafe({
+      tenantId,
+      userId: actorId,
+      action: 'DOCUMENT.CONFIRMED_SECURE',
+      resource: 'Document',
+      resourceId: document.id,
+      metadata: {
+        memberId,
+        type: document.type,
+        objectKey: document.objectKey,
+        sizeBytes: metadata.contentLength,
+        eTag: metadata.eTag,
+        actorScope,
+        actorRole,
+        checksumVerified: true,
+        tokenUsed: `${dto.uploadToken.slice(0, 8)}...`,
+      },
+      ipAddress,
+    });
+
+    this.incrementSentryMetric('document.upload_confirmed_secure', {
+      docType: document.type,
+      tenantId,
+      actorScope,
+      checksumVerified: true,
+    });
+    recordSaccoMetric('sacco.document.confirmed', 1, {
+      docType: document.type,
+      tenantId,
+      status: DocumentStatus.PENDING_REVIEW,
+      actorScope,
+      secureUploadV2: true,
+      checksumVerified: true,
+    });
+
+    return this.serializeDocument(updated);
+  }
+
+  private async verifyChecksumServerSide(
+    document: { id: string; objectKey: string; sizeBytes: number },
+    expectedChecksum: string,
+  ): Promise<void> {
+    await this.withSentrySpan(
+      'documents.verifyChecksum',
+      'file.integrity-check',
+      { documentId: document.id },
+      async () => {
+        const stream = await this.storage.getFileStream(document.objectKey);
+        const hash = createHash('sha256');
+        let bytesProcessed = 0;
+        const maxExpectedBytes = Math.ceil(document.sizeBytes * 1.1);
+
+        for await (const chunk of stream) {
+          hash.update(chunk);
+          bytesProcessed += chunk.length;
+
+          if (bytesProcessed > maxExpectedBytes || bytesProcessed > MAX_DOCUMENT_UPLOAD_BYTES) {
+            throw new BadRequestException('FILE_SIZE_MISMATCH');
+          }
+        }
+
+        const actualChecksum = hash.digest('hex');
+        if (actualChecksum !== expectedChecksum.toLowerCase()) {
+          await this.prisma.document.update({
+            where: { id: document.id },
+            data: {
+              status: DocumentStatus.QUARANTINE,
+              quarantineReason: 'CHECKSUM_MISMATCH',
+              flaggedAt: new Date(),
+            },
+          });
+
+          Sentry.captureMessage('Document checksum mismatch', {
+            level: 'warning',
+            extra: {
+              documentId: document.id,
+              expected: expectedChecksum,
+              actual: actualChecksum,
+              objectKey: document.objectKey,
+            },
+          });
+
+          throw new BadRequestException('FILE_INTEGRITY_CHECK_FAILED');
+        }
+      },
+    );
   }
 
   private async syncMemberReviewReadiness(tenantId: string, memberId: string): Promise<void> {
@@ -627,6 +988,71 @@ export class DocumentsService {
     }
   }
 
+  private uploadUrlTtlSeconds(tenantId: string): number {
+    return FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId)
+      ? SECURE_UPLOAD_URL_TTL_SECONDS
+      : LEGACY_UPLOAD_URL_TTL_SECONDS;
+  }
+
+  private secureUploadTokenFields(
+    tenantId: string,
+    expiresAt: Date,
+  ): {
+    uploadToken?: string;
+    data: { uploadToken?: string; uploadTokenExpires?: Date; uploadConfirmed?: boolean };
+  } {
+    if (!FeatureFlags.isEnabled('SECURE_UPLOAD_V2', tenantId)) return { data: {} };
+    const uploadToken = randomBytes(32).toString('hex');
+    return {
+      uploadToken,
+      data: {
+        uploadToken,
+        uploadTokenExpires: expiresAt,
+        uploadConfirmed: false,
+      },
+    };
+  }
+
+  private odpcComplianceFields(member: { consentUpdatedAt?: Date | null }): {
+    consentTimestamp: Date | null;
+    retentionUntil: Date;
+    dataClassification: string;
+  } {
+    const retentionUntil = new Date();
+    retentionUntil.setFullYear(retentionUntil.getFullYear() + 7);
+
+    return {
+      consentTimestamp: member.consentUpdatedAt ?? null,
+      retentionUntil,
+      dataClassification: 'SENSITIVE',
+    };
+  }
+
+  private incrementSentryMetric(name: string, tags: Record<string, unknown>): void {
+    recordSaccoMetric(name, 1, tags);
+  }
+
+  private async withSentrySpan<T>(
+    name: string,
+    op: string,
+    attributes: Record<string, string | number | boolean | undefined>,
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    return withSaccoSpan(
+      {
+        name,
+        op,
+        tenantId: typeof attributes.tenantId === 'string' ? attributes.tenantId : undefined,
+        metadata: attributes,
+      },
+      callback,
+    );
+  }
+
+  private captureSentryMessage(message: string, extra: Record<string, unknown>): void {
+    Sentry.captureMessage(message, { level: 'warning', extra });
+  }
+
   private async syncMemberKycDecision(
     tenantId: string,
     memberId: string,
@@ -634,7 +1060,10 @@ export class DocumentsService {
     dto: ReviewDocumentDto,
     reviewedById: string,
   ): Promise<void> {
-    if (dto.status === DocumentStatus.REJECTED && REQUIRED_KYC_DOCUMENT_TYPES.includes(reviewedType)) {
+    if (
+      dto.status === DocumentStatus.REJECTED &&
+      REQUIRED_KYC_DOCUMENT_TYPES.includes(reviewedType)
+    ) {
       await this.prisma.member.update({
         where: { id: memberId },
         data: {
@@ -676,7 +1105,9 @@ export class DocumentsService {
         select: { accountType: true },
       });
       const existingTypes = new Set(existingAccounts.map((account) => account.accountType));
-      const missingTypes = [AccountType.FOSA, AccountType.BOSA].filter((type) => !existingTypes.has(type));
+      const missingTypes = [AccountType.FOSA, AccountType.BOSA].filter(
+        (type) => !existingTypes.has(type),
+      );
       if (missingTypes.length === 0) return;
 
       const counter = await tx.tenantCounter.upsert({
@@ -733,13 +1164,17 @@ export class DocumentsService {
   private async resolveMemberForUser(tenantId: string, userId: string) {
     const member = await this.prisma.member.findFirst({
       where: { tenantId, userId },
-      select: { id: true, kycStatus: true },
+      select: { id: true, kycStatus: true, consentUpdatedAt: true },
     });
     if (!member) throw new NotFoundException('Member profile not found');
     return member;
   }
 
-  private async nextDocumentVersion(tenantId: string, memberId: string, type: DocumentType): Promise<number> {
+  private async nextDocumentVersion(
+    tenantId: string,
+    memberId: string,
+    type: DocumentType,
+  ): Promise<number> {
     const latest = await this.prisma.document.findFirst({
       where: { tenantId, memberId, type },
       orderBy: { version: 'desc' },
@@ -748,7 +1183,12 @@ export class DocumentsService {
     return (latest?.version ?? 0) + 1;
   }
 
-  private buildObjectKey(tenantId: string, memberId: string, type: DocumentType, mimeType: string): string {
+  private buildObjectKey(
+    tenantId: string,
+    memberId: string,
+    type: DocumentType,
+    mimeType: string,
+  ): string {
     return `tenants/${tenantId}/members/${memberId}/${type.toLowerCase()}_${Date.now()}_${uuidv4()}.${this.extensionFor(mimeType)}`;
   }
 
@@ -799,6 +1239,9 @@ export class DocumentsService {
     reviewedAt: Date | null;
     rejectionReason: string | null;
     expiresAt: Date | null;
+    consentTimestamp?: Date | null;
+    retentionUntil?: Date | null;
+    dataClassification?: string;
     createdAt: Date;
     updatedAt: Date;
   }) {
@@ -816,6 +1259,9 @@ export class DocumentsService {
       reviewedAt: document.reviewedAt,
       rejectionReason: document.rejectionReason,
       expiresAt: document.expiresAt,
+      consentTimestamp: document.consentTimestamp ?? null,
+      retentionUntil: document.retentionUntil ?? null,
+      dataClassification: document.dataClassification ?? 'PERSONAL',
       createdAt: document.createdAt,
       updatedAt: document.updatedAt,
     };
@@ -830,8 +1276,10 @@ export class DocumentsService {
     metadata?: Record<string, unknown>;
     ipAddress?: string;
   }): Promise<void> {
-    await this.audit.create(args).catch((err: unknown) =>
-      this.logger.error('Document audit write failed', err instanceof Error ? err.stack : err),
-    );
+    await this.audit
+      .create(args)
+      .catch((err: unknown) =>
+        this.logger.error('Document audit write failed', err instanceof Error ? err.stack : err),
+      );
   }
 }

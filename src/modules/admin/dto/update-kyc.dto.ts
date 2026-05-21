@@ -1,5 +1,21 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsBoolean, IsDateString, IsObject, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsDateString,
+  IsIn,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  MaxLength,
+} from 'class-validator';
+import {
+  ACCEPTED_KYC_STATUS_VALUES,
+  BUSINESS_KYC_STATUS_VALUES,
+  type BusinessKycStatus,
+} from '../../members/member.types';
 
 export class UpdateKycDto {
   @ApiPropertyOptional({ description: 'National ID number', example: '12345678' })
@@ -53,11 +69,31 @@ export class UpdateKycDto {
   documentIds?: string[];
 
   @ApiPropertyOptional({
-    description: 'Final KYC decision. true approves, false rejects with notes, omitted updates profile fields only.',
+    description:
+      'Final KYC decision. true approves, false rejects with notes, omitted updates profile fields only.',
   })
   @IsOptional()
   @IsBoolean()
   verified?: boolean;
+
+  @ApiPropertyOptional({
+    enum: ACCEPTED_KYC_STATUS_VALUES,
+    description:
+      'Optional KYC status. When FEATURE_KYC_STATUS_ALIAS=true, accepts internal enums or business aliases.',
+  })
+  @IsOptional()
+  @IsString()
+  @IsIn(ACCEPTED_KYC_STATUS_VALUES)
+  status?: string;
+
+  @ApiPropertyOptional({
+    enum: BUSINESS_KYC_STATUS_VALUES,
+    description: 'Business-facing status alias, for example VERIFIED or UNDER_REVIEW.',
+  })
+  @IsOptional()
+  @IsString()
+  @IsIn(BUSINESS_KYC_STATUS_VALUES)
+  statusAlias?: BusinessKycStatus;
 
   @ApiPropertyOptional({ description: 'Reviewer notes or rejection reason', maxLength: 1000 })
   @IsOptional()
@@ -66,7 +102,8 @@ export class UpdateKycDto {
   notes?: string;
 
   @ApiPropertyOptional({
-    description: 'Boolean checklist of required KYC controls, for example idDocument, phoneVerified, memberFormSigned.',
+    description:
+      'Boolean checklist of required KYC controls, for example idDocument, phoneVerified, memberFormSigned.',
     example: { idDocument: true, phoneVerified: true, memberFormSigned: true },
   })
   @IsOptional()

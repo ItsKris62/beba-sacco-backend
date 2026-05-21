@@ -1,0 +1,45 @@
+name: Pre-Deploy Database Backup
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+        required: true
+      backup_name:
+        type: string
+        required: false
+        default: pre-deploy-${{ github.run_id }}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Create Render Postgres export
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          DATABASE_ID: ${{ secrets.RENDER_POSTGRES_ID }}
+        run: |
+          bash ./scripts/backup-render-postgres.sh \
+            "$DATABASE_ID" \
+            --name "${{ github.event.inputs.backup_name }}"
+
+      - name: Notify Slack on failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -fsS -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"Database backup failed for ${{ github.event.inputs.environment }} deployment. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"

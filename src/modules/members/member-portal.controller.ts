@@ -1,10 +1,29 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query, ParseUUIDPipe,
-  BadRequestException, HttpCode, HttpStatus, Req, UseGuards, ForbiddenException, Res,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  Query,
+  ParseUUIDPipe,
+  BadRequestException,
+  HttpCode,
+  HttpStatus,
+  Req,
+  UseGuards,
+  ForbiddenException,
+  Res,
 } from '@nestjs/common';
 import {
-  ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
-  ApiResponse, ApiQuery, ApiHeader, ApiParam,
+  ApiTags,
+  ApiBearerAuth,
+  ApiSecurity,
+  ApiOperation,
+  ApiResponse,
+  ApiQuery,
+  ApiHeader,
+  ApiParam,
 } from '@nestjs/swagger';
 import { GuarantorStatus, LoanStatus, UserRole } from '@prisma/client';
 import { Decimal } from 'decimal.js';
@@ -33,6 +52,7 @@ import {
   DocumentUploadUrlResponseDto,
   RequestDocumentUploadUrlDto,
 } from '../documents/dto/document.dto';
+import { ApiErrorExamples } from '../../common/swagger/error-response-examples';
 
 /**
  * Member Portal Controller
@@ -45,7 +65,8 @@ import {
 @ApiTags('Member Portal')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
-@ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+  @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+  @ApiHeader({ name: 'X-Correlation-ID', required: false, description: 'Optional request tracing ID' })
 @Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER)
 @Controller('members')
 export class MemberPortalController {
@@ -99,7 +120,8 @@ export class MemberPortalController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Member personal dashboard',
-    description: 'Returns balances, active loans, and pending deposits for the authenticated member.',
+    description:
+      'Returns balances, active loans, and pending deposits for the authenticated member.',
   })
   @ApiResponse({ status: 200, description: 'Dashboard data', type: MemberDashboardDto })
   @ApiResponse({ status: 206, description: 'Partial dashboard data', type: MemberDashboardDto })
@@ -124,9 +146,20 @@ export class MemberPortalController {
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Request a pre-signed KYC document upload URL',
-    description: 'Creates a tenant-scoped Document upload intent and returns a short-lived R2/MinIO PUT URL.',
+    description:
+      'Creates a tenant-scoped Document upload intent and returns a short-lived R2/MinIO PUT URL.',
   })
-  @ApiResponse({ status: 201, description: 'Pre-signed upload URL', type: DocumentUploadUrlResponseDto })
+  @ApiResponse({
+    status: 201,
+    description: 'Pre-signed upload URL. uploadToken is present only in secure mode.',
+    type: DocumentUploadUrlResponseDto,
+  })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.badUploadRequest })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 413, ...ApiErrorExamples.payloadTooLarge })
+  @ApiResponse({ status: 429, ...ApiErrorExamples.rateLimited })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
   requestDocumentUploadUrl(
     @Body() dto: RequestDocumentUploadUrlDto,
     @CurrentUser() user: AuthenticatedUser,
@@ -140,9 +173,16 @@ export class MemberPortalController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Confirm a direct-to-storage KYC document upload',
-    description: 'HEAD-checks the uploaded object, validates tenant/member key ownership, and moves the document to PENDING_REVIEW.',
+    description:
+      'HEAD-checks the uploaded object, validates tenant/member key ownership, and moves the document to PENDING_REVIEW.',
   })
   @ApiResponse({ status: 200, description: 'Upload confirmed' })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.checksumFailed })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 404, ...ApiErrorExamples.notFound })
+  @ApiResponse({ status: 409, ...ApiErrorExamples.uploadTokenConflict })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
   confirmDocumentUpload(
     @Body() dto: ConfirmDocumentUploadDto,
     @CurrentUser() user: AuthenticatedUser,
@@ -159,6 +199,12 @@ export class MemberPortalController {
     description: 'Compatibility route for clients that pass the document ID in the path.',
   })
   @ApiResponse({ status: 200, description: 'Upload confirmed' })
+  @ApiResponse({ status: 400, ...ApiErrorExamples.checksumFailed })
+  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
+  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
+  @ApiResponse({ status: 404, ...ApiErrorExamples.notFound })
+  @ApiResponse({ status: 409, ...ApiErrorExamples.uploadTokenConflict })
+  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
   confirmDocumentUploadById(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: Partial<ConfirmDocumentUploadDto> | undefined,
@@ -169,7 +215,7 @@ export class MemberPortalController {
     return this.documents.confirmMemberUpload(
       tenant.id,
       user.id,
-      { documentId: id, checksum: dto?.checksum },
+      { documentId: id, checksum: dto?.checksum, uploadToken: dto?.uploadToken },
       req.ip,
     );
   }
@@ -178,10 +224,7 @@ export class MemberPortalController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'List my KYC documents' })
   @ApiResponse({ status: 200, description: 'Authenticated member documents' })
-  listMyDocuments(
-    @CurrentUser() user: AuthenticatedUser,
-    @CurrentTenant() tenant: Tenant,
-  ) {
+  listMyDocuments(@CurrentUser() user: AuthenticatedUser, @CurrentTenant() tenant: Tenant) {
     return this.documents.listMemberDocuments(tenant.id, user.id);
   }
 
@@ -245,7 +288,10 @@ export class MemberPortalController {
   @ApiResponse({ status: 201, description: 'Loan application created (DRAFT)' })
   @ApiResponse({ status: 400, description: 'Validation error or product constraint violated' })
   @ApiResponse({ status: 409, description: 'Idempotency key already in use (duplicate request)' })
-  @ApiResponse({ status: 422, description: 'Eligibility not met: KYC pending, deposit limit, or defaulted loan' })
+  @ApiResponse({
+    status: 422,
+    description: 'Eligibility not met: KYC pending, deposit limit, or defaulted loan',
+  })
   async applyLoan(
     @Body() dto: MemberApplyLoanDto,
     @CurrentUser() user: AuthenticatedUser,
@@ -340,7 +386,10 @@ export class MemberPortalController {
   })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
   @ApiResponse({ status: 200, description: 'Guarantor requests created' })
-  @ApiResponse({ status: 400, description: 'Loan status is not eligible or no guarantors were supplied' })
+  @ApiResponse({
+    status: 400,
+    description: 'Loan status is not eligible or no guarantors were supplied',
+  })
   @ApiResponse({ status: 403, description: 'Loan does not belong to authenticated member' })
   async requestGuarantors(
     @Param('id', ParseUUIDPipe) loanId: string,
@@ -374,7 +423,9 @@ export class MemberPortalController {
     });
     if (!loan) throw new ForbiddenException('Loan not found or does not belong to you');
     if (loan.status !== LoanStatus.DRAFT && loan.status !== LoanStatus.PENDING_GUARANTORS) {
-      throw new BadRequestException(`Cannot request guarantors for a loan in "${loan.status}" status`);
+      throw new BadRequestException(
+        `Cannot request guarantors for a loan in "${loan.status}" status`,
+      );
     }
 
     const requestedGuarantors = dto.guarantors?.length
@@ -386,9 +437,14 @@ export class MemberPortalController {
     }
 
     const activeCount = loan.guarantors.filter(
-      (guarantor) => guarantor.status === GuarantorStatus.PENDING || guarantor.status === GuarantorStatus.ACCEPTED,
+      (guarantor) =>
+        guarantor.status === GuarantorStatus.PENDING ||
+        guarantor.status === GuarantorStatus.ACCEPTED,
     ).length;
-    if (loan.loanProduct.maxGuarantors > 0 && activeCount + requestedGuarantors.length > loan.loanProduct.maxGuarantors) {
+    if (
+      loan.loanProduct.maxGuarantors > 0 &&
+      activeCount + requestedGuarantors.length > loan.loanProduct.maxGuarantors
+    ) {
       throw new BadRequestException(
         `This product allows at most ${loan.loanProduct.maxGuarantors} guarantor(s).`,
       );
@@ -396,12 +452,20 @@ export class MemberPortalController {
 
     const activeExisting = new Set(
       loan.guarantors
-        .filter((guarantor) => guarantor.status === GuarantorStatus.PENDING || guarantor.status === GuarantorStatus.ACCEPTED)
+        .filter(
+          (guarantor) =>
+            guarantor.status === GuarantorStatus.PENDING ||
+            guarantor.status === GuarantorStatus.ACCEPTED,
+        )
         .map((guarantor) => guarantor.memberId),
     );
-    const duplicate = requestedGuarantors.find((guarantor) => activeExisting.has(guarantor.memberId));
+    const duplicate = requestedGuarantors.find((guarantor) =>
+      activeExisting.has(guarantor.memberId),
+    );
     if (duplicate) {
-      throw new BadRequestException('This member has already been requested or has already accepted.');
+      throw new BadRequestException(
+        'This member has already been requested or has already accepted.',
+      );
     }
 
     return this.loanApp.inviteGuarantors(loanId, requestedGuarantors, tenant.id, user.id, req);
@@ -422,12 +486,20 @@ export class MemberPortalController {
     const coverageRatio = new Decimal(String(loan.loanProduct.guarantorCoverageRatio ?? '1'));
     const requiredCoverage = principal.times(coverageRatio);
     const activeCoverage = loan.guarantors
-      .filter((guarantor) => guarantor.status === GuarantorStatus.PENDING || guarantor.status === GuarantorStatus.ACCEPTED)
-      .reduce((sum, guarantor) => sum.plus(new Decimal(String(guarantor.guaranteedAmount))), new Decimal(0));
+      .filter(
+        (guarantor) =>
+          guarantor.status === GuarantorStatus.PENDING ||
+          guarantor.status === GuarantorStatus.ACCEPTED,
+      )
+      .reduce(
+        (sum, guarantor) => sum.plus(new Decimal(String(guarantor.guaranteedAmount))),
+        new Decimal(0),
+      );
     const remainingCoverage = Decimal.max(requiredCoverage.minus(activeCoverage), 0);
-    const fallbackShare = loan.loanProduct.minGuarantors > 0
-      ? requiredCoverage.div(loan.loanProduct.minGuarantors)
-      : principal.div(uniqueIds.length);
+    const fallbackShare =
+      loan.loanProduct.minGuarantors > 0
+        ? requiredCoverage.div(loan.loanProduct.minGuarantors)
+        : principal.div(uniqueIds.length);
     const amountToSplit = remainingCoverage.greaterThan(0)
       ? remainingCoverage
       : fallbackShare.times(uniqueIds.length);
@@ -435,9 +507,13 @@ export class MemberPortalController {
 
     return uniqueIds.map((memberId, index) => ({
       memberId,
-      guaranteedAmount: index === uniqueIds.length - 1
-        ? amountToSplit.minus(equalShare.times(uniqueIds.length - 1)).toDecimalPlaces(4).toNumber()
-        : equalShare.toNumber(),
+      guaranteedAmount:
+        index === uniqueIds.length - 1
+          ? amountToSplit
+              .minus(equalShare.times(uniqueIds.length - 1))
+              .toDecimalPlaces(4)
+              .toNumber()
+          : equalShare.toNumber(),
     }));
   }
 
@@ -445,7 +521,7 @@ export class MemberPortalController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Deposit via M-Pesa STK Push',
-    description: 'Triggers an STK Push to the member\'s phone. Processed asynchronously via BullMQ.',
+    description: "Triggers an STK Push to the member's phone. Processed asynchronously via BullMQ.",
   })
   @ApiResponse({ status: 200, description: 'STK Push initiated' })
   async depositMpesa(

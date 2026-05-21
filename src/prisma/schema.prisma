@@ -304,6 +304,7 @@ enum DocumentStatus {
   PENDING_REVIEW
   APPROVED
   REJECTED
+  QUARANTINE
   DELETED
 
   @@schema("public")
@@ -480,6 +481,7 @@ model AuditLog {
   timestamp DateTime @default(now())
 
   @@index([tenantId])
+  @@index([tenantId, entityType, action])
   @@index([actorId])
   @@index([action])
   @@index([entityType])
@@ -622,10 +624,26 @@ model Document {
   rejectionReason String?   @db.Text
   expiresAt       DateTime?
 
+  // Phase 1A secure upload fields. Nullable/defaulted for backward compatibility.
+  uploadToken        String?   @unique @db.VarChar(64)
+  uploadTokenExpires DateTime? @db.Timestamptz(6)
+  uploadConfirmed    Boolean   @default(false)
+  confirmedAt        DateTime? @db.Timestamptz(6)
+  quarantineReason   String?   @db.Text
+  flaggedAt          DateTime? @db.Timestamptz(6)
+
+  // Phase 2 ODPC compliance metadata. Nullable/defaulted for backward compatibility.
+  consentTimestamp   DateTime? @map("consent_timestamp") @db.Timestamptz(6)
+  retentionUntil     DateTime? @map("retention_until") @db.Timestamptz(6)
+  dataClassification String    @default("PERSONAL") @map("data_classification") @db.VarChar(20)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([tenantId, objectKey])
+  @@index([uploadToken, uploadTokenExpires, status])
+  @@index([retentionUntil])
+  @@index([dataClassification, tenantId])
   @@index([tenantId, memberId, status])
   @@index([tenantId, memberId, type, status])
   @@index([status, expiresAt])
