@@ -9,6 +9,8 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { JwtBlocklistService } from '../jwt-blocklist.service';
 import { SessionService } from '../session.service';
+import { OtpService } from '../otp.service';
+import { SmsService } from '../../sms/sms.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 
 // ─────────────────────────── Mocks ───────────────────────────
@@ -24,6 +26,12 @@ const mockPrismaService = {
   refreshSession: {
     updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     findFirst: jest.fn().mockResolvedValue(null),
+  },
+  failedLoginAttempt: {
+    upsert: jest.fn().mockResolvedValue({ attempts: 1 }),
+  },
+  blockedIP: {
+    upsert: jest.fn().mockResolvedValue({}),
   },
   tenant: {
     findUnique: jest.fn().mockResolvedValue({ name: 'Test SACCO' }),
@@ -79,6 +87,16 @@ const mockEmailQueue = {
   add: jest.fn().mockResolvedValue(undefined),
 };
 
+const mockOtpService = {
+  generate: jest.fn().mockResolvedValue('123456'),
+  validate: jest.fn().mockResolvedValue(true),
+  delete: jest.fn().mockResolvedValue(undefined),
+};
+
+const mockSmsService = {
+  enqueueSms: jest.fn().mockResolvedValue(undefined),
+};
+
 // ─────────────────────────── Test Suite ───────────────────────────
 
 describe('AuthService', () => {
@@ -109,6 +127,8 @@ describe('AuthService', () => {
         { provide: JwtBlocklistService, useValue: mockJwtBlocklistService },
         { provide: SessionService, useValue: mockSessionService },
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
+        { provide: OtpService, useValue: mockOtpService },
+        { provide: SmsService, useValue: mockSmsService },
       ],
     }).compile();
 

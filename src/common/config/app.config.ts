@@ -101,6 +101,13 @@ export default registerAs('app', () => ({
     fromName: process.env.PLUNK_FROM_NAME || 'Beba SACCO',
   },
 
+  // Africa's Talking SMS
+  africasTalking: {
+    username: process.env.AFRICAS_TALKING_USERNAME,
+    apiKey: process.env.AFRICAS_TALKING_API_KEY,
+    senderId: process.env.AFRICAS_TALKING_SENDER_ID,
+  },
+
   // Security
   cors: {
     origin: process.env.CORS_ORIGIN?.split(',') || ['http://localhost:3001'],

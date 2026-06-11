@@ -188,6 +188,19 @@ export const validationSchema = Joi.object({
   MINIO_SECRET_KEY: Joi.string().optional(),
   BACKUP_RETENTION_DAYS: Joi.number().integer().min(1).default(30),
 
+  // ── Africa's Talking SMS ───────────────────────────────────────────────────
+  AFRICAS_TALKING_USERNAME: Joi.string().when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  AFRICAS_TALKING_API_KEY: Joi.string().when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  AFRICAS_TALKING_SENDER_ID: Joi.string().optional(),
+
   // ── BullMQ Worker Concurrency ──────────────────────────────────────────────
   BULLMQ_CONCURRENCY_ACCRUAL: Joi.number().integer().default(3),
   BULLMQ_CONCURRENCY_RECON: Joi.number().integer().default(2),

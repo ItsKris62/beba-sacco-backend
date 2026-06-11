@@ -23,8 +23,14 @@ import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { PasswordResetRequestDto } from './dto/password-reset-request.dto';
+import { PasswordResetVerifyDto } from './dto/password-reset-verify.dto';
 import type { JwtPayload } from './strategies/jwt.strategy';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
+import { OtpService } from './otp.service';
+import { SmsService } from '../sms/sms.service';
+import { AUDIT_ACTIONS } from '../audit/audit-actions';
+import { maskPhone } from '../mpesa/utils/mpesa.utils';
 
 /** JWT payload shape for password-reset tokens (separate from access tokens) */
 interface PasswordResetPayload {
@@ -90,6 +96,8 @@ export class AuthService {
     private readonly sessionService: SessionService,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
+    private readonly otpService: OtpService,
+    private readonly smsService: SmsService,
   ) {}
 
   private enqueueEmail(payload: EmailJobPayload, ctx: string): void {
@@ -804,6 +812,143 @@ export class AuthService {
     this.logger.log(`Password reset successful for ${user.email}`);
   }
 
+  // ─────────────────────────── SMS PASSWORD RESET ───────────────────────────
+
+  /**
+   * Initiate SMS-based password reset.
+   *
+   * Security design:
+   * - Always returns success to prevent user enumeration (mirrors email flow).
+   * - Resolves member via last 5 digits of User.phone OR User.phoneNumber (endsWith).
+   * - Stores a 6-digit OTP in Redis (30 min TTL, max 3 validation attempts).
+   * - Enqueues SMS delivery via BullMQ sms-queue.
+   */
+  async requestPasswordResetSms(
+    dto: PasswordResetRequestDto,
+    tenantId: string,
+    ipAddress?: string,
+  ): Promise<void> {
+    const user = await this.findMemberUserByLastFiveDigits(dto.lastFiveDigits, tenantId);
+    const resolvedPhone = user
+      ? this.resolveUserPhoneForSuffix(user, dto.lastFiveDigits)
+      : null;
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: user?.id,
+      action: AUDIT_ACTIONS.AUTH.PASSWORD_RESET_SMS_REQUESTED,
+      resource: 'User',
+      resourceId: user?.id,
+      metadata: {
+        lastFiveDigits: dto.lastFiveDigits,
+        found: !!user,
+        phone: resolvedPhone ? maskPhone(resolvedPhone) : undefined,
+      },
+      ipAddress,
+    });
+
+    if (!user || !resolvedPhone) {
+      return;
+    }
+
+    const otp = await this.otpService.generate(resolvedPhone);
+    const message =
+      `Your Beba SACCO password reset code is ${otp}. ` +
+      'Valid for 30 minutes. Do not share this code with anyone.';
+
+    await this.smsService.enqueueSms(
+      {
+        type: 'PASSWORD_RESET_OTP',
+        phone: resolvedPhone,
+        message,
+      },
+      `auth.password-reset-sms:${user.id}`,
+    );
+
+    this.logger.log(`Password reset SMS queued for ${maskPhone(resolvedPhone)}`);
+  }
+
+  /**
+   * Complete SMS-based password reset.
+   *
+   * Validates OTP, hashes new password with argon2id, updates User.passwordHash,
+   * clears OTP from Redis, invalidates sessions, and writes audit event.
+   */
+  async verifyPasswordResetSms(
+    dto: PasswordResetVerifyDto,
+    tenantId: string,
+    ipAddress?: string,
+  ): Promise<void> {
+    const user = await this.findMemberUserByLastFiveDigits(dto.lastFiveDigits, tenantId);
+    const resolvedPhone = user
+      ? this.resolveUserPhoneForSuffix(user, dto.lastFiveDigits)
+      : null;
+
+    if (!user || !resolvedPhone) {
+      await this.writeAuditSafe({
+        tenantId,
+        action: AUDIT_ACTIONS.AUTH.PASSWORD_RESET_SMS_FAILED,
+        resource: 'User',
+        metadata: { reason: 'user_not_found', lastFiveDigits: dto.lastFiveDigits },
+        ipAddress,
+      });
+      throw new BadRequestException('Invalid OTP or phone number');
+    }
+
+    try {
+      const otpValid = await this.otpService.validate(resolvedPhone, dto.otp);
+      if (!otpValid) {
+        throw new BadRequestException('Invalid OTP or phone number');
+      }
+    } catch (err: unknown) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: AUDIT_ACTIONS.AUTH.PASSWORD_RESET_SMS_FAILED,
+        resource: 'User',
+        resourceId: user.id,
+        metadata: {
+          reason: 'invalid_otp',
+          phone: maskPhone(resolvedPhone),
+        },
+        ipAddress,
+      });
+      throw err;
+    }
+
+    const newPasswordHash = await argon2.hash(dto.newPassword, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 1,
+    });
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash: newPasswordHash,
+        mustChangePassword: false,
+        refreshToken: null,
+        passwordResetToken: null,
+        passwordResetExpiry: null,
+      },
+    });
+
+    await this.otpService.delete(resolvedPhone);
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: user.id,
+      action: AUDIT_ACTIONS.AUTH.PASSWORD_RESET_SMS_COMPLETED,
+      resource: 'User',
+      resourceId: user.id,
+      metadata: { phone: maskPhone(resolvedPhone), email: user.email },
+      ipAddress,
+    });
+
+    this.logger.log(`SMS password reset successful for ${user.email}`);
+  }
+
   // ─────────────────────────── CHANGE PASSWORD ───────────────────────────
 
   /**
@@ -921,6 +1066,64 @@ export class AuthService {
   }
 
   // ─────────────────────────── PRIVATE HELPERS ───────────────────────────
+
+  /**
+   * Find an active MEMBER user by the last 5 digits of phone or phoneNumber.
+   * Returns null when zero or multiple matches are found (ambiguous lookup).
+   */
+  private async findMemberUserByLastFiveDigits(
+    lastFiveDigits: string,
+    tenantId: string,
+  ): Promise<{
+    id: string;
+    email: string;
+    phone: string | null;
+    phoneNumber: string | null;
+  } | null> {
+    const matches = await this.prisma.user.findMany({
+      where: {
+        tenantId,
+        role: UserRole.MEMBER,
+        isActive: true,
+        member: { is: { isActive: true } },
+        OR: [{ phone: { endsWith: lastFiveDigits } }, { phoneNumber: { endsWith: lastFiveDigits } }],
+      },
+      select: {
+        id: true,
+        email: true,
+        phone: true,
+        phoneNumber: true,
+      },
+    });
+
+    if (matches.length !== 1) {
+      return null;
+    }
+
+    return matches[0];
+  }
+
+  /**
+   * Resolve the phone field that matched the last-five suffix lookup.
+   * Mirrors login OR semantics: use phoneNumber if it endsWith, else phone.
+   */
+  private resolveUserPhoneForSuffix(
+    user: { phone: string | null; phoneNumber: string | null },
+    lastFiveDigits: string,
+  ): string | null {
+    if (user.phoneNumber?.endsWith(lastFiveDigits)) {
+      return this.formatPhoneForOtp(user.phoneNumber);
+    }
+    if (user.phone?.endsWith(lastFiveDigits)) {
+      return this.formatPhoneForOtp(user.phone);
+    }
+    return null;
+  }
+
+  private formatPhoneForOtp(phone: string): string {
+    const trimmed = phone.trim();
+    return trimmed.startsWith('+') ? trimmed : `+${trimmed}`;
+  }
 
   private generateTokens(user: { id: string; email: string; role: UserRole; tenantId: string }): {
     accessToken: string;

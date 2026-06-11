@@ -19,6 +19,7 @@ export const QUEUE_NAMES = {
   AUDIT_PERSIST_DLQ: 'audit.persist.dlq',
   LOAN_DISBURSE: 'loan.disburse',
   EMAIL: 'email',
+  SMS: 'sms-queue',
   // Phase 4 – Financial Operations
   INTEREST_ACCRUAL: 'financial.interest-accrual',
   REPAYMENT_SCHEDULE: 'financial.repayment-schedule',
@@ -243,6 +244,14 @@ export interface PasswordResetEmailPayload extends BaseEmailPayload {
   type: 'PASSWORD_RESET';
   resetUrl: string;
   expiresInMinutes: number;
+}
+
+// ─── SMS job payloads ─────────────────────────────────────────────────────────
+
+export interface SmsJobPayload {
+  type: 'PASSWORD_RESET_OTP';
+  phone: string;
+  message: string;
 }
 
 export interface MemberApprovedEmailPayload extends BaseEmailPayload {

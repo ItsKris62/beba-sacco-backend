@@ -59,6 +59,8 @@ class BullBoardService implements OnModuleInit {
     private readonly kycReviewDlq: Queue,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.SMS)
+    private readonly smsQueue: Queue,
     @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
     private readonly auditLogQueue: Queue,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK)
@@ -94,6 +96,7 @@ class BullBoardService implements OnModuleInit {
         new BullMQAdapter(this.kycReviewQueue),
         new BullMQAdapter(this.kycReviewDlq),
         new BullMQAdapter(this.emailQueue),
+        new BullMQAdapter(this.smsQueue),
         new BullMQAdapter(this.auditLogQueue),
         new BullMQAdapter(this.mpesaCallbackQueue),
         new BullMQAdapter(this.mpesaCallbackDlq),
@@ -123,6 +126,7 @@ class BullBoardService implements OnModuleInit {
       { name: QUEUE_NAMES.KYC_REVIEW },
       { name: QUEUE_NAMES.KYC_REVIEW_DLQ },
       { name: QUEUE_NAMES.EMAIL },
+      { name: QUEUE_NAMES.SMS },
       { name: QUEUE_NAMES.AUDIT_LOG },
       { name: QUEUE_NAMES.MPESA_CALLBACK },
       { name: QUEUE_NAMES.MPESA_CALLBACK_DLQ },

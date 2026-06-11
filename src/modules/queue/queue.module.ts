@@ -37,6 +37,8 @@ import { ReportsModule } from '../reports/reports.module';
 import { StorageModule } from '../storage/storage.module';
 import { GuarantorValidationService } from '../loans/guarantor-validation.service';
 import { AlertsService } from '../alerts/alerts.service';
+import { SmsModule } from '../sms/sms.module';
+import { SmsProcessor } from '../sms/sms.processor';
 
 export type QueueModuleMode = 'web' | 'worker';
 
@@ -53,6 +55,7 @@ export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   AuditQueueProcessor,
   LoanDisburseProcessor,
   EmailProcessor,
+  SmsProcessor,
   OutboundWebhookProcessor,
   ReportProcessor,
   MpesaRepaymentScheduler,
@@ -206,6 +209,7 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       { name: QUEUE_NAMES.AUDIT_PERSIST_DLQ },
       { name: QUEUE_NAMES.LOAN_DISBURSE },
       { name: QUEUE_NAMES.EMAIL },
+      { name: QUEUE_NAMES.SMS },
       // Phase 4
       { name: QUEUE_NAMES.INTEREST_ACCRUAL },
       { name: QUEUE_NAMES.REPAYMENT_SCHEDULE },
@@ -226,6 +230,7 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
     WebhooksModule,
     ReportsModule,
     StorageModule,
+    SmsModule,
   ],
   providers: [
     // PlunkService is @Global but QueueModule is loaded before CommonServicesModule

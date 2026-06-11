@@ -33,6 +33,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { PasswordResetRequestDto } from './dto/password-reset-request.dto';
+import { PasswordResetVerifyDto } from './dto/password-reset-verify.dto';
 import type { AuthenticatedUser, JwtPayload } from './strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
@@ -234,6 +236,59 @@ export class AuthController {
   ): Promise<{ success: boolean; data: AuthProfileDto; error: null }> {
     const data = await this.authService.getProfile(user.id, req.tenant.id);
     return { success: true, data, error: null };
+  }
+
+  // ─────────────────────────── SMS PASSWORD RESET ───────────────────────────
+
+  @Public()
+  @Post('password-reset/request')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ global: { limit: 3, ttl: 300_000 } })
+  @ApiOperation({
+    summary: 'Request SMS OTP for password reset',
+    description:
+      'Accepts the last 5 digits of the registered phone number. ' +
+      'If a matching active member exists, a 6-digit OTP is sent via SMS. ' +
+      'Always returns 200 to prevent user enumeration.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'If the phone suffix matches a member, an OTP has been sent via SMS.',
+  })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  async requestPasswordResetSms(
+    @Body() dto: PasswordResetRequestDto,
+    @Req() req: TenantRequest,
+  ): Promise<{ success: boolean; message: string }> {
+    await this.authService.requestPasswordResetSms(dto, req.tenant.id, req.ip);
+    return {
+      success: true,
+      message: 'If your phone number is registered, an OTP has been sent via SMS.',
+    };
+  }
+
+  @Public()
+  @Post('password-reset/verify')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ global: { limit: 5, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Verify SMS OTP and set a new password',
+    description:
+      'Validates the OTP against Redis, hashes the new password with argon2id, ' +
+      'updates the user record, clears the OTP, and invalidates existing sessions.',
+  })
+  @ApiResponse({ status: 200, description: 'Password reset successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid OTP, phone suffix, or password' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  async verifyPasswordResetSms(
+    @Body() dto: PasswordResetVerifyDto,
+    @Req() req: TenantRequest,
+  ): Promise<{ success: boolean; message: string }> {
+    await this.authService.verifyPasswordResetSms(dto, req.tenant.id, req.ip);
+    return {
+      success: true,
+      message: 'Password reset successfully. Please log in with your new password.',
+    };
   }
 
   // ─────────────────────────── CHANGE PASSWORD ───────────────────────────
