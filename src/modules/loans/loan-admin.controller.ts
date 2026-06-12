@@ -53,7 +53,7 @@ export class RecoverLoanDto {
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN)
+@Roles(UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN)
 @Controller('admin')
 export class LoanAdminController {
   constructor(
@@ -149,6 +149,7 @@ export class LoanAdminController {
   // ─── LOAN STATUS TRANSITION ──────────────────────────────────────────────────
 
   @Patch('loans/:id/status')
+  @Roles(UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Update loan application status',

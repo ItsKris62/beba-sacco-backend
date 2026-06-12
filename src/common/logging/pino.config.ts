@@ -11,7 +11,7 @@ export function createPinoHttpOptions() {
     level:
       process.env.NODE_ENV === 'test'
         ? 'silent'
-        : process.env.LOG_LEVEL ?? (process.env.NODE_ENV !== 'production' ? 'debug' : 'info'),
+        : process.env.LOG_LEVEL ?? (process.env.NODE_ENV !== 'production' ? 'debug' : 'warn'),
     transport:
       process.env.NODE_ENV === 'development'
         ? { target: 'pino-pretty', options: { colorize: true, singleLine: false } }

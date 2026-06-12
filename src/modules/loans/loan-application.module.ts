@@ -16,6 +16,7 @@ import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { ProductRuleService } from './product-rule.service';
 import { LoanStateTransitionGuard } from './guards/loan-state-transition.guard';
+import { SmsModule } from '../sms/sms.module';
 
 /**
  * Loan Application & LoanGuarantor Workflow Module (MVP)
@@ -35,6 +36,7 @@ import { LoanStateTransitionGuard } from './guards/loan-state-transition.guard';
   imports: [
     AuditModule,
     LoansModule,
+    SmsModule,
     BullModule.registerQueue(
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
       { name: QUEUE_NAMES.LOAN_GUARANTOR_EXPIRY },

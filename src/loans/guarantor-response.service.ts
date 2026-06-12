@@ -1,11 +1,12 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { AccountType, GuarantorStatus, KycStatus, LoanStatus, Prisma } from '@prisma/client';
+import { AccountType, GuarantorStatus, KycStatus, LoanStatus, Prisma, UserRole } from '@prisma/client';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { GuarantorValidationService } from '../modules/loans/guarantor-validation.service';
 import { IdempotencyService } from '../common/services/idempotency.service';
+import { SmsService } from '../modules/sms/sms.service';
 
 export type GuarantorWorkflowAction = 'ACCEPT' | 'DECLINE';
 
@@ -28,6 +29,7 @@ export class GuarantorResponseService {
     private readonly prisma: PrismaService,
     private readonly guarantorValidation: GuarantorValidationService,
     private readonly idempotency: IdempotencyService,
+    private readonly smsService: SmsService,
   ) {}
 
   async getPendingRequests(tenantId: string, guarantorMemberId: string) {
@@ -97,6 +99,9 @@ export class GuarantorResponseService {
         source: 'MEMBER',
         req,
       });
+      if (result.loanStatus === LoanStatus.PENDING_APPROVAL) {
+        void this.notifyLoanOfficers(args.tenantId, args.loanId);
+      }
       if (idemKey) await this.idempotency.complete(idemKey, tenantId, result, 72 * 60 * 60);
       return result;
     } catch (error) {
@@ -317,19 +322,19 @@ export class GuarantorResponseService {
     if (criteriaMet) {
       await tx.loan.updateMany({
         where: { id: loanId, tenantId, status: LoanStatus.PENDING_GUARANTORS },
-        data: { status: LoanStatus.PENDING_REVIEW },
+        data: { status: LoanStatus.PENDING_APPROVAL },
       });
       await this.writeAudit(tx, {
         tenantId,
         actorId,
-        action: 'LOAN.PENDING_REVIEW',
+        action: 'LOAN.PENDING_APPROVAL',
         entityType: 'Loan',
         entityId: loanId,
         oldValue: { status: loan.status },
-        newValue: { status: LoanStatus.PENDING_REVIEW },
+        newValue: { status: LoanStatus.PENDING_APPROVAL },
         payload: { acceptedCount: accepted.length, totalAccepted: totalAccepted.toString(), requiredCoverage: requiredCoverage.toString() },
       });
-      return LoanStatus.PENDING_REVIEW;
+      return LoanStatus.PENDING_APPROVAL;
     }
 
     return loan.status;
@@ -370,6 +375,37 @@ export class GuarantorResponseService {
 
   private resolveAccountType(product: { requiredAccountType: AccountType | null }): AccountType {
     return product.requiredAccountType ?? AccountType.FOSA;
+  }
+
+  private async notifyLoanOfficers(tenantId: string, loanId: string): Promise<void> {
+    const loan = await this.prisma.loan.findFirst({
+      where: { id: loanId, tenantId },
+      select: { loanNumber: true },
+    });
+    const officers = await this.prisma.user.findMany({
+      where: {
+        tenantId,
+        isActive: true,
+        role: { in: [UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN] },
+      },
+      select: { id: true, phone: true, phoneNumber: true },
+    });
+
+    await Promise.all(
+      officers
+        .map((officer) => ({ id: officer.id, phone: officer.phone ?? officer.phoneNumber }))
+        .filter((officer): officer is { id: string; phone: string } => Boolean(officer.phone))
+        .map((officer) =>
+          this.smsService.enqueueSms(
+            {
+              type: 'LOAN_PENDING_APPROVAL',
+              phone: officer.phone,
+              message: `Beba SACCO: Loan ${loan?.loanNumber ?? loanId} has all guarantor approvals and is pending review.`,
+            },
+            `loan.pendingApprovalSms:${loanId}:${officer.id}`,
+          ),
+        ),
+    );
   }
 
   private auditMetadata(req: Request | undefined, source: string): Prisma.InputJsonValue {

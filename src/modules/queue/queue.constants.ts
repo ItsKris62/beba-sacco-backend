@@ -249,7 +249,12 @@ export interface PasswordResetEmailPayload extends BaseEmailPayload {
 // ─── SMS job payloads ─────────────────────────────────────────────────────────
 
 export interface SmsJobPayload {
-  type: 'PASSWORD_RESET_OTP';
+  type:
+    | 'PASSWORD_RESET_OTP'
+    | 'GUARANTOR_INVITE'
+    | 'LOAN_APPROVED'
+    | 'LOAN_REJECTED'
+    | 'LOAN_PENDING_APPROVAL';
   phone: string;
   message: string;
 }

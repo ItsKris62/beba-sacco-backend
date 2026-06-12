@@ -196,3 +196,67 @@ export class AuditController {
     return report;
   }
 }
+
+@ApiTags('Admin Audit')
+@ApiBearerAuth()
+@ApiSecurity('X-Tenant-ID')
+@ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+@Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
+@Controller('admin/audit-logs')
+export class AdminAuditController {
+  constructor(private readonly auditService: AuditService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'List audit logs for admins',
+    description:
+      'Admin compatibility endpoint for paginated audit visibility. ' +
+      'Accessible only to SUPER_ADMIN and TENANT_ADMIN roles.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
+  @ApiQuery({ name: 'userId', required: false, type: String })
+  @ApiQuery({ name: 'action', required: false, type: String, example: 'LOAN.APPLY' })
+  @ApiQuery({ name: 'startDate', required: false, type: String, description: 'ISO date or datetime' })
+  @ApiQuery({ name: 'endDate', required: false, type: String, description: 'ISO date or datetime' })
+  @ApiResponse({ status: 200, description: 'Paginated audit log entries' })
+  findAdminAuditLogs(
+    @CurrentTenant() tenant: Tenant,
+    @Query('page') page = 1,
+    @Query('limit') limit = 50,
+    @Query('userId') userId?: string,
+    @Query('action') action?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ) {
+    const safePage = Math.max(1, Number(page));
+    const safeLimit = Math.min(200, Math.max(1, Number(limit)));
+    const offset = (safePage - 1) * safeLimit;
+
+    const fromDate = startDate ? new Date(startDate) : undefined;
+    const toDate = endDate ? new Date(endDate) : undefined;
+    if (toDate && endDate && !endDate.includes('T')) {
+      toDate.setHours(23, 59, 59, 999);
+    }
+
+    return this.auditService
+      .findAll({
+        tenantId: tenant.id,
+        actorId: userId,
+        action,
+        fromDate,
+        toDate,
+        limit: safeLimit,
+        offset,
+      })
+      .then((result) => ({
+        data: result.data,
+        meta: {
+          page: safePage,
+          limit: safeLimit,
+          total: result.total,
+          totalPages: Math.ceil(result.total / safeLimit),
+        },
+      }));
+  }
+}

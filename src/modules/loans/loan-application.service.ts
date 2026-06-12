@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
@@ -32,6 +33,7 @@ import { GuarantorConsentResponseDto, GuarantorConsentAction } from './dto/guara
 import { AdminLoanStatus } from './dto/update-loan-status.dto';
 import { GuarantorValidationService } from './guarantor-validation.service';
 import { ProductRuleService } from './product-rule.service';
+import { SmsService } from '../sms/sms.service';
 import {
   QUEUE_NAMES,
   GuarantorExpiryJobPayload,
@@ -127,6 +129,7 @@ export class LoanApplicationService {
     private readonly emailQueue: Queue<EmailJobPayload>,
     @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
     private readonly auditQueue: Queue<AuditLogJobPayload>,
+    private readonly smsService: SmsService,
   ) {}
 
   // ─── DOMAIN EVENT PUBLISHER ────────────────────────────────────────────────
@@ -704,7 +707,7 @@ export class LoanApplicationService {
 
         const guarantorMember = await this.prisma.member.findFirst({
           where: { id: guarantor.memberId, tenantId },
-          select: { user: { select: { email: true, firstName: true } } },
+          select: { user: { select: { email: true, firstName: true, phone: true, phoneNumber: true } } },
         });
 
         if (guarantorMember?.user?.email) {
@@ -721,6 +724,19 @@ export class LoanApplicationService {
             `loan.apply.guarantorInvite:${txResult.loan.id}:${guarantor.memberId}`,
           );
         }
+        const guarantorPhone = guarantorMember?.user?.phone ?? guarantorMember?.user?.phoneNumber;
+        if (guarantorPhone) {
+          void this.smsService.enqueueSms(
+            {
+              type: 'GUARANTOR_INVITE',
+              phone: guarantorPhone,
+              message:
+                `Beba SACCO: ${guarantor.borrowerName} requested you to guarantee loan ` +
+                `${guarantor.loanNumber} for KES ${guarantor.guaranteedAmount}. Log in to respond.`,
+            },
+            `loan.apply.guarantorSms:${txResult.loan.id}:${guarantor.memberId}`,
+          );
+        }
       }
 
       return txResult.loan;
@@ -735,7 +751,7 @@ export class LoanApplicationService {
       this.logger.error(
         `Loan application transaction failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      throw err;
+      throw new InternalServerErrorException('Loan application could not be completed. Please retry.');
     }
   }
 
@@ -911,7 +927,7 @@ export class LoanApplicationService {
 
   /**
    * Invite guarantors for a DRAFT loan.
-   * Creates GuarantorRequest records with status PENDING_CONSENT and 72h expiry.
+   * Creates LoanGuarantor rows with PENDING status and 72h expiry.
    */
   async inviteGuarantors(
     loanId: string,
@@ -987,7 +1003,7 @@ export class LoanApplicationService {
       const expiresAt = new Date(invitedAt);
       expiresAt.setHours(expiresAt.getHours() + consentExpiryHours);
 
-      // Upsert GuarantorRequest (idempotent re-invite)
+      // Upsert LoanGuarantor (idempotent re-invite)
       const createdGuarantor = await this.prisma.loanGuarantor.upsert({
         where: { loanId_memberId: { loanId, memberId: item.memberId } },
         create: {
@@ -1280,16 +1296,16 @@ export class LoanApplicationService {
             ) {
               await tx.loan.updateMany({
                 where: { id: loanId, tenantId },
-                data: { status: LoanStatus.PENDING_REVIEW },
+                data: { status: LoanStatus.PENDING_APPROVAL },
               });
               await this.createAuditLogInTransaction(tx, {
                 tenantId,
                 actorId: userId,
-                action: 'LOAN.AUTO_ADVANCE_PENDING_REVIEW',
+                action: 'LOAN.AUTO_ADVANCE_PENDING_APPROVAL',
                 entityType: 'Loan',
                 entityId: loanId,
                 oldValue: { status: loanForGuarantor.status },
-                newValue: { status: LoanStatus.PENDING_REVIEW },
+                newValue: { status: LoanStatus.PENDING_APPROVAL },
                 metadata: {
                   acceptedCount,
                   minGuarantors: loanForGuarantor.loanProduct.minGuarantors,
@@ -1441,10 +1457,10 @@ export class LoanApplicationService {
     ) {
       await this.prisma.loan.updateMany({
         where: { id: loanId, tenantId },
-        data: { status: LoanStatus.PENDING_REVIEW },
+        data: { status: LoanStatus.PENDING_APPROVAL },
       });
       this.logger.log(
-        `Loan ${loanId} advanced to PENDING_REVIEW — coverage ${totalAccepted.toNumber()} >= ${minCoverage.toNumber()}`,
+        `Loan ${loanId} advanced to PENDING_APPROVAL - coverage ${totalAccepted.toNumber()} >= ${minCoverage.toNumber()}`,
       );
     }
   }
@@ -1514,9 +1530,14 @@ export class LoanApplicationService {
     req: Request,
   ) {
     // Role check: only MANAGER+ can update loan status
-    const allowedRoles = new Set<string>([UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN]);
+    const allowedRoles = new Set<string>([
+      UserRole.LOAN_OFFICER,
+      UserRole.MANAGER,
+      UserRole.TENANT_ADMIN,
+      UserRole.SUPER_ADMIN,
+    ]);
     if (!allowedRoles.has(actor.role)) {
-      throw new ForbiddenException('Only managers and above can update loan status');
+      throw new ForbiddenException('Only loan officers and above can update loan status');
     }
 
     const loan = await this.prisma.loan.findFirst({
@@ -1526,7 +1547,7 @@ export class LoanApplicationService {
         status: true,
         loanNumber: true,
         memberId: true,
-        member: { select: { user: { select: { email: true, firstName: true } } } },
+        member: { select: { user: { select: { email: true, firstName: true, phone: true, phoneNumber: true } } } },
       },
     });
     if (!loan) throw new NotFoundException('Loan not found');
@@ -1551,7 +1572,12 @@ export class LoanApplicationService {
     // Validate state transitions (workflow-only — no financial operations)
     const validTransitions: Record<string, string[]> = {
       [LoanStatus.DRAFT]: [LoanStatus.PENDING_GUARANTORS, LoanStatus.REJECTED],
-      [LoanStatus.PENDING_GUARANTORS]: [LoanStatus.PENDING_REVIEW, LoanStatus.REJECTED, LoanStatus.REJECTED_GUARANTOR_DECLINE],
+      [LoanStatus.PENDING_GUARANTORS]: [
+        LoanStatus.PENDING_REVIEW,
+        LoanStatus.PENDING_APPROVAL,
+        LoanStatus.REJECTED,
+        LoanStatus.REJECTED_GUARANTOR_DECLINE,
+      ],
       [LoanStatus.PENDING_REVIEW]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
       [LoanStatus.PENDING_APPROVAL]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
       // APPROVED → DISBURSED is intentionally absent: handled by LoansService.disburse()
@@ -1595,19 +1621,20 @@ export class LoanApplicationService {
       })
       .catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-    // Domain event
-    await this.publishEvent({
-      type: dto.status === 'APPROVED' ? 'LoanApproved' : dto.status === 'REJECTED' ? 'LoanRejected' : 'LoanDisbursed',
-      payload: {
-        loanId,
-        tenantId,
-        oldStatus,
-        newStatus: dto.status,
-        actorId: actor.id,
-        reason: dto.reason,
-        correlationId,
-      },
-    });
+    if (targetStatus === LoanStatus.APPROVED || targetStatus === LoanStatus.REJECTED) {
+      await this.publishEvent({
+        type: targetStatus === LoanStatus.APPROVED ? 'LoanApproved' : 'LoanRejected',
+        payload: {
+          loanId,
+          tenantId,
+          oldStatus,
+          newStatus: dto.status,
+          actorId: actor.id,
+          reason: dto.reason,
+          correlationId,
+        },
+      });
+    }
 
     // Notify member
     if (loan.member?.user?.email) {
@@ -1629,6 +1656,23 @@ export class LoanApplicationService {
           `loan.statusChange:${loanId}`,
         );
       }
+    }
+    const applicantPhone = loan.member?.user?.phone ?? loan.member?.user?.phoneNumber;
+    if (
+      applicantPhone &&
+      (targetStatus === LoanStatus.APPROVED || targetStatus === LoanStatus.REJECTED)
+    ) {
+      void this.smsService.enqueueSms(
+        {
+          type: targetStatus === LoanStatus.APPROVED ? 'LOAN_APPROVED' : 'LOAN_REJECTED',
+          phone: applicantPhone,
+          message:
+            targetStatus === LoanStatus.APPROVED
+              ? `Beba SACCO: Loan ${loan.loanNumber} has been approved. You will be notified on disbursement.`
+              : `Beba SACCO: Loan ${loan.loanNumber} was rejected.${dto.reason ? ` Reason: ${dto.reason}` : ''}`,
+        },
+        `loan.statusSms:${loanId}:${targetStatus}`,
+      );
     }
 
     return updated;

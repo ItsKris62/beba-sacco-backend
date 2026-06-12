@@ -8,6 +8,19 @@ import {
 import { PrismaClient } from '@prisma/client';
 import { applyPrismaTenantExtension, TENANT_SCOPED_MODELS } from './prisma-tenant.extension';
 
+function withConnectionLimit(url: string | undefined, defaultLimit = '10'): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (!parsed.searchParams.has('connection_limit')) {
+      parsed.searchParams.set('connection_limit', process.env.PRISMA_CONNECTION_LIMIT ?? defaultLimit);
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Prisma Service - Database Connection Manager
  *
@@ -37,7 +50,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   }
 
   constructor() {
+    const databaseUrl = withConnectionLimit(process.env.DATABASE_URL);
     super({
+      ...(databaseUrl
+        ? { datasources: { db: { url: databaseUrl } } }
+        : {}),
       log:
         process.env.NODE_ENV === 'development'
           ? ['query', 'info', 'warn', 'error']
@@ -45,7 +62,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       errorFormat: 'pretty',
     });
 
-    const directUrl = process.env.DATABASE_DIRECT_URL ?? process.env.DIRECT_URL;
+    const directUrl = withConnectionLimit(process.env.DATABASE_DIRECT_URL ?? process.env.DIRECT_URL);
     if (directUrl) {
       const directBaseClient = new PrismaClient({
         datasources: { db: { url: directUrl } },

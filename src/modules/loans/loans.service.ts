@@ -1140,9 +1140,9 @@ export class LoansService {
     if (totalAccepted.greaterThanOrEqualTo(minCoverage)) {
       await this.prisma.loan.update({
         where: { id: loanId },
-        data: { status: LoanStatus.PENDING_REVIEW },
+        data: { status: LoanStatus.PENDING_APPROVAL },
       });
-      this.logger.log(`Loan ${loanId} advanced to PENDING_REVIEW — coverage ${totalAccepted.toNumber()} ≥ ${minCoverage.toNumber()}`);
+      this.logger.log(`Loan ${loanId} advanced to PENDING_APPROVAL - coverage ${totalAccepted.toNumber()} >= ${minCoverage.toNumber()}`);
     }
   }
 

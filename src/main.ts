@@ -194,6 +194,7 @@ async function bootstrap() {
   });
 
   // ── Prisma Graceful Shutdown ──────────────────────────────────
+  app.enableShutdownHooks();
   const prismaService = app.get(PrismaService);
   await prismaService.enableShutdownHooks(app);
 

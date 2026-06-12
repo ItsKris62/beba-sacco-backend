@@ -100,7 +100,7 @@ export class AuditInterceptor implements NestInterceptor {
 
     const startMs = Date.now();
     const resource = this.extractResource(url);
-    const action = `${method}.${resource}`.toUpperCase();
+    const action = this.extractAction(method, url);
 
     const safeUrl = sanitizeUrl(url);
 
@@ -114,7 +114,13 @@ export class AuditInterceptor implements NestInterceptor {
               actorId: userId,
               action,
               entityType: resource,
-              metadata: { url: safeUrl, method, durationMs: duration, status: 'success' },
+              metadata: {
+                url: safeUrl,
+                method,
+                durationMs: duration,
+                status: 'success',
+                payload: this.sanitizePayload(request.body),
+              },
               ipAddress: ip,
               userAgent,
               requestId,
@@ -162,6 +168,33 @@ export class AuditInterceptor implements NestInterceptor {
     // Skip 'api', 'v1', 'v2' segments
     const skip = new Set(['api', 'v1', 'v2']);
     const resource = parts.find((p) => !skip.has(p) && !/^\d+$/.test(p));
+    if (resource === 'members' && url.includes('/loans/apply')) return 'Loan';
+    if (resource === 'admin' && url.includes('/loans/')) return 'Loan';
     return resource ?? 'unknown';
+  }
+
+  private extractAction(method: string, url: string): string {
+    if (method === 'POST' && url.includes('/members/loans/apply')) {
+      return 'LOAN.APPLY';
+    }
+    if (method === 'POST' && url.includes('/guarantor-response')) {
+      return 'LOAN.GUARANTOR_RESPOND';
+    }
+    if (method === 'PATCH' && url.includes('/admin/loans/') && url.includes('/status')) {
+      return 'LOAN.STATUS_UPDATE';
+    }
+    return `${method}.${this.extractResource(url)}`.toUpperCase();
+  }
+
+  private sanitizePayload(payload: unknown): Record<string, unknown> {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return {};
+    }
+    const blocked = new Set(['password', 'otp', 'token', 'accessToken', 'refreshToken']);
+    return Object.fromEntries(
+      Object.entries(payload as Record<string, unknown>)
+        .filter(([key]) => !blocked.has(key))
+        .map(([key, value]) => [key, typeof value === 'string' ? value.replace(/[<>]/g, '') : value]),
+    );
   }
 }
