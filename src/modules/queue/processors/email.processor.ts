@@ -62,6 +62,8 @@ export class EmailProcessor extends WorkerHost {
         return this.repaymentReceipt(payload);
       case 'PASSWORD_RESET':
         return this.passwordReset(payload);
+      case 'PASSWORD_RESET_OTP':
+        return this.passwordResetOtp(payload);
       case 'MEMBER_APPROVED':
         return this.memberApproved(payload);
       case 'MEMBER_REJECTED':
@@ -273,6 +275,22 @@ export class EmailProcessor extends WorkerHost {
   }
 
   // ── MEMBER KYC APPROVED ───────────────────────────────────────
+
+  private passwordResetOtp(p: Extract<EmailJobPayload, { type: 'PASSWORD_RESET_OTP' }>) {
+    return {
+      subject: 'Your Beba SACCO password reset code',
+      body: this.wrap(p.firstName, `
+        <h2>Password Reset Code</h2>
+        <p>Use this one-time password to reset your account password:</p>
+        <div class="highlight" style="text-align:center">
+          <p style="font-size:28px;letter-spacing:6px;margin:0"><strong>${p.otp}</strong></p>
+        </div>
+        <p>This code expires in <strong>${p.expiresInMinutes} minutes</strong>.</p>
+        <p>If you did not request a password reset, please ignore this email. Your password will remain unchanged.</p>
+        <p>For security, never share this code with anyone.</p>
+      `),
+    };
+  }
 
   private memberApproved(p: Extract<EmailJobPayload, { type: 'MEMBER_APPROVED' }>) {
     return {

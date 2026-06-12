@@ -243,17 +243,17 @@ export class AuthController {
   @Public()
   @Post('password-reset/request')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ global: { limit: 3, ttl: 300_000 } })
+  @Throttle({ global: { limit: 3, ttl: 900_000 } })
   @ApiOperation({
-    summary: 'Request SMS OTP for password reset',
+    summary: 'Request email or SMS OTP for password reset',
     description:
-      'Accepts the last 5 digits of the registered phone number. ' +
-      'If a matching active member exists, a 6-digit OTP is sent via SMS. ' +
+      'Accepts method EMAIL or SMS plus a validated email/E.164 phone identifier. ' +
+      'If a matching active member exists, a 6-digit OTP is sent through the selected channel. ' +
       'Always returns 200 to prevent user enumeration.',
   })
   @ApiResponse({
     status: 200,
-    description: 'If the phone suffix matches a member, an OTP has been sent via SMS.',
+    description: 'If the contact matches a member, an OTP has been sent.',
   })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   async requestPasswordResetSms(
@@ -263,7 +263,7 @@ export class AuthController {
     await this.authService.requestPasswordResetSms(dto, req.tenant.id, req.ip);
     return {
       success: true,
-      message: 'If your phone number is registered, an OTP has been sent via SMS.',
+      message: 'If an account exists with this contact, an OTP has been sent.',
     };
   }
 
@@ -272,13 +272,13 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ global: { limit: 5, ttl: 60_000 } })
   @ApiOperation({
-    summary: 'Verify SMS OTP and set a new password',
+    summary: 'Verify email/SMS OTP and set a new password',
     description:
       'Validates the OTP against Redis, hashes the new password with argon2id, ' +
       'updates the user record, clears the OTP, and invalidates existing sessions.',
   })
   @ApiResponse({ status: 200, description: 'Password reset successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid OTP, phone suffix, or password' })
+  @ApiResponse({ status: 400, description: 'Invalid OTP, identifier, or password' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   async verifyPasswordResetSms(
     @Body() dto: PasswordResetVerifyDto,

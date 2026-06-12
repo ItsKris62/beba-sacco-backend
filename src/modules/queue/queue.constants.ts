@@ -180,6 +180,7 @@ export type EmailJobPayload =
   | GuarantorReminderEmailPayload
   | RepaymentReceiptEmailPayload
   | PasswordResetEmailPayload
+  | PasswordResetOtpEmailPayload
   | MemberApprovedEmailPayload
   | MemberRejectedEmailPayload;
 
@@ -243,6 +244,12 @@ export interface RepaymentReceiptEmailPayload extends BaseEmailPayload {
 export interface PasswordResetEmailPayload extends BaseEmailPayload {
   type: 'PASSWORD_RESET';
   resetUrl: string;
+  expiresInMinutes: number;
+}
+
+export interface PasswordResetOtpEmailPayload extends BaseEmailPayload {
+  type: 'PASSWORD_RESET_OTP';
+  otp: string;
   expiresInMinutes: number;
 }
 

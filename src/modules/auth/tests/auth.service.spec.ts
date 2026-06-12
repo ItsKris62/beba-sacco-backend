@@ -12,6 +12,7 @@ import { SessionService } from '../session.service';
 import { OtpService } from '../otp.service';
 import { SmsService } from '../../sms/sms.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
+import { RedisService } from '../../../common/services/redis.service';
 
 // ─────────────────────────── Mocks ───────────────────────────
 
@@ -97,6 +98,10 @@ const mockSmsService = {
   enqueueSms: jest.fn().mockResolvedValue(undefined),
 };
 
+const mockRedisService = {
+  incr: jest.fn().mockResolvedValue(1),
+};
+
 // ─────────────────────────── Test Suite ───────────────────────────
 
 describe('AuthService', () => {
@@ -129,6 +134,7 @@ describe('AuthService', () => {
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
         { provide: OtpService, useValue: mockOtpService },
         { provide: SmsService, useValue: mockSmsService },
+        { provide: RedisService, useValue: mockRedisService },
       ],
     }).compile();
 

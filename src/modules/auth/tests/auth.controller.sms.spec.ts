@@ -19,6 +19,7 @@ import { AUDIT_ACTIONS } from '../../audit/audit-actions';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { SmsService } from '../../sms/sms.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { RedisService } from '../../../common/services/redis.service';
 
 jest.mock('argon2', () => ({
   hash: jest.fn(),
@@ -26,7 +27,6 @@ jest.mock('argon2', () => ({
 
 const TENANT_ID = 'tenant-uuid-1234';
 const USER_ID = 'user-uuid-1234';
-const LAST_FIVE_DIGITS = '45678';
 const TEST_PHONE = '+254712345678';
 const TEST_OTP = '123456';
 const NEW_PASSWORD = 'NewSecure@2025!';
@@ -38,7 +38,7 @@ interface TenantRequest extends Request {
 
 interface MockPrismaService {
   user: {
-    findMany: jest.Mock;
+    findFirst: jest.Mock;
     update: jest.Mock;
   };
 }
@@ -57,16 +57,22 @@ interface MockAuditService {
   create: jest.Mock<Promise<void>, [unknown]>;
 }
 
+interface MockRedisService {
+  incr: jest.Mock<Promise<number>, [string, number]>;
+}
+
 describe('AuthController SMS password reset endpoints', () => {
   let app: INestApplication;
   let prisma: MockPrismaService;
   let otpService: MockOtpService;
   let smsService: MockSmsService;
   let auditService: MockAuditService;
+  let redisService: MockRedisService;
 
   const activeMemberUser = {
     id: USER_ID,
     email: 'member@beba.co.ke',
+    firstName: 'Member',
     phone: TEST_PHONE,
     phoneNumber: '254712345678',
   };
@@ -75,7 +81,7 @@ describe('AuthController SMS password reset endpoints', () => {
     request(app.getHttpServer())
       .post('/auth/password-reset/request')
       .set('X-Tenant-ID', TENANT_ID)
-      .send({ lastFiveDigits: LAST_FIVE_DIGITS });
+      .send({ method: 'SMS', identifier: TEST_PHONE });
 
   const postVerify = (body: Record<string, string>) =>
     request(app.getHttpServer())
@@ -86,7 +92,7 @@ describe('AuthController SMS password reset endpoints', () => {
   beforeEach(async () => {
     prisma = {
       user: {
-        findMany: jest.fn(),
+        findFirst: jest.fn(),
         update: jest.fn().mockResolvedValue({ id: USER_ID }),
       },
     };
@@ -100,6 +106,9 @@ describe('AuthController SMS password reset endpoints', () => {
     };
     auditService = {
       create: jest.fn().mockResolvedValue(undefined),
+    };
+    redisService = {
+      incr: jest.fn().mockResolvedValue(1),
     };
 
     jest.mocked(argon2.hash).mockResolvedValue(HASHED_PASSWORD);
@@ -126,6 +135,7 @@ describe('AuthController SMS password reset endpoints', () => {
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: { add: jest.fn() } },
         { provide: OtpService, useValue: otpService },
         { provide: SmsService, useValue: smsService },
+        { provide: RedisService, useValue: redisService },
         { provide: APP_GUARD, useClass: ThrottlerGuard },
       ],
     }).compile();
@@ -153,24 +163,26 @@ describe('AuthController SMS password reset endpoints', () => {
   });
 
   describe('POST /auth/password-reset/request', () => {
-    it('returns 200, generates an OTP, queues SMS, and audits a valid last-five lookup', async () => {
-      prisma.user.findMany.mockResolvedValue([activeMemberUser]);
+    it('returns 200, generates an OTP, queues SMS, and audits a valid phone lookup', async () => {
+      prisma.user.findFirst.mockResolvedValue(activeMemberUser);
 
       const response = await postRequest().expect(200);
 
       expect(response.body).toEqual({
         success: true,
-        message: 'If your phone number is registered, an OTP has been sent via SMS.',
+        message: 'If an account exists with this contact, an OTP has been sent.',
       });
-      expect(prisma.user.findMany).toHaveBeenCalledWith(
+      expect(prisma.user.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             tenantId: TENANT_ID,
             role: UserRole.MEMBER,
             isActive: true,
             OR: [
-              { phone: { endsWith: LAST_FIVE_DIGITS } },
-              { phoneNumber: { endsWith: LAST_FIVE_DIGITS } },
+              { phone: TEST_PHONE },
+              { phone: '254712345678' },
+              { phoneNumber: TEST_PHONE },
+              { phoneNumber: '254712345678' },
             ],
           }),
         }),
@@ -194,28 +206,21 @@ describe('AuthController SMS password reset endpoints', () => {
     });
 
     it('returns 200 and does not generate an OTP when no user matches', async () => {
-      prisma.user.findMany.mockResolvedValue([]);
+      prisma.user.findFirst.mockResolvedValue(null);
 
-      await postRequest().send({ lastFiveDigits: '99999' }).expect(200);
-
-      expect(otpService.generate).not.toHaveBeenCalled();
-      expect(smsService.enqueueSms).not.toHaveBeenCalled();
-    });
-
-    it('returns 200 and does not send an OTP when multiple users match', async () => {
-      prisma.user.findMany.mockResolvedValue([
-        activeMemberUser,
-        { ...activeMemberUser, id: 'second-user-id', email: 'second@beba.co.ke' },
-      ]);
-
-      await postRequest().expect(200);
+      await postRequest().send({ method: 'SMS', identifier: '+254711119999' }).expect(200);
 
       expect(otpService.generate).not.toHaveBeenCalled();
       expect(smsService.enqueueSms).not.toHaveBeenCalled();
     });
 
     it('returns 429 on the fourth request inside the throttling window', async () => {
-      prisma.user.findMany.mockResolvedValue([]);
+      redisService.incr
+        .mockResolvedValueOnce(1)
+        .mockResolvedValueOnce(2)
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(4);
+      prisma.user.findFirst.mockResolvedValue(null);
 
       await postRequest().expect(200);
       await postRequest().expect(200);
@@ -226,13 +231,14 @@ describe('AuthController SMS password reset endpoints', () => {
 
   describe('POST /auth/password-reset/verify', () => {
     const validVerifyBody = {
-      lastFiveDigits: LAST_FIVE_DIGITS,
+      method: 'SMS',
+      identifier: TEST_PHONE,
       otp: TEST_OTP,
       newPassword: NEW_PASSWORD,
     };
 
     it('returns 200, updates the password hash, deletes OTP, and audits completion', async () => {
-      prisma.user.findMany.mockResolvedValue([activeMemberUser]);
+      prisma.user.findFirst.mockResolvedValue(activeMemberUser);
       otpService.validate.mockResolvedValue(true);
 
       const response = await postVerify(validVerifyBody).expect(200);
@@ -261,7 +267,7 @@ describe('AuthController SMS password reset endpoints', () => {
     });
 
     it('returns 400 and does not update the password when OTP validation fails', async () => {
-      prisma.user.findMany.mockResolvedValue([activeMemberUser]);
+      prisma.user.findFirst.mockResolvedValue(activeMemberUser);
       otpService.validate.mockResolvedValue(false);
 
       await postVerify({ ...validVerifyBody, otp: '999999' }).expect(400);
@@ -277,7 +283,7 @@ describe('AuthController SMS password reset endpoints', () => {
     });
 
     it('returns 400 and does not update the password when the OTP is expired', async () => {
-      prisma.user.findMany.mockResolvedValue([activeMemberUser]);
+      prisma.user.findFirst.mockResolvedValue(activeMemberUser);
       otpService.validate.mockResolvedValue(false);
 
       await postVerify(validVerifyBody).expect(400);
@@ -293,7 +299,7 @@ describe('AuthController SMS password reset endpoints', () => {
     });
 
     it('propagates OTP service BadRequestException and avoids password updates', async () => {
-      prisma.user.findMany.mockResolvedValue([activeMemberUser]);
+      prisma.user.findFirst.mockResolvedValue(activeMemberUser);
       otpService.validate.mockRejectedValue(new BadRequestException('Invalid OTP'));
 
       await postVerify({ ...validVerifyBody, otp: '999999' }).expect(400);
