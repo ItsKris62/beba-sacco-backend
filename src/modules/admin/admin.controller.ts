@@ -65,7 +65,7 @@ export class AdminController {
   // ─── PENDING KYC QUEUE ───────────────────────────────────────
 
   @Get('members/pending')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
   @ApiOperation({
     summary: 'List members pending KYC review (oldest first)',
     description: 'Returns members with kycStatus = PENDING_REVIEW in FIFO order.',
@@ -113,7 +113,7 @@ export class AdminController {
   // ─── KYC REVIEW (APPROVE / REJECT) ───────────────────────────
 
   @Patch('members/:id/review')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Approve or reject a member KYC submission',
@@ -147,7 +147,7 @@ export class AdminController {
   // ─── KYC UPDATE ──────────────────────────────────────────────
 
   @Patch('members/:id/kyc')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Update member KYC information',

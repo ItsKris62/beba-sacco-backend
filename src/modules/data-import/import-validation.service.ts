@@ -148,7 +148,7 @@ export class ImportValidationService {
     } else {
       // Check intra-batch duplicate
       if (seenIdNumbers.has(row.idNumber)) {
-        warnings.push({
+        errors.push({
           field: 'ID NO.',
           value: row.idNumber,
           reason: `Duplicate ID number within this import batch (first seen at row ${seenIdNumbers.get(row.idNumber)})`,
@@ -185,7 +185,7 @@ export class ImportValidationService {
     } else {
       // Check intra-batch duplicate
       if (seenPhones.has(row.phoneNumber)) {
-        warnings.push({
+        errors.push({
           field: 'PHONE NO.',
           value: row.phoneNumber,
           reason: `Duplicate phone within this import batch (first seen at row ${seenPhones.get(row.phoneNumber)})`,
@@ -288,7 +288,7 @@ export class ImportValidationService {
    */
   private async fetchExistingByIdNumber(tenantId: string): Promise<Map<string, string>> {
     const users = await this.prisma.user.findMany({
-      where: { tenantId, idNumber: { not: null } },
+      where: { idNumber: { not: null } },
       select: { id: true, idNumber: true },
     });
     const map = new Map<string, string>();
@@ -303,7 +303,7 @@ export class ImportValidationService {
    */
   private async fetchExistingByPhone(tenantId: string): Promise<Map<string, string>> {
     const users = await this.prisma.user.findMany({
-      where: { tenantId, phoneNumber: { not: null } },
+      where: { phoneNumber: { not: null } },
       select: { id: true, phoneNumber: true },
     });
     const map = new Map<string, string>();

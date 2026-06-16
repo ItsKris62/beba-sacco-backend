@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Req } from '@nestjs/common';
-import { ApiBearerAuth, ApiHeader, ApiOperation, ApiParam, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiHeader, ApiOperation, ApiParam, ApiProperty, ApiPropertyOptional, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 import { Request } from 'express';
 import { UserRole } from '@prisma/client';
@@ -14,20 +14,24 @@ import type { Tenant } from '@prisma/client';
 enum GuarantorDecision { ACCEPT = 'ACCEPT', DECLINE = 'DECLINE' }
 
 class GuarantorResponseDto {
+  @ApiProperty({ enum: GuarantorDecision, example: GuarantorDecision.ACCEPT })
   @IsEnum(GuarantorDecision)
   action!: GuarantorDecision;
 
+  @ApiPropertyOptional({ example: 'I agree to guarantee this loan.' })
   @IsOptional()
   @IsString()
   @MaxLength(500)
   notes?: string;
 
+  @ApiPropertyOptional({ description: 'Frontend confirmation checkbox that the member understands the guarantee obligation' })
   @IsOptional()
   @IsBoolean()
   digitalAcknowledgment?: boolean;
 }
 
 class AdminGuarantorOverrideDto extends GuarantorResponseDto {
+  @ApiProperty({ example: 'Verified signed consent at branch office.' })
   @IsString()
   @MaxLength(1000)
   reason!: string;
@@ -57,8 +61,20 @@ export class GuarantorResponseController {
   @Post('members/loans/:id/guarantor-response')
   @Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER)
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Accept or decline a loan guarantor request',
+    description:
+      'Only the authenticated member linked to the pending guarantor request may respond. ' +
+      'ACCEPT places the guarantor savings hold. When required guarantor count and coverage are met, ' +
+      'the loan moves from PENDING_GUARANTORS to PENDING_APPROVAL.',
+  })
   @ApiHeader({ name: 'X-Idempotency-Key', required: true })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiResponse({ status: 200, description: 'Guarantor response recorded' })
+  @ApiResponse({ status: 400, description: 'Invalid action, expired request, or eligibility failure' })
+  @ApiResponse({ status: 403, description: 'Authenticated member is not the requested guarantor' })
+  @ApiResponse({ status: 404, description: 'Guarantor request not found' })
+  @ApiResponse({ status: 409, description: 'Duplicate or already-processed guarantor response' })
   async respond(
     @Param('id') loanId: string,
     @Body() dto: GuarantorResponseDto,
@@ -83,6 +99,11 @@ export class GuarantorResponseController {
   @Roles(UserRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Manager override for a pending guarantor decision' })
+  @ApiParam({ name: 'loanId', description: 'Loan UUID' })
+  @ApiParam({ name: 'guarantorId', description: 'LoanGuarantor UUID or guarantor member UUID' })
+  @ApiResponse({ status: 200, description: 'Guarantor status overridden' })
+  @ApiResponse({ status: 400, description: 'Override reason is required' })
+  @ApiResponse({ status: 404, description: 'Guarantor request not found' })
   async override(
     @Param('loanId') loanId: string,
     @Param('guarantorId') guarantorId: string,

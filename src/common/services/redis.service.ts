@@ -31,7 +31,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
 
   constructor(private readonly config: ConfigService) {
-    const rawHost = config.get<string>('app.redis.host', 'localhost');
+    const redisUrl = config.get<string>('app.redis.url');
+    const parsedRedisUrl = redisUrl ? new URL(redisUrl) : undefined;
+    const rawHost = parsedRedisUrl?.hostname ?? config.get<string>('app.redis.host', 'localhost');
     // Strip any accidental protocol prefix — ioredis expects a bare hostname.
     // e.g. "https://foo.upstash.io" → "foo.upstash.io"
     const host = rawHost.replace(/^https?:\/\//, '');
@@ -42,9 +44,15 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const port = config.get<number>('app.redis.port', 6379);
-    const password = config.get<string>('app.redis.password');
-    const tls = config.get<boolean>('app.redis.tls', false);
+    const port = parsedRedisUrl
+      ? parseInt(parsedRedisUrl.port || '6379', 10)
+      : config.get<number>('app.redis.port', 6379);
+    const password = parsedRedisUrl?.password
+      ? decodeURIComponent(parsedRedisUrl.password)
+      : config.get<string>('app.redis.password');
+    const tls = parsedRedisUrl
+      ? parsedRedisUrl.protocol === 'rediss:'
+      : config.get<boolean>('app.redis.tls', false);
 
     this.logger.log(
       `Redis: initialising connection → host="${host}" port=${port} tls=${tls} ` +

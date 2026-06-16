@@ -15,11 +15,11 @@
 import './instrument';
 import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
-import { AppModule } from './app.module';
+import { WorkerModule } from './worker.module';
 import { PrismaService } from './prisma/prisma.service';
 
 async function bootstrapWorker() {
-  const app = await NestFactory.createApplicationContext(AppModule, {
+  const app = await NestFactory.createApplicationContext(WorkerModule, {
     bufferLogs: true,
   });
 

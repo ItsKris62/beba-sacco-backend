@@ -258,6 +258,7 @@ export interface PasswordResetOtpEmailPayload extends BaseEmailPayload {
 export interface SmsJobPayload {
   type:
     | 'PASSWORD_RESET_OTP'
+    | 'TEMP_PASSWORD'
     | 'GUARANTOR_INVITE'
     | 'LOAN_APPROVED'
     | 'LOAN_REJECTED'

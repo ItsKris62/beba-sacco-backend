@@ -9,6 +9,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
 import * as express from 'express';
+import { Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
@@ -44,6 +45,7 @@ async function bootstrap() {
   const port = configService.get<number>('app.port', 3000);
   const apiPrefix = configService.get<string>('app.apiPrefix', 'api');
   const nodeEnv = configService.get<string>('app.nodeEnv', 'development');
+  const swaggerPath = `/${apiPrefix}/docs`;
 
   // ── Proxy trust ────────────────────────────────────────────────
   // Render sits behind one layer of load balancers. Setting trust proxy to 1
@@ -69,11 +71,29 @@ async function bootstrap() {
     ?.split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0);
+  const productionFrontendOrigins = [
+    process.env.FRONTEND_URL,
+    process.env.NEXT_PUBLIC_FRONTEND_URL,
+    process.env.APP_URL,
+  ]
+    .map((origin) => origin?.trim())
+    .filter((origin): origin is string => Boolean(origin));
+  const allowedCorsOrigins = [
+    ...(configuredCorsOrigins ?? []),
+    ...productionFrontendOrigins,
+    ...configService.get<string[]>('app.cors.origin', ['http://localhost:3001']),
+    'http://localhost:3000',
+    'http://localhost:3001',
+  ];
+  const vercelPreviewOriginPattern = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
   app.enableCors({
-    origin:
-      configuredCorsOrigins && configuredCorsOrigins.length > 0
-        ? configuredCorsOrigins
-        : configService.get<string[]>('app.cors.origin', ['http://localhost:3001']),
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedCorsOrigins.includes(origin) || vercelPreviewOriginPattern.test(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error(`CORS origin not allowed: ${origin}`), false);
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
@@ -184,14 +204,31 @@ async function bootstrap() {
     .addTag('Health', 'Liveness and readiness probes')
     .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup(`${apiPrefix}/docs`, app, document, {
-    swaggerOptions: {
-      persistAuthorization: true,
-      tagsSorter: 'alpha',
-      operationsSorter: 'alpha',
-    },
-  });
+  const swaggerUser = process.env.SWAGGER_USER;
+  const swaggerPassword = process.env.SWAGGER_PASSWORD;
+  const swaggerEnabled = nodeEnv !== 'production' || Boolean(swaggerUser && swaggerPassword);
+
+  if (swaggerEnabled) {
+    if (nodeEnv === 'production') {
+      app.use(swaggerPath, (req: Request, res: Response, next: NextFunction) => {
+        const authHeader = req.headers.authorization;
+        const expected = `Basic ${Buffer.from(`${swaggerUser}:${swaggerPassword}`).toString('base64')}`;
+        if (authHeader === expected) return next();
+
+        res.setHeader('WWW-Authenticate', 'Basic realm="Beba SACCO API Docs"');
+        return res.status(401).send('Authentication required');
+      });
+    }
+
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup(swaggerPath.replace(/^\//, ''), app, document, {
+      swaggerOptions: {
+        persistAuthorization: true,
+        tagsSorter: 'alpha',
+        operationsSorter: 'alpha',
+      },
+    });
+  }
 
   // ── Prisma Graceful Shutdown ──────────────────────────────────
   app.enableShutdownHooks();

@@ -67,7 +67,7 @@ export class MpesaService {
     triggeredBy: string,
     triggerSource: MpesaTriggerSource = MpesaTriggerSource.MEMBER,
     idempotencyKey?: string,
-  ): Promise<{ checkoutRequestId: string; customerMessage: string; mpesaTxId: string }> {
+  ): Promise<{ checkoutRequestId: string; merchantRequestId: string; customerMessage: string; mpesaTxId: string }> {
     if (!idempotencyKey?.trim()) {
       throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
     }
@@ -84,6 +84,7 @@ export class MpesaService {
     if (idem.status === 'COMPLETED') {
       return idem.result as {
         checkoutRequestId: string;
+        merchantRequestId: string;
         customerMessage: string;
         mpesaTxId: string;
       };
@@ -183,6 +184,7 @@ export class MpesaService {
 
       const result = {
         checkoutRequestId: darajaResp.CheckoutRequestID,
+        merchantRequestId: darajaResp.MerchantRequestID,
         customerMessage: darajaResp.CustomerMessage,
         mpesaTxId: mpesaTx.id,
       };

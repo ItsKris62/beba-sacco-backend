@@ -1,16 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { randomInt } from 'crypto';
+import { Prisma, StagePosition, UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { SmsService } from '../sms/sms.service';
 import { generateImportEmail } from './utils/name-parser';
 import { applyKnownAliases } from './utils/fuzzy-matcher';
 import type { ValidatedRow, ImportReport } from './dto/import.dto';
 import * as argon2 from 'argon2';
 
-/** Batch size for Prisma transactions */
 const BATCH_SIZE = 50;
-
-/** Failure threshold: if > 10% of rows fail, halt the job */
 const FAILURE_THRESHOLD = 0.1;
+const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
 
 @Injectable()
 export class ImportExecutionService {
@@ -19,13 +20,9 @@ export class ImportExecutionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly sms: SmsService,
   ) {}
 
-  /**
-   * Execute the import of validated rows.
-   * Processes in batches of BATCH_SIZE using Prisma transactions.
-   * Halts if failure rate exceeds FAILURE_THRESHOLD.
-   */
   async executeImport(params: {
     importLogId: string;
     batchId: string;
@@ -37,9 +34,10 @@ export class ImportExecutionService {
   }): Promise<ImportReport> {
     const { importLogId, batchId, tenantId, wardId, actorId, dryRun, rows } = params;
 
-    // Only process rows that are not SKIP/ERROR
-    const processableRows = rows.filter(r => r.action !== 'SKIP' && r.status !== 'ERROR');
-    const skippedRows = rows.filter(r => r.action === 'SKIP' || r.status === 'ERROR');
+    const processableRows = rows.filter(
+      (row) => row.action === 'CREATE' && row.status !== 'ERROR' && row.status !== 'DUPLICATE',
+    );
+    const skippedRows = rows.filter((row) => !processableRows.includes(row));
 
     this.logger.log(
       `Starting import: ${processableRows.length} processable, ${skippedRows.length} skipped, dryRun=${dryRun}`,
@@ -50,12 +48,12 @@ export class ImportExecutionService {
       importLogId,
       totalRows: rows.length,
       successCount: 0,
-      failedCount: skippedRows.length,
+      failedCount: skippedRows.filter((row) => row.status === 'ERROR').length,
       warningCount: 0,
       skippedCount: skippedRows.length,
       dryRun,
-      errors: skippedRows.flatMap(r =>
-        r.errors.map(e => ({ row: r.rowNumber, ...e })),
+      errors: skippedRows.flatMap((row) =>
+        row.errors.map((error) => ({ row: row.rowNumber, ...error })),
       ),
       createdUsers: [],
       updatedUsers: [],
@@ -63,35 +61,25 @@ export class ImportExecutionService {
     };
 
     if (dryRun) {
-      // Dry run: just count what would happen
-      report.successCount = processableRows.filter(r => r.action === 'CREATE').length;
-      report.warningCount = processableRows.filter(r => r.status === 'WARNING').length;
-      this.logger.log('Dry run complete – no DB writes performed');
+      report.successCount = processableRows.length;
+      report.warningCount = processableRows.filter((row) => row.status === 'WARNING').length;
+      this.logger.log('Dry run complete - no DB writes or SMS jobs performed');
       return report;
     }
 
-    // Ensure ward exists
     const ward = await this.prisma.ward.findUnique({ where: { id: wardId } });
-    if (!ward) {
-      throw new Error(`Ward ${wardId} not found`);
-    }
+    if (!ward) throw new Error(`Ward ${wardId} not found`);
 
-    // Pre-create a default password hash for imported users
-    // Imported users must change password on first login
-    const defaultPasswordHash = await argon2.hash(`Import@${batchId.slice(0, 8)}`);
-
-    // Process in batches
     const batches = chunk(processableRows, BATCH_SIZE);
     let processedCount = 0;
 
     for (const batch of batches) {
-      const batchResults = await this.processBatch({
+      await this.processBatch({
         batch,
         tenantId,
         wardId,
         actorId,
         batchId,
-        defaultPasswordHash,
         report,
       });
 
@@ -115,7 +103,6 @@ export class ImportExecutionService {
       this.logger.debug(`Processed batch: ${processedCount}/${processableRows.length}`);
     }
 
-    // Audit log
     await this.audit
       .create({
         tenantId,
@@ -134,65 +121,57 @@ export class ImportExecutionService {
           dryRun,
         },
       })
-      .catch(e => this.logger.error('Audit write failed', e));
+      .catch((error) => this.logger.error('Audit write failed', error));
 
     return report;
   }
 
-  /**
-   * Process a single batch of rows in a Prisma transaction.
-   */
   private async processBatch(params: {
     batch: ValidatedRow[];
     tenantId: string;
     wardId: string;
     actorId: string;
     batchId: string;
-    defaultPasswordHash: string;
     report: ImportReport;
   }): Promise<void> {
-    const { batch, tenantId, wardId, actorId, batchId, defaultPasswordHash, report } = params;
+    const { batch, tenantId, wardId, actorId, batchId, report } = params;
 
     for (const row of batch) {
       try {
-        await this.processRow({
-          row,
-          tenantId,
-          wardId,
-          batchId,
-          defaultPasswordHash,
-          report,
-        });
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        this.logger.error(`Row ${row.rowNumber} failed: ${errMsg}`);
+        await this.processRow({ row, tenantId, wardId, actorId, batchId, report });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Row ${row.rowNumber} failed: ${message}`);
         report.failedCount++;
         report.errors.push({
           row: row.rowNumber,
           field: 'SYSTEM',
           value: null,
-          reason: errMsg,
+          reason: message,
           errorCode: 'ROW_PROCESSING_ERROR',
         });
       }
     }
   }
 
-  /**
-   * Process a single row: upsert User + Stage + StageAssignment.
-   */
   private async processRow(params: {
     row: ValidatedRow;
     tenantId: string;
     wardId: string;
+    actorId: string;
     batchId: string;
-    defaultPasswordHash: string;
     report: ImportReport;
   }): Promise<void> {
-    const { row, tenantId, wardId, batchId, defaultPasswordHash, report } = params;
+    const { row, tenantId, wardId, actorId, batchId, report } = params;
+    const tempPassword = this.generateTempPassword();
+    const passwordHash = await argon2.hash(tempPassword, {
+      type: argon2.argon2id,
+      memoryCost: 32768,
+      timeCost: 3,
+      parallelism: 1,
+    });
 
-    await this.prisma.$transaction(async (tx) => {
-      // ── 1. Upsert Stage ───────────────────────────────────────────────────
+    const created = await this.prisma.$transaction(async (tx) => {
       const canonicalStageName = row.fuzzyStageMatch?.matched
         ?? (row.stageName ? applyKnownAliases(row.stageName) : 'UNASSIGNED');
 
@@ -213,97 +192,136 @@ export class ImportExecutionService {
         }
       }
 
-      // ── 2. Upsert User ────────────────────────────────────────────────────
-      let userId: string;
+      const phone = row.phoneNumber ?? row.rawPhone ?? `unknown-${row.rowNumber}`;
+      const email = generateImportEmail(row.firstName, row.lastName, phone);
+      const finalEmail = await this.uniqueImportEmail(tx, tenantId, email, row.rowNumber);
 
-      if (row.action === 'UPDATE' && row.existingUserId) {
-        // Update existing user
-        await tx.user.update({
-          where: { id: row.existingUserId },
-          data: {
-            firstName: row.firstName,
-            lastName: row.lastName,
-            ...(row.idNumber && { idNumber: row.idNumber }),
-            ...(row.phoneNumber && { phoneNumber: row.phoneNumber }),
-            ...(row.nextOfKinPhone && { nextOfKinPhone: row.nextOfKinPhone }),
-            ...(row.legacyNo && { legacyMemberNo: row.legacyNo }),
-            importBatchId: batchId,
-            wardId,
-          },
-        });
-        userId = row.existingUserId;
-        report.updatedUsers.push(userId);
-      } else {
-        // Create new user
-        // Generate a placeholder email (admin should update later)
-        const phone = row.phoneNumber ?? row.rawPhone ?? `unknown-${row.rowNumber}`;
-        const email = generateImportEmail(row.firstName, row.lastName, phone);
+      const user = await tx.user.create({
+        data: {
+          tenantId,
+          email: finalEmail,
+          passwordHash,
+          role: UserRole.MEMBER,
+          firstName: row.firstName,
+          lastName: row.lastName,
+          phone: row.phoneNumber ?? undefined,
+          idNumber: row.idNumber ?? undefined,
+          phoneNumber: row.phoneNumber ?? undefined,
+          nextOfKinPhone: row.nextOfKinPhone ?? undefined,
+          legacyMemberNo: row.legacyNo ?? undefined,
+          importBatchId: batchId,
+          wardId,
+          status: UserStatus.APPROVED,
+          mustChangePassword: true,
+          createdById: actorId,
+          approvedById: actorId,
+          approvedAt: new Date(),
+          approvalReason: 'Imported from cleaned member CSV',
+        },
+      });
 
-        // Check if email already exists (edge case)
-        const emailExists = await tx.user.findFirst({ where: { email } });
-        const finalEmail = emailExists
-          ? `${email.split('@')[0]}.${row.rowNumber}@import.local`
-          : email;
-
-        const newUser = await tx.user.create({
-          data: {
-            tenantId,
-            email: finalEmail,
-            passwordHash: defaultPasswordHash,
-            role: 'MEMBER',
-            firstName: row.firstName,
-            lastName: row.lastName,
-            idNumber: row.idNumber ?? undefined,
-            phoneNumber: row.phoneNumber ?? undefined,
-            nextOfKinPhone: row.nextOfKinPhone ?? undefined,
-            legacyMemberNo: row.legacyNo ?? undefined,
-            importBatchId: batchId,
-            wardId,
-            status: row.idNumber ? 'APPROVED' : 'PENDING',
-            mustChangePassword: true,
-          },
-        });
-        userId = newUser.id;
-        report.createdUsers.push(userId);
-      }
-
-      // ── 3. Upsert StageAssignment ─────────────────────────────────────────
-      const position = this.mapPosition(row.position);
-
-      // If assigning CHAIRMAN or SECRETARY, deactivate existing holder
-      if (position === 'CHAIRMAN' || position === 'SECRETARY') {
-        await tx.stageAssignment.updateMany({
-          where: { stageId: stage.id, position, isActive: true },
-          data: { isActive: false },
-        });
-      }
+      const member = await tx.member.create({
+        data: {
+          tenantId,
+          userId: user.id,
+          memberNumber: await this.generateUniqueMemberNumber(tx, tenantId),
+          nationalId: row.idNumber ?? undefined,
+        },
+      });
 
       await tx.stageAssignment.upsert({
-        where: { userId_stageId: { userId, stageId: stage.id } },
-        create: { userId, stageId: stage.id, position, isActive: true },
-        update: { position, isActive: true },
+        where: { userId_stageId: { userId: user.id, stageId: stage.id } },
+        create: {
+          userId: user.id,
+          stageId: stage.id,
+          position: this.mapPosition(row.position),
+          isActive: true,
+        },
+        update: {
+          position: this.mapPosition(row.position),
+          isActive: true,
+        },
+      });
+
+      await tx.memberStage.upsert({
+        where: { memberId_stageId: { memberId: member.id, stageId: stage.id } },
+        create: {
+          memberId: member.id,
+          stageId: stage.id,
+          assignedBy: actorId,
+          isActive: true,
+        },
+        update: { assignedBy: actorId, isActive: true },
       });
 
       report.successCount++;
       if (row.warnings.length > 0) report.warningCount++;
+      report.createdUsers.push(user.id);
+
+      return { userId: user.id, phone: row.phoneNumber, tempPassword };
     });
+
+    if (created.phone) {
+      await this.sms.enqueueSms(
+        {
+          type: 'TEMP_PASSWORD',
+          phone: created.phone,
+          message:
+            `Welcome to Beba SACCO. Login with your phone number ${created.phone} ` +
+            `and temporary password: ${created.tempPassword}. You will be required to change it immediately.`,
+        },
+        `data-import.temp-password:${created.userId}`,
+      );
+    }
   }
 
-  /**
-   * Map position string to StagePosition enum value.
-   */
-  private mapPosition(position: string): 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER' {
-    const map: Record<string, 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER'> = {
-      CHAIRMAN: 'CHAIRMAN',
-      SECRETARY: 'SECRETARY',
-      TREASURER: 'TREASURER',
-      MEMBER: 'MEMBER',
-    };
-    return map[position?.toUpperCase()] ?? 'MEMBER';
+  private mapPosition(position: string): StagePosition {
+    const upper = position?.toUpperCase();
+    if (upper === StagePosition.CHAIRMAN) return StagePosition.CHAIRMAN;
+    if (upper === StagePosition.SECRETARY) return StagePosition.SECRETARY;
+    if (upper === StagePosition.TREASURER) return StagePosition.TREASURER;
+    return StagePosition.MEMBER;
+  }
+
+  private generateTempPassword(length = 10): string {
+    return Array.from(
+      { length },
+      () => PASSWORD_ALPHABET[randomInt(0, PASSWORD_ALPHABET.length)],
+    ).join('');
+  }
+
+  private async generateUniqueMemberNumber(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+  ): Promise<string> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = `MBR-${randomInt(100000, 1000000)}`;
+      const existing = await tx.member.findFirst({
+        where: { tenantId, memberNumber: candidate },
+        select: { id: true },
+      });
+      if (!existing) return candidate;
+    }
+    throw new Error('Could not generate a unique member number');
+  }
+
+  private async uniqueImportEmail(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    email: string,
+    rowNumber: number,
+  ): Promise<string> {
+    const existing = await tx.user.findFirst({
+      where: { tenantId, email },
+      select: { id: true },
+    });
+    if (!existing) return email;
+
+    const [local, domain] = email.split('@');
+    return `${local}.${rowNumber}.${Date.now()}@${domain}`;
   }
 }
 
-/** Split an array into chunks of size n */
 function chunk<T>(arr: T[], n: number): T[][] {
   const result: T[][] = [];
   for (let i = 0; i < arr.length; i += n) {

@@ -312,6 +312,7 @@ export class AuthService {
       accessToken,
       refreshToken,
       migrateRefreshToken: true,
+      requiresPasswordChange: user.mustChangePassword,
       user: this.toUserDto(user),
     };
   }
@@ -412,6 +413,7 @@ export class AuthService {
       accessToken,
       refreshToken,
       migrateRefreshToken: true,
+      requiresPasswordChange: user.mustChangePassword,
       user: this.toUserDto(user),
     };
   }

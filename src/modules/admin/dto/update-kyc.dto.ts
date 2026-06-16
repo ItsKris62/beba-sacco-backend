@@ -36,6 +36,12 @@ export class UpdateKycDto {
   @Matches(/^254[0-9]{9}$/, { message: 'Phone must be 254XXXXXXXXX format' })
   phone?: string;
 
+  @ApiPropertyOptional({ example: '254712345679', description: 'Next-of-kin phone number' })
+  @IsOptional()
+  @IsString()
+  @Matches(/^254[0-9]{9}$/, { message: 'Next-of-kin phone must be 254XXXXXXXXX format' })
+  nextOfKinPhone?: string;
+
   @ApiPropertyOptional({ description: 'Physical address' })
   @IsOptional()
   @IsString()
@@ -58,6 +64,23 @@ export class UpdateKycDto {
   @IsOptional()
   @IsDateString()
   dateOfBirth?: string;
+
+  @ApiPropertyOptional({
+    description: 'Target stage ID. Preferred when the admin is moving the member to a specific existing stage.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  stageId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Target stage name. Used when stageId is not supplied; resolved within the member ward.',
+    example: 'ACTIVE',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  stageName?: string;
 
   @ApiPropertyOptional({
     description: 'Approved KYC document IDs reviewed by staff. Required when verified=true.',

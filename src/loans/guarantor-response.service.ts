@@ -100,7 +100,7 @@ export class GuarantorResponseService {
         req,
       });
       if (result.loanStatus === LoanStatus.PENDING_APPROVAL) {
-        void this.notifyLoanOfficers(args.tenantId, args.loanId);
+        void this.notifyLoanOfficers(tenantId, loanId);
       }
       if (idemKey) await this.idempotency.complete(idemKey, tenantId, result, 72 * 60 * 60);
       return result;

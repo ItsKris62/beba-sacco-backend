@@ -8,6 +8,7 @@ import {
   DocumentType,
   KycStatus,
   LoanStatus,
+  StagePosition,
   UserRole,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -508,7 +509,11 @@ export class AdminService {
 
     const member = await this.prisma.member.findFirst({
       where: { id: memberId, tenantId },
-      select: { id: true, userId: true },
+      select: {
+        id: true,
+        userId: true,
+        user: { select: { wardId: true } },
+      },
     });
     if (!member) throw new NotFoundException('Member not found');
 
@@ -535,7 +540,7 @@ export class AdminService {
       throw new BadRequestException('Reviewer notes are required when rejecting KYC');
     }
 
-    const updatedMember = await this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const reviewedAt = effectiveVerified === undefined && !aliasStatus ? undefined : new Date();
       const memberUpdate = await tx.member.update({
         where: { id: memberId },
@@ -572,6 +577,97 @@ export class AdminService {
         },
       });
 
+      if (dto.phone !== undefined || dto.nextOfKinPhone !== undefined) {
+        await tx.user.update({
+          where: { id: member.userId },
+          data: {
+            ...(dto.phone !== undefined && { phone: dto.phone, phoneNumber: dto.phone }),
+            ...(dto.nextOfKinPhone !== undefined && { nextOfKinPhone: dto.nextOfKinPhone }),
+          },
+        });
+      }
+
+      let stageTransition: { from: string | null; to: string } | undefined;
+      if (dto.stageId || dto.stageName) {
+        if (!dto.stageId && !member.user.wardId) {
+          throw new BadRequestException('Member ward is required when resolving a stage by name');
+        }
+
+        const targetStage = dto.stageId
+          ? await tx.stage.findFirst({
+              where: { id: dto.stageId, tenantId },
+              select: { id: true, name: true },
+            })
+          : await tx.stage.upsert({
+              where: {
+                name_wardId_tenantId: {
+                  name: dto.stageName!.trim(),
+                  wardId: member.user.wardId!,
+                  tenantId,
+                },
+              },
+              create: {
+                name: dto.stageName!.trim(),
+                wardId: member.user.wardId!,
+                tenantId,
+              },
+              update: {},
+              select: { id: true, name: true },
+            });
+
+        if (!targetStage) {
+          throw new NotFoundException('Target stage not found for this tenant');
+        }
+
+        const currentStage = await tx.memberStage.findFirst({
+          where: { memberId, isActive: true },
+          select: { stage: { select: { name: true } } },
+        });
+
+        await tx.memberStage.updateMany({
+          where: { memberId, isActive: true },
+          data: { isActive: false },
+        });
+        await tx.stageAssignment.updateMany({
+          where: { userId: member.userId, isActive: true },
+          data: { isActive: false },
+        });
+
+        await tx.memberStage.upsert({
+          where: { memberId_stageId: { memberId, stageId: targetStage.id } },
+          create: {
+            memberId,
+            stageId: targetStage.id,
+            assignedBy: updatedBy,
+            isActive: true,
+          },
+          update: {
+            assignedBy: updatedBy,
+            assignedAt: new Date(),
+            isActive: true,
+          },
+        });
+
+        await tx.stageAssignment.upsert({
+          where: { userId_stageId: { userId: member.userId, stageId: targetStage.id } },
+          create: {
+            userId: member.userId,
+            stageId: targetStage.id,
+            position: StagePosition.MEMBER,
+            isActive: true,
+          },
+          update: {
+            position: StagePosition.MEMBER,
+            isActive: true,
+          },
+        });
+
+        stageTransition = {
+          from: currentStage?.stage.name ?? null,
+          to: targetStage.name,
+        };
+      }
+
       if (effectiveVerified === true) {
         const existingAccounts = await tx.account.findMany({
           where: { tenantId, memberId, accountType: { in: [AccountType.FOSA, AccountType.BOSA] } },
@@ -605,16 +701,8 @@ export class AdminService {
         }
       }
 
-      return memberUpdate;
+      return { member: memberUpdate, stageTransition };
     });
-
-    // Update phone on User record if provided
-    if (dto.phone) {
-      await this.prisma.user.update({
-        where: { id: member.userId },
-        data: { phone: dto.phone },
-      });
-    }
 
     await this.audit
       .create({
@@ -629,6 +717,7 @@ export class AdminService {
             ...dto,
             documentIds: dto.documentIds?.map((id) => ({ id })),
           },
+          stageTransition: result.stageTransition,
           kycDecision:
             dto.verified === undefined ? 'PROFILE_UPDATE' : dto.verified ? 'APPROVED' : 'REJECTED',
           kycStatusAliasEnabled: FeatureFlags.isEnabled('KYC_STATUS_ALIAS', tenantId),
@@ -646,7 +735,7 @@ export class AdminService {
       });
     }
 
-    return this.withBusinessKycStatus(updatedMember, tenantId);
+    return this.withBusinessKycStatus(result.member, tenantId);
   }
 
   private resolveRequestedKycStatus(tenantId: string, dto: UpdateKycDto): KycStatus | undefined {

@@ -50,10 +50,15 @@ export const validationSchema = Joi.object({
 
   // ── Redis (Upstash) – application cache ───────────────────────────────────
   // password & TLS optional for local dev (no-auth Redis container)
-  REDIS_HOST: Joi.string().required(),
+  REDIS_HOST: Joi.string().when('REDIS_URL', {
+    is: Joi.exist(),
+    then: Joi.optional(),
+    otherwise: Joi.required(),
+  }),
   REDIS_PORT: Joi.number().default(6379),
   REDIS_PASSWORD: Joi.string().allow('').optional(),
   REDIS_TLS: Joi.boolean().default(false),
+  REDIS_URL: Joi.string().uri({ scheme: ['redis', 'rediss'] }).optional(),
   UPSTASH_REDIS_REST_URL: Joi.string().uri().optional(),
   UPSTASH_REDIS_REST_TOKEN: Joi.string().allow('').optional(),
 
@@ -65,9 +70,16 @@ export const validationSchema = Joi.object({
     .uri({ scheme: ['redis', 'rediss'] })
     .when('NODE_ENV', {
       is: 'production',
-      then: Joi.required(),
+      then: Joi.when('REDIS_URL', {
+        is: Joi.exist(),
+        then: Joi.optional(),
+        otherwise: Joi.required(),
+      }),
       otherwise: Joi.optional(),
     }),
+
+  SWAGGER_USER: Joi.string().optional(),
+  SWAGGER_PASSWORD: Joi.string().optional(),
 
   // ── Cloudflare R2 ──────────────────────────────────────────────────────────
   R2_ACCOUNT_ID: Joi.string().required(),

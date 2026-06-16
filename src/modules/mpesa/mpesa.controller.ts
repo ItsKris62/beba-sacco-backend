@@ -18,6 +18,7 @@ import {
   ApiBearerAuth,
   ApiSecurity,
   ApiOperation,
+  ApiProperty,
   ApiResponse,
   ApiHeader,
   ApiParam,
@@ -44,8 +45,16 @@ import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 // â”€â”€â”€ Response shapes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class DepositInitiatedResponse {
+  @ApiProperty({ example: '29115-34620561-1' })
+  merchantRequestId!: string;
+
+  @ApiProperty({ example: 'ws_CO_191220191020363925' })
   checkoutRequestId!: string;
+
+  @ApiProperty({ example: 'Success. Request accepted for processing' })
   customerMessage!: string;
+
+  @ApiProperty({ example: '550e8400-e29b-41d4-a716-446655440000' })
   mpesaTxId!: string;
 }
 

@@ -523,7 +523,14 @@ export class MemberPortalController {
     summary: 'Deposit via M-Pesa STK Push',
     description: "Triggers an STK Push to the member's phone. Processed asynchronously via BullMQ.",
   })
+  @ApiHeader({
+    name: 'X-Idempotency-Key',
+    required: true,
+    description: 'Required to prevent duplicate STK prompts on retry',
+  })
   @ApiResponse({ status: 200, description: 'STK Push initiated' })
+  @ApiResponse({ status: 400, description: 'Invalid amount, phone, missing FOSA account, or missing idempotency key' })
+  @ApiResponse({ status: 503, description: 'M-Pesa temporarily unavailable' })
   async depositMpesa(
     @Body() dto: MemberStkPushDto,
     @CurrentUser() user: AuthenticatedUser,

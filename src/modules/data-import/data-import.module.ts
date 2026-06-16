@@ -15,6 +15,7 @@ import { FinancialImportService } from './financial-import.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuditModule } from '../audit/audit.module';
 import { CommonServicesModule } from '../../common/services/common-services.module';
+import { SmsModule } from '../sms/sms.module';
 
 const IMPORT_QUEUE = 'data.import';
 
@@ -23,6 +24,7 @@ const IMPORT_QUEUE = 'data.import';
     PrismaModule,
     AuditModule,
     CommonServicesModule,
+    SmsModule,
     BullModule.registerQueue({ name: IMPORT_QUEUE }),
     MulterModule.register({ storage: memoryStorage() }),
   ],

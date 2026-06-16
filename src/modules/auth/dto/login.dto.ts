@@ -64,4 +64,9 @@ export class LoginResponseDto {
 
   @ApiProperty({ type: LoginUserDto })
   user!: LoginUserDto;
+
+  @ApiProperty({
+    description: 'Top-level flag clients can use to redirect to the change-password screen',
+  })
+  requiresPasswordChange!: boolean;
 }
