@@ -167,10 +167,44 @@ export class LoansController {
   @ApiOperation({
     summary: 'Disburse an approved loan',
     description:
-      'Credits the member\'s FOSA account with the principal amount. ' +
-      'The loan status changes to ACTIVE.',
+      'Posts the approved loan to the member FOSA account using a Serializable transaction. ' +
+      'The ledger records at least two entries: a gross LOAN_DISBURSEMENT credit for principal ' +
+      'and a FEE_CHARGE debit for the processing fee. The member spendable balance increases by ' +
+      'netDisbursement = principalAmount - processingFee, and the loan status changes to ACTIVE.',
   })
-  @ApiResponse({ status: 200, description: 'Loan disbursed' })
+  @ApiResponse({
+    status: 200,
+    description: 'Loan disbursed and ledger entries posted',
+    schema: {
+      example: {
+        loan: {
+          id: '9b29f4b9-41a5-4ef6-8440-8e5d05f2ef51',
+          loanNumber: 'LN-2026-000001',
+          status: 'ACTIVE',
+          principalAmount: '50000.0000',
+          processingFee: '1000.0000',
+          disbursedAt: '2026-06-18T09:00:00.000Z',
+        },
+        transaction: {
+          type: 'LOAN_DISBURSEMENT',
+          amount: '50000.0000',
+          description: 'Loan disbursement - LN-2026-000001',
+        },
+        ledgerEntries: [
+          { type: 'LOAN_DISBURSEMENT', amount: '50000.0000' },
+          { type: 'FEE_CHARGE', amount: '-1000.0000' },
+        ],
+        principalAmount: 50000,
+        processingFee: 1000,
+        netDisbursement: 49000,
+        newBalance: 59000,
+        disbursement_status: 'COMPLETED',
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Loan is not approved, KYC is not approved, or fee exceeds principal' })
+  @ApiResponse({ status: 404, description: 'Loan or FOSA account not found' })
+  @ApiResponse({ status: 409, description: 'Loan already disbursed or concurrent account update detected' })
   disburse(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentTenant() tenant: Tenant,

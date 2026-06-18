@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { MpesaController } from './mpesa.controller';
 import { MpesaService } from './mpesa.service';
+import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,15 @@ const mockMpesaService = {
   requeueFromDlq: jest.fn(),
   initiateDeposit: jest.fn(),
 } as unknown as MpesaService;
+
+const mockTenantResolver = {
+  validateCallback: jest.fn().mockResolvedValue(true),
+  resolveTenant: jest.fn(),
+} as unknown as MpesaTenantResolverService;
+
+function flushCallbacks(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 // STK Push payload fixture
 const STK_BODY = {
@@ -69,7 +79,22 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    controller = new MpesaController(mockMpesaService, makeConfig(SECRET));
+    (mockTenantResolver.validateCallback as jest.Mock).mockImplementation(({ rawBody, signature }: { rawBody?: Buffer; signature?: string }) =>
+      Boolean(rawBody && signature && hmac(rawBody, SECRET) === signature),
+    );
+    (mockTenantResolver.resolveTenant as jest.Mock).mockImplementation((body: Record<string, unknown>) => {
+      if ('TransactionType' in body) return { tenantId: 'tenant-1', callbackType: 'C2B', uniqueId: 'TXN123456' };
+      const result = (body as typeof B2C_BODY).Result;
+      if (result) {
+        return {
+          tenantId: 'tenant-1',
+          callbackType: result.ResultCode === 17 ? 'B2C_TIMEOUT' : 'B2C_RESULT',
+          uniqueId: 'conv-abc',
+        };
+      }
+      return { tenantId: 'tenant-1', callbackType: 'STK_PUSH', uniqueId: 'ws_CO_1' };
+    });
+    controller = new MpesaController(mockMpesaService, makeConfig(SECRET), mockTenantResolver);
   });
 
   // ── Signature bypass in dev/sandbox ────────────────────────────────────
@@ -78,18 +103,23 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
     const noSecretController = new MpesaController(
       mockMpesaService,
       makeConfig(undefined),
+      mockTenantResolver,
     );
+    (mockTenantResolver.validateCallback as jest.Mock).mockResolvedValueOnce(true);
     const rawBody = Buffer.from(JSON.stringify(STK_BODY));
     const result = await noSecretController.unifiedCallback(
       { rawBody } as never,
       STK_BODY as never,
       undefined,
     );
+    await flushCallbacks();
     expect(result).toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
     expect(mockMpesaService.enqueueCallback).toHaveBeenCalledWith(
-      STK_BODY,
+      expect.objectContaining(STK_BODY),
       'STK_PUSH',
       'ws_CO_1',
+      'tenant-1',
+      expect.any(String),
     );
   });
 
@@ -104,6 +134,7 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
       STK_BODY as never,
       sig,
     );
+    await flushCallbacks();
     expect(result).toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
     expect(mockMpesaService.enqueueCallback).toHaveBeenCalledTimes(1);
   });
@@ -152,11 +183,14 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
     const sig = hmac(rawBody, SECRET);
 
     await controller.unifiedCallback({ rawBody } as never, C2B_BODY as never, sig);
+    await flushCallbacks();
 
     expect(mockMpesaService.enqueueCallback).toHaveBeenCalledWith(
-      C2B_BODY,
+      expect.objectContaining(C2B_BODY),
       'C2B',
       'TXN123456',
+      'tenant-1',
+      expect.any(String),
     );
   });
 
@@ -165,11 +199,14 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
     const sig = hmac(rawBody, SECRET);
 
     await controller.unifiedCallback({ rawBody } as never, B2C_BODY as never, sig);
+    await flushCallbacks();
 
     expect(mockMpesaService.enqueueCallback).toHaveBeenCalledWith(
-      B2C_BODY,
+      expect.objectContaining(B2C_BODY),
       'B2C_RESULT',
       'conv-abc',
+      'tenant-1',
+      expect.any(String),
     );
   });
 
@@ -181,11 +218,14 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
     const sig = hmac(rawBody, SECRET);
 
     await controller.unifiedCallback({ rawBody } as never, timeoutBody as never, sig);
+    await flushCallbacks();
 
     expect(mockMpesaService.enqueueCallback).toHaveBeenCalledWith(
-      timeoutBody,
+      expect.objectContaining(timeoutBody),
       'B2C_TIMEOUT',
       'conv-abc',
+      'tenant-1',
+      expect.any(String),
     );
   });
 });

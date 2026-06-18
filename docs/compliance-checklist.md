@@ -112,10 +112,10 @@
 | B1.3 | Phone numbers masked in audit log metadata | ⚠️ | `maskPhone()` not consistently applied in `AuditService.create()` metadata payloads |
 | B1.4 | National ID not logged in plaintext | ⚠️ | `nationalId` appears in SASRA CSV export (required by SASRA); must be access-controlled |
 | B1.5 | PII fields excluded from error responses | ✅ | Global exception filter strips sensitive fields from 4xx/5xx responses |
-| B1.6 | Sentry PII scrubbing configured | ⚠️ | `SENTRY_DSN` configured; `beforeSend` hook for PII scrubbing not verified in `main.ts` |
+| B1.6 | Sentry PII scrubbing configured | ✅ | `beforeSend` hook configured in `sentry.setup.ts` to redact passwords, IDs, and phone numbers before dispatching. |
 
 **Remediation B1.3:** Wrap all `metadata` objects passed to `AuditService.create()` through a `sanitizeMetadata()` helper that calls `maskPhone()` on any field matching `/phone|msisdn|mobile/i`.  
-**Remediation B1.6:** Add `beforeSend` hook in Sentry init (see `monitoring-setup.ts` in Deliverable 2).
+~~**Remediation B1.6:** Add `beforeSend` hook in Sentry init (see `monitoring-setup.ts` in Deliverable 2).~~ (Resolved)
 
 ---
 
@@ -292,7 +292,6 @@
 | A3.4 | PDF statement not implemented | SASRA Audit Requirement | 🟡 MEDIUM | 4h | Backend |
 | B4.4 | No erasure request endpoint | ODPC DPA 2019 §§38–40 | 🟡 MEDIUM | 2h | Backend |
 | C4.5 | CRB monthly cron not verified | CBK CRB Regulations 2013 | 🟡 MEDIUM | 30m | DevOps |
-| B1.6 | Sentry PII scrubbing not verified | ODPC DPA 2019 §41 | 🟡 MEDIUM | 1h | DevOps |
 
 ---
 

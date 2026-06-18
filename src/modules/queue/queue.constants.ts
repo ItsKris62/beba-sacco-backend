@@ -12,6 +12,8 @@ export const QUEUE_NAMES = {
   MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq', // Dead-letter queue for callback failures
   LOAN_GUARANTOR_REMINDER: 'loan.guarantor.reminder',
   LOAN_GUARANTOR_EXPIRY: 'loan.guarantor.expiry',
+  REPAYMENT_REMINDER: 'loan.repayment.reminder',
+  GUARANTOR_RECOVERY: 'loan.guarantor.recovery',
   GUARANTOR_VALIDATION: 'loan.guarantor.validation',
   GUARANTOR_VALIDATION_DLQ: 'loan.guarantor.validation.dlq',
   AUDIT_LOG: 'audit.log',
@@ -58,6 +60,9 @@ export const QUEUE_NAMES = {
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 export const GUARANTOR_VALIDATION_QUEUE_JOB = 'validate';
 export const GUARANTOR_EXPIRY_CHECK_JOB = 'guarantor-expiry-check';
+export const REPAYMENT_REMINDER_SCAN_JOB = 'repayment-reminder-scan';
+export const GUARANTOR_RECOVERY_NOTICE_JOB = 'guarantor-recovery-notice';
+export const GUARANTOR_DEBIT_JOB = 'guarantor-debit-execute';
 export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
 
 // ─── Job payload types ────────────────────────────────────────────────────────
@@ -111,6 +116,27 @@ export interface GuarantorExpiryJobPayload {
   loanId?: string;
   guarantorId?: string;
   cutoffIso?: string;
+}
+
+export interface RepaymentReminderScanJobPayload {
+  tenantId?: string;
+  runDateIso: string;
+}
+
+export interface InitiateGuarantorRecoveryJobPayload {
+  tenantId: string;
+  loanId: string;
+  actorId: string;
+  defaultAmount: string;
+  noticeDateIso: string;
+}
+
+export interface ExecuteGuarantorDebitJobPayload {
+  tenantId: string;
+  loanId: string;
+  actorId: string;
+  defaultAmount: string;
+  executeAfterIso: string;
 }
 
 export interface ReportGenerationJobPayload {
@@ -173,6 +199,7 @@ export interface LoanDisburseJobPayload {
 
 export type EmailJobPayload =
   | WelcomeEmailPayload
+  | SystemNoticeEmailPayload
   | LoanApprovedEmailPayload
   | LoanRejectedEmailPayload
   | LoanDisbursedEmailPayload
@@ -187,6 +214,12 @@ export type EmailJobPayload =
 interface BaseEmailPayload {
   to: string; // recipient email address
   firstName: string; // used in salutation
+}
+
+export interface SystemNoticeEmailPayload extends BaseEmailPayload {
+  type: 'SYSTEM_NOTICE';
+  subject: string;
+  body: string;
 }
 
 export interface WelcomeEmailPayload extends BaseEmailPayload {
@@ -260,6 +293,9 @@ export interface SmsJobPayload {
     | 'PASSWORD_RESET_OTP'
     | 'TEMP_PASSWORD'
     | 'GUARANTOR_INVITE'
+    | 'REPAYMENT_REMINDER'
+    | 'GUARANTOR_RECOVERY_NOTICE'
+    | 'GUARANTOR_RECOVERY_DEBITED'
     | 'LOAN_APPROVED'
     | 'LOAN_REJECTED'
     | 'LOAN_PENDING_APPROVAL';

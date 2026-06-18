@@ -41,6 +41,7 @@ import { SmsModule } from '../sms/sms.module';
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
       { name: QUEUE_NAMES.LOAN_GUARANTOR_EXPIRY },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION },
+      { name: QUEUE_NAMES.GUARANTOR_RECOVERY },
       { name: QUEUE_NAMES.EMAIL },
       { name: QUEUE_NAMES.AUDIT_LOG },
     ),

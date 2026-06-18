@@ -6,6 +6,7 @@ import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DisbursementGateService } from '../../loans/disbursement-gate.service';
+import { ProductRuleService } from './product-rule.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -72,8 +73,14 @@ function makePrisma(overrides: {
       findFirst: jest.fn().mockResolvedValue(
         overrides.memberResult !== undefined
           ? overrides.memberResult
-          : { id: MEMBER_ID, memberNumber: 'MBR-001' },
+          : { id: MEMBER_ID, memberNumber: 'MBR-001', kycStatus: 'APPROVED' },
       ),
+    },
+    account: {
+      findMany: jest.fn().mockResolvedValue([{ accountType: 'FOSA', balance: '100000.0000' }]),
+    },
+    loan: {
+      findFirst: jest.fn().mockResolvedValue(null),
     },
     loanProduct: {
       findFirst: jest.fn().mockResolvedValue(
@@ -98,6 +105,9 @@ const mockIdempotency = {
 const mockEmailQueue = { add: jest.fn().mockResolvedValue({}) };
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue({}) };
 const mockDisbursementGate = { assertPassed: jest.fn().mockResolvedValue(undefined) } as unknown as DisbursementGateService;
+const mockProductRules = {
+  assertLoanApplicationRules: jest.fn().mockReturnValue(undefined),
+} as unknown as ProductRuleService;
 
 function makeService(prisma: PrismaService): LoansService {
   return new LoansService(
@@ -108,6 +118,7 @@ function makeService(prisma: PrismaService): LoansService {
     mockGuarantorQueue as never,
     mockEmailQueue as never,
     mockDisbursementGate,
+    mockProductRules,
   );
 }
 

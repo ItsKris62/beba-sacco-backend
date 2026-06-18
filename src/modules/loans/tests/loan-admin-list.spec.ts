@@ -5,6 +5,8 @@ import { LoanAdminService } from '../loan-admin.service';
 import { LoanAdminController } from '../loan-admin.controller';
 import { LoanApplicationService } from '../loan-application.service';
 import { LoansService } from '../loans.service';
+import { LoanReviewService } from '../loan-review.service';
+import { LoanRecoveryService } from '../loan-recovery.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { GetAdminLoansQueryDto } from '../dto/get-admin-loans-query.dto';
 
@@ -21,6 +23,8 @@ const mockLoanAppService = {
 };
 
 const mockLoansService = { disburse: jest.fn() };
+const mockLoanReviewService = { process: jest.fn() };
+const mockLoanRecoveryService = { initiateRecovery: jest.fn() };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -173,6 +177,9 @@ describe('LoanAdminController — GET /admin/loans', () => {
         { provide: LoanApplicationService, useValue: mockLoanAppService },
         { provide: LoansService, useValue: mockLoansService },
         { provide: LoanAdminService, useValue: mockLoanAdminService },
+        { provide: LoanReviewService, useValue: mockLoanReviewService },
+        { provide: LoanRecoveryService, useValue: mockLoanRecoveryService },
+        { provide: PrismaService, useValue: mockPrisma },
       ],
     }).compile();
 

@@ -48,6 +48,8 @@ export class EmailProcessor extends WorkerHost {
     switch (payload.type) {
       case 'WELCOME':
         return this.welcome(payload);
+      case 'SYSTEM_NOTICE':
+        return this.systemNotice(payload);
       case 'LOAN_APPROVED':
         return this.loanApproved(payload);
       case 'LOAN_REJECTED':
@@ -113,6 +115,13 @@ export class EmailProcessor extends WorkerHost {
 
   private kes(amount: number): string {
     return `KES ${amount.toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  private systemNotice(p: Extract<EmailJobPayload, { type: 'SYSTEM_NOTICE' }>) {
+    return {
+      subject: p.subject,
+      body: this.wrap(p.firstName, `<p>${p.body}</p>`),
+    };
   }
 
   // ── WELCOME ───────────────────────────────────────────────────

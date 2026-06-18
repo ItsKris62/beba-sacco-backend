@@ -1,57 +1,30 @@
-import { Controller, Get, Post, Patch, Param, Body } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
+import { Controller, Get, Patch, Body, UseGuards, Req } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { TenantsService } from './tenants.service';
+import { UpdateTenantSettingsDto } from './dto/update-tenant-settings.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RBACGuard } from '../../common/guards/rbac.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '@prisma/client';
 
-/**
- * Tenants Controller
- * 
- * Super Admin only - manages SACCO tenants
- * 
- * TODO: Phase 1 - Implement tenant creation DTOs
- * TODO: Phase 2 - Add tenant analytics endpoints
- */
 @ApiTags('Tenants')
 @ApiBearerAuth()
-@Controller('tenants')
+@UseGuards(JwtAuthGuard, RBACGuard)
+@Controller('api/v1/tenants')
 export class TenantsController {
   constructor(private readonly tenantsService: TenantsService) {}
 
-  @Post()
-  @Roles(UserRole.SUPER_ADMIN)
-  @ApiOperation({ summary: 'Create new SACCO tenant' })
-  @ApiResponse({ status: 201, description: 'Tenant created successfully' })
-  async create(@Body() createTenantDto: any) {
-    return this.tenantsService.create(createTenantDto);
+  @Get('settings')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Get current tenant settings' })
+  async getSettings(@Req() req: any) {
+    return this.tenantsService.getSettings(req.headers['x-tenant-id']);
   }
 
-  @Get()
-  @Roles(UserRole.SUPER_ADMIN)
-  @ApiOperation({ summary: 'List all tenants' })
-  async findAll() {
-    return this.tenantsService.findAll();
-  }
-
-  @Get(':id')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
-  @ApiOperation({ summary: 'Get tenant by ID' })
-  async findOne(@Param('id') id: string) {
-    return this.tenantsService.findOne(id);
-  }
-
-  @Patch(':id/suspend')
-  @Roles(UserRole.SUPER_ADMIN)
-  @ApiOperation({ summary: 'Suspend tenant' })
-  async suspend(@Param('id') id: string) {
-    return this.tenantsService.suspend(id);
-  }
-
-  @Patch(':id/activate')
-  @Roles(UserRole.SUPER_ADMIN)
-  @ApiOperation({ summary: 'Activate tenant' })
-  async activate(@Param('id') id: string) {
-    return this.tenantsService.activate(id);
+  @Patch('settings')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Update tenant settings' })
+  async updateSettings(@Req() req: any, @Body() dto: UpdateTenantSettingsDto) {
+    return this.tenantsService.updateSettings(req.headers['x-tenant-id'], dto);
   }
 }
-

@@ -39,6 +39,8 @@ import { GuarantorValidationService } from '../loans/guarantor-validation.servic
 import { AlertsService } from '../alerts/alerts.service';
 import { SmsModule } from '../sms/sms.module';
 import { SmsProcessor } from '../sms/sms.processor';
+import { RepaymentReminderProcessor } from '../notifications/processors/repayment-reminder.processor';
+import { GuarantorRecoveryProcessor } from '../notifications/processors/guarantor-recovery.processor';
 
 export type QueueModuleMode = 'web' | 'worker';
 
@@ -63,6 +65,8 @@ export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   DailyReconProcessor,
   DailyReconScheduler,
   DeadLetterAlertProcessor,
+  RepaymentReminderProcessor,
+  GuarantorRecoveryProcessor,
 ];
 
 export const ADVANCED_FINANCIAL_QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
@@ -202,6 +206,8 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ },
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
       { name: QUEUE_NAMES.LOAN_GUARANTOR_EXPIRY },
+      { name: QUEUE_NAMES.REPAYMENT_REMINDER },
+      { name: QUEUE_NAMES.GUARANTOR_RECOVERY },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION_DLQ },
       { name: QUEUE_NAMES.AUDIT_LOG },

@@ -216,6 +216,7 @@ export class LoanApplicationService {
         id: true,
         memberNumber: true,
         kycStatus: true,
+        isBlacklisted: true,
         user: { select: { firstName: true, lastName: true } },
       },
     });
@@ -227,6 +228,10 @@ export class LoanApplicationService {
     // Check KYC
     if (member.kycStatus !== 'APPROVED') {
       return { eligible: false, reason: 'KYC verification required before applying for a loan', fosaBalance: new Decimal(0), bosaBalance: new Decimal(0), kycStatus: member.kycStatus };
+    }
+
+    if (member.isBlacklisted) {
+      return { eligible: false, reason: 'Member is blacklisted and cannot apply for loans', fosaBalance: new Decimal(0), bosaBalance: new Decimal(0), kycStatus: member.kycStatus };
     }
 
     // Check accounts
@@ -299,6 +304,7 @@ export class LoanApplicationService {
       select: {
         id: true,
         kycStatus: true,
+        isBlacklisted: true,
         user: { select: { firstName: true, lastName: true, role: true, isActive: true, status: true } },
       },
     });
@@ -310,6 +316,9 @@ export class LoanApplicationService {
     }
     if (guarantor.kycStatus !== 'APPROVED') {
       return { eligible: false, reason: 'Guarantor KYC is not approved' };
+    }
+    if (guarantor.isBlacklisted) {
+      return { eligible: false, reason: 'Guarantor is blacklisted' };
     }
 
     // Check FOSA
@@ -439,13 +448,16 @@ export class LoanApplicationService {
       const txResult = await this.prisma.$transaction(async (tx) => {
         const member = await tx.member.findFirst({
           where: { id: memberId, tenantId, isActive: true },
-          select: { id: true, memberNumber: true, kycStatus: true },
+          select: { id: true, memberNumber: true, kycStatus: true, isBlacklisted: true },
         });
         if (!member) {
           throw new NotFoundException('Member not found or inactive');
         }
         if (member.kycStatus !== 'APPROVED') {
           throw new BadRequestException('KYC verification required before applying for a loan');
+        }
+        if (member.isBlacklisted) {
+          throw new ForbiddenException('Member is blacklisted and cannot apply for loans');
         }
         await tx.$queryRaw`
           SELECT id FROM "Member"
@@ -744,7 +756,8 @@ export class LoanApplicationService {
       if (
         err instanceof BadRequestException ||
         err instanceof NotFoundException ||
-        err instanceof ConflictException
+        err instanceof ConflictException ||
+        err instanceof ForbiddenException
       ) {
         throw err;
       }
@@ -790,6 +803,7 @@ export class LoanApplicationService {
       select: {
         id: true,
         kycStatus: true,
+        isBlacklisted: true,
         user: { select: { role: true, isActive: true, status: true } },
       },
     });
@@ -801,6 +815,9 @@ export class LoanApplicationService {
     }
     if (guarantor.kycStatus !== 'APPROVED') {
       return { eligible: false, reason: 'Guarantor KYC is not approved' };
+    }
+    if (guarantor.isBlacklisted) {
+      return { eligible: false, reason: 'Guarantor is blacklisted' };
     }
 
     const fosaAccount = await tx.account.findFirst({

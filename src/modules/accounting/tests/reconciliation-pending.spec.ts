@@ -5,6 +5,7 @@ import { AccountingController } from '../accounting.controller';
 import { AccountingService } from '../accounting.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ReconciliationService } from '../../financial/reconciliation.service';
+import { AuditService } from '../../audit/audit.service';
 
 const TENANT_ID = 'tenant-uuid-1';
 
@@ -17,6 +18,7 @@ describe('AccountingService.getPendingReconciliation()', () => {
     },
   };
   const recon = { getLatestReport: jest.fn() };
+  const audit = { create: jest.fn().mockResolvedValue(undefined) };
 
   let service: AccountingService;
 
@@ -27,6 +29,7 @@ describe('AccountingService.getPendingReconciliation()', () => {
         AccountingService,
         { provide: PrismaService, useValue: prisma },
         { provide: ReconciliationService, useValue: recon },
+        { provide: AuditService, useValue: audit },
       ],
     }).compile();
 
@@ -78,10 +81,10 @@ describe('AccountingService.getPendingReconciliation()', () => {
       data: [
         expect.objectContaining({
           id: 'mpesa-uuid-1',
-          reference: 'TXN-001',
-          type: 'STK',
+          mpesaReference: 'RAB123',
+          type: MpesaTxType.STK_PUSH,
           amount: 1000,
-          expectedAmount: 900,
+          flagReason: 'Stale PENDING after 180 minutes',
           mpesaReceipt: 'RAB123',
           reconciliationStatus: TransactionStatus.RECON_PENDING,
         }),

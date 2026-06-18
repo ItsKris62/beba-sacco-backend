@@ -132,6 +132,36 @@ enum TransactionStatus {
 // ─── M-Pesa Phase 1 & 2 ──────────────────────────────────────────────────────
 
 // Channel that originated the M-Pesa transaction
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_ON_MEMBER
+  RESOLVED
+  CLOSED
+
+  @@schema("public")
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+
+  @@schema("public")
+}
+
+enum TicketCategory {
+  LOAN_QUERY
+  MPESA_ISSUE
+  ACCOUNT_ACCESS
+  KYC_UPDATE
+  GUARANTOR_DISPUTE
+  GENERAL
+
+  @@schema("public")
+}
+
 enum MpesaTxType {
   STK_PUSH // Lipa Na M-Pesa (customer-initiated, STK prompt on phone)
   C2B // Direct paybill/buy-goods payment (no STK prompt)
@@ -569,8 +599,9 @@ model Member {
   occupation  String?
   dateOfBirth DateTime?
 
-  isActive Boolean  @default(true)
-  joinedAt DateTime @default(now())
+  isActive      Boolean  @default(true)
+  isBlacklisted Boolean  @default(false)
+  joinedAt      DateTime @default(now())
 
   kycStatus           KycStatus @default(PENDING_UPLOAD)
   kycReviewedAt       DateTime?
@@ -593,6 +624,7 @@ model Member {
   documents         Document[]
   stageAssignments  MemberStage[] // MVP: many-to-many with Stage
   mpesaTransactions MpesaTransaction[]
+  supportTickets    SupportTicket[]
 
   @@unique([tenantId, memberNumber])
   @@index([tenantId])
@@ -937,6 +969,47 @@ model LoanApprovalChain {
   createdAt DateTime  @default(now())
 
   @@index([tenantId, loanId])
+  @@schema("public")
+}
+
+model SupportTicket {
+  id       String @id @default(uuid())
+  tenantId String
+  memberId String
+  member   Member @relation(fields: [memberId], references: [id])
+
+  subject     String
+  description String         @db.Text
+  status      TicketStatus   @default(OPEN)
+  priority    TicketPriority @default(MEDIUM)
+  category    TicketCategory @default(GENERAL)
+
+  relatedLoanId String?
+  relatedTxId   String?
+  assignedTo    String?
+
+  messages  TicketMessage[]
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@index([tenantId, memberId])
+  @@index([tenantId, status])
+  @@schema("public")
+}
+
+model TicketMessage {
+  id       String        @id @default(uuid())
+  ticketId String
+  ticket   SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  senderId    String
+  senderRole  String
+  content     String   @db.Text
+  attachments String[]
+
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
   @@schema("public")
 }
 
@@ -1709,16 +1782,27 @@ model LoanRepayment {
   loanId      String
   loan        Loan     @relation(fields: [loanId], references: [id], onDelete: Cascade)
   dayNumber   Int // 1-N per tenure months (schedule) or 1-30 per CSV (legacy)
-  amountPaid  Decimal  @db.Decimal(10, 2)
+  amountPaid  Decimal  @db.Decimal(10, 2) // Legacy expected/payment amount for imports and portal views
   paymentDate DateTime
+  dueDate     DateTime?
   method      String   @default("CASH")
-  status      String   @default("CONFIRMED") // PENDING (scheduled) | CONFIRMED (paid)
+  status      String   @default("CONFIRMED") // PENDING | PARTIAL | PAID | CONFIRMED (legacy paid)
   recordedBy  String? // userId of teller
   tenantId    String
+
+  principalDue  Decimal @default(0) @db.Decimal(18, 4)
+  interestDue   Decimal @default(0) @db.Decimal(18, 4)
+  penaltyDue    Decimal @default(0) @db.Decimal(18, 4)
+  principalPaid Decimal @default(0) @db.Decimal(18, 4)
+  interestPaid  Decimal @default(0) @db.Decimal(18, 4)
+  penaltyPaid   Decimal @default(0) @db.Decimal(18, 4)
+  paidAt        DateTime?
+
   createdAt   DateTime @default(now())
 
   @@unique([loanId, dayNumber, tenantId])
   @@index([tenantId, loanId])
+  @@index([tenantId, paymentDate, status])
   @@index([tenantId])
   @@schema("public")
 }

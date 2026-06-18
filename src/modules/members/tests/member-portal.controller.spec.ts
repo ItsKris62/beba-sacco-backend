@@ -11,6 +11,7 @@ import { StatementService } from '../../statements/statement.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { MemberApplyLoanDto } from '../../loans/dto/member-apply-loan.dto';
 import { DashboardService } from '../../dashboard/dashboard.service';
+import { DocumentsService } from '../../documents/documents.service';
 
 // ─── Minimal stubs for module providers ──────────────────────────────────────
 
@@ -40,6 +41,11 @@ const mockStatementService = { getFosaStatement: jest.fn() };
 const mockMembersService = {};
 const mockPortalService = { getLoanDetail: jest.fn() };
 const mockDashboardService = { getMemberDashboard: jest.fn() };
+const mockDocumentsService = {
+  listMemberDocuments: jest.fn(),
+  requestMemberUploadUrl: jest.fn(),
+  confirmMemberUpload: jest.fn(),
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -78,6 +84,7 @@ describe('MemberPortalController — POST /members/loans/apply', () => {
         { provide: StatementService, useValue: mockStatementService },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: DashboardService, useValue: mockDashboardService },
+        { provide: DocumentsService, useValue: mockDocumentsService },
       ],
     }).compile();
 

@@ -4,6 +4,7 @@ import { AccountingService } from '../accounting.service';
 import { AccountingController } from '../accounting.controller';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ReconciliationService } from '../../financial/reconciliation.service';
+import { AuditService } from '../../audit/audit.service';
 
 // ─── Stubs ────────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,7 @@ const mockPrisma = {
 const mockRecon = {
   getLatestReport: jest.fn(),
 };
+const mockAudit = { create: jest.fn().mockResolvedValue(undefined) };
 
 function buildTxStub(overrides = {}) {
   return {
@@ -53,6 +55,7 @@ describe('AccountingService', () => {
         AccountingService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: ReconciliationService, useValue: mockRecon },
+        { provide: AuditService, useValue: mockAudit },
       ],
     }).compile();
 

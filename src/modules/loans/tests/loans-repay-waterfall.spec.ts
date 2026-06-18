@@ -8,6 +8,8 @@ import { AuditService } from '../../audit/audit.service';
 import { RedisService } from '../../../common/services/redis.service';
 import { IdempotencyService } from '../../../common/services/idempotency.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
+import { DisbursementGateService } from '../../../loans/disbursement-gate.service';
+import { ProductRuleService } from '../product-rule.service';
 
 // ─── Transaction mock ─────────────────────────────────────────────────────────
 
@@ -15,7 +17,7 @@ type TxClient = {
   $queryRaw: jest.Mock;
   transaction: { create: jest.Mock };
   account: { update: jest.Mock };
-  loan: { update: jest.Mock };
+  loan: { findFirst: jest.Mock; update: jest.Mock };
 };
 
 function buildTxClient(): TxClient {
@@ -23,7 +25,7 @@ function buildTxClient(): TxClient {
     $queryRaw: jest.fn(),
     transaction: { create: jest.fn() },
     account: { update: jest.fn() },
-    loan: { update: jest.fn() },
+    loan: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
   };
 }
 
@@ -44,6 +46,8 @@ const mockRedis = {};
 const mockIdempotency = {};
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
 const mockEmailQueue = { add: jest.fn().mockResolvedValue(undefined) };
+const mockDisbursementGate = { assertPassed: jest.fn().mockResolvedValue(undefined) };
+const mockProductRules = {};
 
 // ─── Common fixtures ──────────────────────────────────────────────────────────
 
@@ -100,6 +104,8 @@ describe('LoansService.repay() — SASRA waterfall', () => {
         { provide: IdempotencyService, useValue: mockIdempotency },
         { provide: getQueueToken(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER), useValue: mockGuarantorQueue },
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
+        { provide: DisbursementGateService, useValue: mockDisbursementGate },
+        { provide: ProductRuleService, useValue: mockProductRules },
       ],
     }).compile();
 

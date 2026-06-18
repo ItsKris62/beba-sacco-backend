@@ -7,6 +7,7 @@ import { Prisma, TransactionStatus, TransactionType, MpesaTxType, MpesaTriggerSo
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
+import { LoanRepaymentService } from '../../loans/loan-repayment.service';
 import {
   QUEUE_NAMES,
   MpesaCallbackJobPayload,
@@ -51,6 +52,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly loanRepayment: LoanRepaymentService,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)
     private readonly dlq: Queue,
   ) {
@@ -426,6 +428,46 @@ export class MpesaCallbackProcessor extends WorkerHost {
       loanNumber?: string;
       isFullyPaid?: boolean;
     } | null = null;
+
+    if (isLoanRepayment) {
+      const result = await this.loanRepayment.processRepayment({
+        tenantId: params.tenantId,
+        memberId: params.memberId,
+        loanNumber: parsed.target,
+        accountReference: params.accountReference,
+        amount: params.amount,
+        reference,
+        processedBy: 'MPESA_SYSTEM',
+        mpesaTxId: params.mpesaTxId,
+        receipt: params.receipt,
+        resultCode: params.resultCode,
+        resultDesc: params.resultDesc,
+        callbackPayload: params.rawPayload,
+        transactionDate: params.transactionDate,
+      });
+      this.audit.create({
+        tenantId: params.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MPESA.LOAN_REPAYMENT.COMPLETED',
+        entityType: 'MpesaTransaction',
+        entityId: params.mpesaTxId ?? result.loanId,
+        newValue: {
+          status: 'COMPLETED',
+          receipt: params.receipt,
+          amount: params.amount.toFixed(4),
+          loanId: result.loanId,
+          loanNumber: result.loanNumber,
+          isFullyPaid: result.status === LoanStatus.FULLY_PAID,
+        },
+        metadata: {
+          reference,
+          accountReference: params.accountReference,
+          memberId: params.memberId,
+          transactionDate: params.transactionDate.toISOString(),
+        },
+      }).catch((e: unknown) => this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`));
+      return;
+    }
 
     // Use SERIALIZABLE isolation to prevent lost updates on concurrent deposits
     // to the same account. Falls back to pooler client if direct URL is unavailable.

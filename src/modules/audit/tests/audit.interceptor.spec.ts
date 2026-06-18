@@ -1,12 +1,15 @@
 import { CallHandler, CanActivate, ExecutionContext, ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { APP_GUARD } from '@nestjs/core';
+import { Reflector } from '@nestjs/core';
 import request from 'supertest';
 import { of } from 'rxjs';
 import type { NextFunction, Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import { AuditInterceptor } from '../../../common/interceptors/audit.interceptor';
+import { tenantAsyncStorage } from '../../../common/services/tenant-context.service';
 import { AdminAuditController } from '../audit.controller';
 import { AuditService, type CreateAuditLogDto } from '../audit.service';
+import { TinybirdService } from '../../analytics/tinybird.service';
 
 type AuditServiceMock = {
   create: jest.Mock<Promise<void>, [CreateAuditLogDto]>;
@@ -26,8 +29,10 @@ class AuditRoleGuard implements CanActivate {
 
 function executionContext(req: object): ExecutionContext {
   return {
+    getHandler: () => executionContext,
     switchToHttp: () => ({
       getRequest: () => req,
+      getResponse: () => ({ statusCode: 201 }),
     }),
   } as unknown as ExecutionContext;
 }
@@ -38,14 +43,15 @@ describe('AuditInterceptor loan action capture', () => {
       create: jest.fn().mockResolvedValue(undefined),
       findAll: jest.fn(),
     };
-    const interceptor = new AuditInterceptor(auditService as unknown as AuditService);
+    const tinybird = { trackEvent: jest.fn().mockResolvedValue(undefined) } as unknown as TinybirdService;
+    const interceptor = new AuditInterceptor(auditService as unknown as AuditService, tinybird, new Reflector());
     const req = {
       method: 'POST',
-      url: '/api/v1/members/loans/apply',
+      path: '/api/v1/members/loans/apply',
       ip: '197.248.10.20',
       headers: { 'user-agent': 'jest', 'x-request-id': 'req-123' },
-      tenant: { id: 'tenant-1' },
-      user: { id: 'user-1' },
+      params: {},
+      user: { id: 'user-1', role: 'MEMBER' },
       body: {
         loanProductId: 'product-1',
         principalAmount: 50000,
@@ -54,24 +60,30 @@ describe('AuditInterceptor loan action capture', () => {
     };
     const next: CallHandler = { handle: () => of({ id: 'loan-1' }) };
 
-    interceptor.intercept(executionContext(req), next).subscribe();
+    tenantAsyncStorage.run({ tenantId: 'tenant-1' }, () => {
+      interceptor.intercept(executionContext(req), next).subscribe();
+    });
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(auditService.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        action: 'LOAN.APPLY',
-        entityType: 'Loan',
+        tenantId: 'tenant-1',
+        actorId: 'user-1',
+        action: 'LOANS.CREATE',
+        entityType: 'LOANS',
+        entityId: 'loan-1',
         ipAddress: '197.248.10.20',
         metadata: expect.objectContaining({
-          payload: expect.objectContaining({
-            loanProductId: 'product-1',
-            principalAmount: 50000,
-          }),
+          path: '/api/v1/members/loans/apply',
+          method: 'POST',
+          statusCode: 201,
         }),
       }),
     );
-    const payload = auditService.create.mock.calls[0][0].metadata?.payload as Record<string, unknown>;
-    expect(payload.password).toBeUndefined();
+    expect(tinybird.trackEvent).toHaveBeenCalledWith(
+      'http_api_audit_events',
+      expect.objectContaining({ action: 'LOANS.CREATE', tenantId: 'tenant-1' }),
+    );
   });
 });
 

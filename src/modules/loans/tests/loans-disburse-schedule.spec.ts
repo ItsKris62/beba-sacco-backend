@@ -8,6 +8,8 @@ import { AuditService } from '../../audit/audit.service';
 import { RedisService } from '../../../common/services/redis.service';
 import { IdempotencyService } from '../../../common/services/idempotency.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
+import { DisbursementGateService } from '../../../loans/disbursement-gate.service';
+import { ProductRuleService } from '../product-rule.service';
 
 // ─── Transaction mock ──────────────────────────────────────────────────────────
 //
@@ -24,6 +26,7 @@ type TxClient = {
   account: { update: jest.Mock };
   loan: { update: jest.Mock };
   loanRepayment: { createMany: jest.Mock };
+  auditLog: { create: jest.Mock };
 };
 
 function buildTxClient(overrides: Partial<TxClient> = {}): TxClient {
@@ -33,6 +36,7 @@ function buildTxClient(overrides: Partial<TxClient> = {}): TxClient {
     account: { update: jest.fn() },
     loan: { update: jest.fn() },
     loanRepayment: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    auditLog: { create: jest.fn().mockResolvedValue({}) },
     ...overrides,
   };
 }
@@ -54,6 +58,8 @@ const mockRedis = {};
 const mockIdempotency = {};
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
 const mockEmailQueue = { add: jest.fn().mockResolvedValue(undefined) };
+const mockDisbursementGate = { assertPassed: jest.fn().mockResolvedValue(undefined) };
+const mockProductRules = {};
 
 // ─── Common fixtures ──────────────────────────────────────────────────────────
 
@@ -69,6 +75,7 @@ function buildApprovedLoan(overrides = {}) {
     status: LoanStatus.APPROVED,
     loanNumber: 'LN-2026-000001',
     principalAmount: '50000.0000',
+    processingFee: '0.0000',
     memberId: MEMBER_ID,
     tenureMonths: 12,
     gracePeriodMonths: 0,
@@ -83,8 +90,22 @@ function setupDisburseMocks(loanOverrides = {}) {
   mockPrisma.loan.findFirst.mockResolvedValueOnce(buildApprovedLoan(loanOverrides));
   mockPrisma.member.findFirst.mockResolvedValueOnce({ kycStatus: 'APPROVED' });
   mockPrisma.account.findFirst.mockResolvedValueOnce({ id: ACCOUNT_ID, balance: '0.0000', version: 1 });
-  mockTx.$queryRaw.mockResolvedValueOnce([{ id: ACCOUNT_ID, balance: '0.0000', version: 1 }]);
-  mockTx.transaction.create.mockResolvedValueOnce({ id: 'txn-uuid-1', amount: '50000.0000' });
+  mockTx.$queryRaw
+    .mockResolvedValueOnce([
+      {
+        id: LOAN_ID,
+        status: LoanStatus.APPROVED,
+        principalAmount: '50000.0000',
+        processingFee: '0.0000',
+        tenureMonths: 12,
+        gracePeriodMonths: 0,
+        monthlyInstalment: '4438.9149',
+        repaymentScheduleGenerated: false,
+        ...loanOverrides,
+      },
+    ])
+    .mockResolvedValueOnce([{ id: ACCOUNT_ID, balance: '0.0000', version: 1 }]);
+  mockTx.transaction.create.mockResolvedValue({ id: 'txn-uuid-1', amount: '50000.0000' });
   mockTx.account.update.mockResolvedValueOnce({});
   mockTx.loan.update.mockResolvedValueOnce({
     id: LOAN_ID, status: LoanStatus.ACTIVE, repaymentScheduleGenerated: true,
@@ -110,6 +131,8 @@ describe('LoansService.disburse() — schedule generation', () => {
         { provide: IdempotencyService, useValue: mockIdempotency },
         { provide: getQueueToken(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER), useValue: mockGuarantorQueue },
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
+        { provide: DisbursementGateService, useValue: mockDisbursementGate },
+        { provide: ProductRuleService, useValue: mockProductRules },
       ],
     }).compile();
 
@@ -177,6 +200,36 @@ describe('LoansService.disburse() — schedule generation', () => {
 
     expect(mockTx.loanRepayment.createMany).toHaveBeenCalledWith(
       expect.objectContaining({ skipDuplicates: true }),
+    );
+  });
+
+  it('credits net disbursement after processing fee while recording gross loan and fee transactions', async () => {
+    setupDisburseMocks({ principalAmount: '100000.0000', processingFee: '5000.0000' });
+
+    await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
+
+    expect(mockTx.account.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ balance: '95000' }),
+      }),
+    );
+    expect(mockTx.transaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: 'LOAN_DISBURSEMENT',
+          amount: '100000',
+          balanceAfter: '100000',
+        }),
+      }),
+    );
+    expect(mockTx.transaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: 'FEE_CHARGE',
+          amount: '-5000',
+          balanceAfter: '95000',
+        }),
+      }),
     );
   });
 

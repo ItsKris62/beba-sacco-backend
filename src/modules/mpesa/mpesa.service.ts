@@ -218,44 +218,13 @@ export class MpesaService {
    * executor with no DB lookups — avoids stale-data race conditions under retries.
    */
   async queueLoanDisbursement(
-    loanId: string,
-    tenantId: string,
-    triggeredBy: string,
+    _loanId: string,
+    _tenantId: string,
+    _triggeredBy: string,
   ): Promise<{ jobId: string }> {
-    const loan = await this.prisma.loan.findFirst({
-      where: { id: loanId, tenantId },
-      include: {
-        member: { include: { user: { select: { phoneNumber: true, phone: true } } } },
-      },
-    });
-    if (!loan) {
-      throw new NotFoundException(`Loan ${loanId} not found in tenant ${tenantId}`);
-    }
-
-    const phone = loan.member.user.phoneNumber ?? loan.member.user.phone;
-    if (!phone) {
-      throw new BadRequestException(
-        `Member ${loan.memberId} has no phone number on file for B2C disbursement`,
-      );
-    }
-    const amount = Math.ceil(new Decimal(loan.principalAmount.toString()).toNumber());
-
-    const jobId = `b2c-disburse-${loanId}`;
-    await this.disbursementQueue.add(
-      'disburse-loan',
-      { loanId, tenantId, phone, amount, triggeredBy },
-      {
-        jobId,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 10000 },
-        removeOnComplete: { count: 500 },
-        removeOnFail: false,
-      },
+    throw new BadRequestException(
+      'Direct M-Pesa loan disbursement is disabled. Disburse the loan to FOSA first, then initiate a FOSA withdrawal for M-Pesa payout.',
     );
-    this.logger.log(
-      `B2C disbursement queued | loan=${loanId} job=${jobId} phone=${maskPhone(phone)} amount=${amount}`,
-    );
-    return { jobId };
   }
 
   async getTransactionStatus(
@@ -299,28 +268,28 @@ export class MpesaService {
    * Called only by MpesaDisbursementProcessor — never from HTTP handlers.
    */
   async executeB2cDisbursement(
-    loanId: string,
-    tenantId: string,
-    phone: string,
-    amount: number,
-    triggeredBy: string,
+    _loanId: string,
+    _tenantId: string,
+    _phone: string,
+    _amount: number,
+    _triggeredBy: string,
   ): Promise<{ conversationId: string; mpesaTxId: string }> {
-    const loan = await this.prisma.loan.findFirst({
-      where: { id: loanId, tenantId },
-      select: { memberId: true, loanNumber: true, principalAmount: true },
-    });
-    if (!loan) {
-      throw new NotFoundException(`Loan ${loanId} not found in tenant ${tenantId}`);
-    }
+    throw new BadRequestException(
+      'Direct M-Pesa loan disbursement execution is disabled. Use FOSA withdrawal payout after loan disbursement.',
+    );
 
-    const existing = await this.prisma.mpesaTransaction.findFirst({
-      where: {
-        tenantId,
-        loanId,
-        type: MpesaTxType.B2C,
-        status: { in: [TransactionStatus.PENDING, TransactionStatus.COMPLETED] },
-      },
-    });
+    const loanId = _loanId;
+    const tenantId = _tenantId;
+    const phone = _phone;
+    const amount = _amount;
+    const triggeredBy = _triggeredBy;
+    const loan = { memberId: '', loanNumber: loanId };
+    const existing = { id: '', status: TransactionStatus.FAILED } as {
+      conversationId?: string | null;
+      id: string;
+      status: TransactionStatus;
+    };
+
     if (existing) {
       this.logger.warn(
         `B2C disbursement skipped – record already exists for loan ${loanId}: status=${existing.status}`,

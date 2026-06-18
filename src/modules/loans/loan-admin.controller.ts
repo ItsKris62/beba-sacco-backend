@@ -157,7 +157,8 @@ export class LoanAdminController {
       '**Workflow transitions** (PENDING_GUARANTORS, PENDING_REVIEW, APPROVED, REJECTED): ' +
       'update the loan status only, no financial operations.\n\n' +
       '**DISBURSED**: triggers real financial disbursement — credits the member\'s FOSA ' +
-      'account with the principal amount inside a Serializable transaction. ' +
+      'account with netDisbursement = principalAmount - processingFee inside a Serializable transaction. ' +
+      'The ledger stores a gross LOAN_DISBURSEMENT credit and a separate FEE_CHARGE debit. ' +
       'Idempotent: returns 409 if the loan is already ACTIVE (already disbursed).\n\n' +
       'Valid workflow transitions:\n' +
       '- `DRAFT → PENDING_GUARANTORS | REJECTED`\n' +
@@ -179,10 +180,14 @@ export class LoanAdminController {
     schema: {
       example: {
         id: 'uuid',
-        loanNumber: 'LN-2026-000001',
-        status: 'ACTIVE',
-        disbursedAt: '2026-05-08T10:00:00.000Z',
-      },
+            loanNumber: 'LN-2026-000001',
+            status: 'ACTIVE',
+            principalAmount: '50000.0000',
+            processingFee: '1000.0000',
+            netDisbursement: 49000,
+            newBalance: 59000,
+            disbursedAt: '2026-05-08T10:00:00.000Z',
+          },
     },
   })
   @ApiResponse({ status: 400, description: 'Invalid status transition or missing rejection reason' })
@@ -214,7 +219,7 @@ export class LoanAdminController {
   @ApiOperation({
     summary: 'Review, decline, approve, or disburse a loan',
     description:
-      'Idempotent admin review endpoint. DISBURSE requires Idempotency-Key and performs ledger updates in a Serializable transaction.',
+      'Idempotent admin review endpoint. DISBURSE requires Idempotency-Key and posts the gross loan disbursement plus processing-fee ledger entries in a Serializable transaction. The member FOSA balance increases by principal minus processing fee.',
   })
   @ApiHeader({
     name: 'Idempotency-Key',
@@ -222,7 +227,20 @@ export class LoanAdminController {
     description: 'Required for DISBURSE. Recommended for all review mutations.',
   })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
-  @ApiResponse({ status: 200, description: 'Loan review action processed' })
+  @ApiResponse({
+    status: 200,
+    description: 'Loan review action processed',
+    schema: {
+      example: {
+        loan: { id: 'uuid', status: 'ACTIVE', principalAmount: '50000.0000', processingFee: '1000.0000' },
+        principalAmount: 50000,
+        processingFee: 1000,
+        netDisbursement: 49000,
+        newBalance: 59000,
+        disbursement_status: 'COMPLETED',
+      },
+    },
+  })
   @ApiResponse({ status: 400, description: 'Invalid action or loan state' })
   @ApiResponse({ status: 409, description: 'Duplicate request processing' })
   async reviewLoan(
@@ -240,9 +258,9 @@ export class LoanAdminController {
   @HttpCode(HttpStatus.OK)
   @Roles(UserRole.MANAGER)
   @ApiOperation({
-    summary: 'Recover defaulted loan amount from accepted guarantors',
+    summary: 'Start delayed guarantor recovery workflow',
     description:
-      'Deducts proportionally from accepted guarantor savings holds, updates recoveredAmount, and writes chained SASRA audit logs.',
+      'Queues a notice of intent to accepted guarantors and schedules the actual debit 7 days later. The delayed job re-checks default status before deducting.',
   })
   @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
@@ -257,13 +275,10 @@ export class LoanAdminController {
   })
   @ApiResponse({
     status: 200,
-    description: 'Recovery summary',
+    description: 'Recovery notice job queued',
     schema: {
       example: {
-        recoverySummary: {
-          totalRecovered: '10000',
-          remainingDebt: '0',
-        },
+        jobId: 'guarantor-recovery-notice:tenant-id:loan-id',
       },
     },
   })
@@ -295,7 +310,7 @@ export class LoanAdminController {
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
   ) {
-    return this.loanRecovery.recoverFromGuarantors(
+    return this.loanRecovery.initiateGuarantorRecovery(
       loanId,
       tenant.id,
       new Decimal(dto.defaultAmount),

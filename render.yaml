@@ -1,10 +1,27 @@
+databases:
+  - name: beba-postgres
+    databaseName: beba
+    user: beba
+    plan: starter
+    region: oregon
+    postgresMajorVersion: "16"
+
 services:
+  - type: redis
+    name: beba-redis
+    plan: starter
+    region: oregon
+    maxmemoryPolicy: noeviction
+    ipAllowList: []
+
   - type: web
     name: beba-api
     runtime: node
     plan: starter
     region: oregon
-    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy && npm run build
+    autoDeploy: true
+    buildCommand: npm install && npm run prisma:generate && npm run build
+    preDeployCommand: npm run prisma:deploy
     startCommand: npm run start:prod
     healthCheckPath: /api/health/ping
     envVars:
@@ -19,25 +36,25 @@ services:
       - key: CORS_ORIGIN
         value: https://your-production-frontend-domain.com
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: beba-postgres
+          property: connectionString
       - key: DIRECT_URL
-        sync: false
+        fromDatabase:
+          name: beba-postgres
+          property: connectionString
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: redis
+          name: beba-redis
+          property: connectionString
       - key: BULL_REDIS_URL
-        sync: false
-      - key: REDIS_HOST
-        sync: false
-      - key: REDIS_PORT
-        value: "6379"
-      - key: REDIS_PASSWORD
-        sync: false
+        fromService:
+          type: redis
+          name: beba-redis
+          property: connectionString
       - key: REDIS_TLS
         value: "true"
-      - key: UPSTASH_REDIS_REST_URL
-        sync: false
-      - key: UPSTASH_REDIS_REST_TOKEN
-        sync: false
       - key: JWT_SECRET
         generateValue: true
       - key: JWT_REFRESH_SECRET
@@ -106,7 +123,29 @@ services:
         sync: false
       - key: R2_PUBLIC_URL
         sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
       - key: TINYBIRD_TOKEN
+        sync: false
+      - key: TINYBIRD_API_URL
+        value: https://api.europe-west2.gcp.tinybird.co
+      - key: AUDIT_HMAC_SECRET
+        generateValue: true
+      - key: DATA_RETENTION_YEARS
+        value: "7"
+      - key: BULLMQ_CONCURRENCY_ACCRUAL
+        value: "3"
+      - key: BULLMQ_CONCURRENCY_RECON
+        value: "2"
+      - key: BULLMQ_CONCURRENCY_LEDGER
+        value: "2"
+      - key: BULLMQ_CONCURRENCY_WEBHOOK
+        value: "10"
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: PAGERDUTY_INTEGRATION_KEY
         sync: false
 
   - type: worker
@@ -114,41 +153,34 @@ services:
     runtime: node
     plan: starter
     region: oregon
-    buildCommand: npm install && npx prisma generate
-    startCommand: npm run start:worker
+    autoDeploy: true
+    buildCommand: npm install && npm run prisma:generate && npm run build
+    startCommand: npm run start:worker:prod
     envVars:
       - key: NODE_ENV
         value: production
       - key: WORKER_MODE
         value: "true"
-      - key: API_PREFIX
-        value: api
-      - key: APP_URL
-        value: https://your-production-frontend-domain.com
-      - key: FRONTEND_URL
-        value: https://your-production-frontend-domain.com
-      - key: CORS_ORIGIN
-        value: https://your-production-frontend-domain.com
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: beba-postgres
+          property: connectionString
       - key: DIRECT_URL
-        sync: false
+        fromDatabase:
+          name: beba-postgres
+          property: connectionString
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: redis
+          name: beba-redis
+          property: connectionString
       - key: BULL_REDIS_URL
-        sync: false
-      - key: REDIS_HOST
-        sync: false
-      - key: REDIS_PORT
-        value: "6379"
-      - key: REDIS_PASSWORD
-        sync: false
+        fromService:
+          type: redis
+          name: beba-redis
+          property: connectionString
       - key: REDIS_TLS
         value: "true"
-      - key: UPSTASH_REDIS_REST_URL
-        sync: false
-      - key: UPSTASH_REDIS_REST_TOKEN
-        sync: false
       - key: JWT_SECRET
         sync: false
       - key: JWT_REFRESH_SECRET
@@ -185,8 +217,6 @@ services:
         sync: false
       - key: MPESA_ALLOWED_IPS
         sync: false
-      - key: MPESA_STK_RATE_LIMIT_PER_DAY
-        value: "3"
       - key: PLUNK_API_KEY
         sync: false
       - key: PLUNK_SECRET_KEY
@@ -196,8 +226,6 @@ services:
       - key: PLUNK_FROM_NAME
         value: Beba SACCO
       - key: ENABLE_PRODUCT_RULES
-        value: "true"
-      - key: FEATURE_EMAIL_VERIFICATION_ENFORCED
         value: "true"
       - key: R2_ACCOUNT_ID
         sync: false
@@ -209,5 +237,23 @@ services:
         sync: false
       - key: R2_PUBLIC_URL
         sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
       - key: TINYBIRD_TOKEN
+        sync: false
+      - key: AUDIT_HMAC_SECRET
+        sync: false
+      - key: BULLMQ_CONCURRENCY_ACCRUAL
+        value: "3"
+      - key: BULLMQ_CONCURRENCY_RECON
+        value: "2"
+      - key: BULLMQ_CONCURRENCY_LEDGER
+        value: "2"
+      - key: BULLMQ_CONCURRENCY_WEBHOOK
+        value: "10"
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: PAGERDUTY_INTEGRATION_KEY
         sync: false

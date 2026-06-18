@@ -5,7 +5,10 @@ import { LoanAdminController } from '../loan-admin.controller';
 import { LoanApplicationService } from '../loan-application.service';
 import { LoansService } from '../loans.service';
 import { LoanAdminService } from '../loan-admin.service';
+import { LoanReviewService } from '../loan-review.service';
+import { LoanRecoveryService } from '../loan-recovery.service';
 import { AdminLoanStatus, UpdateLoanStatusDto } from '../dto/update-loan-status.dto';
+import { PrismaService } from '../../../prisma/prisma.service';
 
 // ─── Stubs ───────────────────────────────────────────────────────────────────
 
@@ -17,6 +20,9 @@ const mockLoanAppService = {
   updateStatus: jest.fn(),
   getGuarantorExposure: jest.fn(),
 };
+const mockPrisma = { loan: { findFirst: jest.fn() } };
+const mockLoanReviewService = { process: jest.fn() };
+const mockLoanRecoveryService = { initiateRecovery: jest.fn() };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -46,6 +52,9 @@ describe('LoanAdminController — PATCH /admin/loans/:id/status', () => {
         { provide: LoanApplicationService, useValue: mockLoanAppService },
         { provide: LoansService, useValue: mockLoansService },
         { provide: LoanAdminService, useValue: { findAll: jest.fn() } },
+        { provide: LoanReviewService, useValue: mockLoanReviewService },
+        { provide: LoanRecoveryService, useValue: mockLoanRecoveryService },
+        { provide: PrismaService, useValue: mockPrisma },
       ],
     }).compile();
 

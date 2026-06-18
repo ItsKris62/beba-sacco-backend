@@ -1,8 +1,15 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { AccountType, GuarantorStatus, Prisma } from '@prisma/client';
+import { InjectQueue } from '@nestjs/bullmq';
+import { AccountType, GuarantorStatus, Prisma, TransactionStatus, TransactionType } from '@prisma/client';
 import { createHash } from 'crypto';
+import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  GUARANTOR_RECOVERY_NOTICE_JOB,
+  InitiateGuarantorRecoveryJobPayload,
+  QUEUE_NAMES,
+} from '../queue/queue.constants';
 
 interface AcceptedGuarantorRecoveryRow {
   id: string;
@@ -23,7 +30,64 @@ export interface LoanRecoverySummary {
 
 @Injectable()
 export class LoanRecoveryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @InjectQueue(QUEUE_NAMES.GUARANTOR_RECOVERY)
+    private readonly guarantorRecoveryQueue: Queue<InitiateGuarantorRecoveryJobPayload>,
+  ) {}
+
+  async initiateGuarantorRecovery(
+    loanId: string,
+    tenantId: string,
+    defaultAmount: Decimal,
+    actorId: string,
+  ): Promise<{ jobId: string }> {
+    if (!defaultAmount.isFinite() || defaultAmount.lessThanOrEqualTo(0)) {
+      throw new BadRequestException('INVALID_DEFAULT_AMOUNT: defaultAmount must be greater than zero');
+    }
+
+    const loan = await this.prisma.loan.findFirst({
+      where: { id: loanId, tenantId },
+      select: { id: true, arrearsDays: true, status: true },
+    });
+    if (!loan) {
+      throw new NotFoundException('Loan not found');
+    }
+    if (loan.arrearsDays < 14 && loan.status !== 'DEFAULTED') {
+      throw new BadRequestException('GUARANTOR_RECOVERY_NOTICE_REQUIRES_T14_DEFAULT');
+    }
+
+    const jobId = `${GUARANTOR_RECOVERY_NOTICE_JOB}:${tenantId}:${loanId}`;
+    await this.guarantorRecoveryQueue.add(
+      GUARANTOR_RECOVERY_NOTICE_JOB,
+      {
+        loanId,
+        tenantId,
+        actorId,
+        defaultAmount: defaultAmount.toDecimalPlaces(4).toString(),
+        noticeDateIso: new Date().toISOString(),
+      },
+      {
+        jobId,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 10000 },
+        removeOnComplete: { count: 500 },
+        removeOnFail: false,
+      },
+    );
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId,
+        actorId,
+        action: 'GUARANTOR_RECOVERY.NOTICE_QUEUED',
+        entityType: 'Loan',
+        entityId: loanId,
+        metadata: { defaultAmount: defaultAmount.toDecimalPlaces(4).toString(), jobId },
+      },
+    });
+    return { jobId };
+  }
 
   async recoverFromGuarantors(
     loanId: string,
@@ -81,18 +145,20 @@ export class LoanRecoveryService {
             accountType,
             isActive: true,
           },
-          select: { id: true },
+          select: { id: true, balance: true },
         });
 
         if (!account) {
           continue;
         }
 
+        const balanceBefore = new Decimal(account.balance.toString());
+        const balanceAfter = balanceBefore.minus(allocation.deduction).toDecimalPlaces(4);
         const amount = allocation.deduction.toDecimalPlaces(4).toString();
         const accountUpdate = await tx.account.updateMany({
           where: { id: account.id, tenantId, isActive: true },
           data: {
-            balance: { decrement: amount },
+            balance: balanceAfter.toString(),
             lockedBalance: { decrement: amount },
             version: { increment: 1 },
           },
@@ -117,6 +183,22 @@ export class LoanRecoveryService {
             `RECOVERY_GUARANTOR_UPDATE_FAILED: guarantor ${allocation.guarantor.memberId} was not updated`,
           );
         }
+
+        await tx.transaction.create({
+          data: {
+            tenantId,
+            accountId: account.id,
+            loanId,
+            type: TransactionType.LOAN_REPAYMENT,
+            status: TransactionStatus.COMPLETED,
+            amount,
+            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toString(),
+            reference: `GUARANTOR-RECOVERY-${allocation.guarantor.id}-${recoveryDate.getTime()}`,
+            description: `Guarantor recovery for loan ${loan.loanNumber}`,
+            processedBy: actorId,
+          },
+        });
 
         await this.createAuditLogInTransaction(tx, {
           tenantId,

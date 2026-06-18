@@ -59,6 +59,7 @@ const mockDaraja = {
 
 const mockCallbackQueue = { add: jest.fn().mockResolvedValue({ id: 'job-1' }) };
 const mockDisbursementQueue = { add: jest.fn().mockResolvedValue({ id: 'disb-job-1' }) };
+const mockB2cTimeoutQueue = { add: jest.fn().mockResolvedValue({ id: 'b2c-timeout-job-1' }) };
 const mockDlqQueue = { add: jest.fn() };
 const mockIdempotency = {
   checkAndReserve: jest.fn().mockResolvedValue({ status: 'RESERVED' }),
@@ -93,6 +94,7 @@ function makeService(incrResult = 1): MpesaService {
     mockAudit,
     mockCallbackQueue as never,
     mockDisbursementQueue as never,
+    mockB2cTimeoutQueue as never,
     mockDlqQueue as never,
   );
 }
@@ -165,6 +167,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       mockAudit,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
+      mockB2cTimeoutQueue as never,
       mockDlqQueue as never,
     );
 
@@ -186,6 +189,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       mockAudit,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
+      mockB2cTimeoutQueue as never,
       mockDlqQueue as never,
     );
 
@@ -293,6 +297,7 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
     expect(result).toEqual({
       checkoutRequestId: 'ws_CO_001',
       customerMessage: 'Success. Request accepted for processing',
+      merchantRequestId: 'mr-001',
       mpesaTxId: 'mpesa-tx-1',
     });
   });
@@ -328,95 +333,33 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
 // ─── Suite: queueLoanDisbursement ────────────────────────────────────────────
 
 describe('MpesaService.queueLoanDisbursement', () => {
-  const MOCK_LOAN = {
-    id: 'loan-1',
-    memberId: 'member-1',
-    loanNumber: 'LN-2025-000001',
-    principalAmount: { toString: () => '50000' },
-    member: {
-      user: { phoneNumber: '254712345678', phone: null },
-    },
-  };
-
   beforeEach(() => {
     jest.clearAllMocks();
-    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(MOCK_LOAN);
-    (mockDisbursementQueue.add as jest.Mock).mockResolvedValue({ id: 'disb-job-1' });
   });
 
-  it('adds a disburse-loan job to the disbursement queue with the correct payload', async () => {
-    const service = makeService(1);
-    const result = await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-user-1');
-
-    expect(mockDisbursementQueue.add).toHaveBeenCalledTimes(1);
-    const [jobName, payload] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
-    expect(jobName).toBe('disburse-loan');
-    expect(payload).toMatchObject({
-      loanId: 'loan-1',
-      tenantId: 'tenant-1',
-      phone: '254712345678',
-      amount: 50000,
-      triggeredBy: 'officer-user-1',
-    });
-    expect(result.jobId).toBe('b2c-disburse-loan-1');
-  });
-
-  it('uses a deterministic jobId (b2c-disburse-{loanId}) for BullMQ deduplication', async () => {
-    const service = makeService(1);
-    await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1');
-
-    const [, , opts] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
-    expect(opts.jobId).toBe('b2c-disburse-loan-1');
-  });
-
-  it('prefers phoneNumber over phone when both are present on the user', async () => {
-    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue({
-      ...MOCK_LOAN,
-      member: { user: { phoneNumber: '254712345678', phone: '254700000000' } },
-    });
+  it('blocks direct M-Pesa loan disbursement before loading loan data', async () => {
     const service = makeService(1);
 
-    await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1');
+    await expect(
+      service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-user-1'),
+    ).rejects.toThrow(BadRequestException);
 
-    const [, payload] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
-    expect(payload.phone).toBe('254712345678');
+    expect(mockPrisma.loan.findFirst).not.toHaveBeenCalled();
+    expect(mockDisbursementQueue.add).not.toHaveBeenCalled();
   });
 
-  it('falls back to phone when phoneNumber is null', async () => {
-    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue({
-      ...MOCK_LOAN,
-      member: { user: { phoneNumber: null, phone: '254722000000' } },
-    });
-    const service = makeService(1);
-
-    await service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1');
-
-    const [, payload] = (mockDisbursementQueue.add as jest.Mock).mock.calls[0];
-    expect(payload.phone).toBe('254722000000');
-  });
-
-  it('throws NotFoundException without enqueueing when loan does not exist', async () => {
-    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(null);
+  it('keeps B2C queueing disabled for missing-loan and missing-phone cases too', async () => {
     const service = makeService(1);
 
     await expect(
       service.queueLoanDisbursement('nonexistent-loan', 'tenant-1', 'officer-1'),
-    ).rejects.toThrow(NotFoundException);
-
-    expect(mockDisbursementQueue.add).not.toHaveBeenCalled();
-  });
-
-  it('throws BadRequestException without enqueueing when member has no phone on file', async () => {
-    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue({
-      ...MOCK_LOAN,
-      member: { user: { phoneNumber: null, phone: null } },
-    });
-    const service = makeService(1);
-
-    await expect(
-      service.queueLoanDisbursement('loan-1', 'tenant-1', 'officer-1'),
     ).rejects.toThrow(BadRequestException);
 
+    await expect(
+      service.queueLoanDisbursement('loan-without-phone', 'tenant-1', 'officer-1'),
+    ).rejects.toThrow(BadRequestException);
+
+    expect(mockPrisma.loan.findFirst).not.toHaveBeenCalled();
     expect(mockDisbursementQueue.add).not.toHaveBeenCalled();
   });
 });
@@ -424,107 +367,36 @@ describe('MpesaService.queueLoanDisbursement', () => {
 // ─── Suite: executeB2cDisbursement ───────────────────────────────────────────
 
 describe('MpesaService.executeB2cDisbursement', () => {
-  const MOCK_LOAN_RECORD = {
-    memberId: 'member-1',
-    loanNumber: 'LN-2025-000001',
-    principalAmount: { toString: () => '50000' },
-  };
-
   beforeEach(() => {
     jest.clearAllMocks();
-    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(MOCK_LOAN_RECORD);
-    (mockPrisma.mpesaTransaction.findFirst as jest.Mock).mockResolvedValue(null);
-    (mockPrisma.mpesaTransaction.create as jest.Mock).mockResolvedValue({ id: 'b2c-tx-1' });
-    (mockDaraja.initiateB2C as jest.Mock).mockResolvedValue({
-      ConversationID: 'conv-001',
-      OriginatorConversationID: 'orig-001',
-      ResponseCode: '0',
-      ResponseDescription: 'Accept the service request successfully.',
-    });
   });
 
-  it('calls initiateB2C with commandId BusinessPayment, the resolved phone, and amount', async () => {
-    const service = makeService(1);
-    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
-
-    expect(mockDaraja.initiateB2C).toHaveBeenCalledTimes(1);
-    const b2cArgs = (mockDaraja.initiateB2C as jest.Mock).mock.calls[0][0];
-    expect(b2cArgs.commandId).toBe('BusinessPayment');
-    expect(b2cArgs.partyB).toBe('254712345678');
-    expect(b2cArgs.amount).toBe(50000);
-  });
-
-  it('creates a MpesaTransaction with type B2C and status PENDING', async () => {
-    const service = makeService(1);
-    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
-
-    expect(mockPrisma.mpesaTransaction.create).toHaveBeenCalledTimes(1);
-    const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
-    expect(data.type).toBe(MpesaTxType.B2C);
-    expect(data.status).toBe(TransactionStatus.PENDING);
-    expect(data.tenantId).toBe('tenant-1');
-    expect(data.loanId).toBe('loan-1');
-    expect(data.phoneNumber).toBe('254712345678');
-    expect(data.conversationId).toBe('conv-001');
-    expect(data.memberId).toBe('member-1');
-  });
-
-  it('returns conversationId and mpesaTxId on success', async () => {
-    const service = makeService(1);
-    const result = await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
-
-    expect(result).toEqual({ conversationId: 'conv-001', mpesaTxId: 'b2c-tx-1' });
-  });
-
-  it('sets triggerSource SYSTEM when triggeredBy is the literal string "SYSTEM"', async () => {
-    const service = makeService(1);
-    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'SYSTEM');
-
-    const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
-    expect(data.triggerSource).toBe(MpesaTriggerSource.SYSTEM);
-  });
-
-  it('sets triggerSource OFFICER when triggeredBy is any non-SYSTEM value', async () => {
-    const service = makeService(1);
-    await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-user-1');
-
-    const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
-    expect(data.triggerSource).toBe(MpesaTriggerSource.OFFICER);
-  });
-
-  it('skips Daraja and Prisma create when a PENDING disbursement already exists (idempotency guard)', async () => {
-    const existingTx = { id: 'existing-tx-1', conversationId: 'conv-existing', status: TransactionStatus.PENDING };
-    (mockPrisma.mpesaTransaction.findFirst as jest.Mock).mockResolvedValue(existingTx);
-    const service = makeService(1);
-
-    const result = await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
-
-    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
-    expect(mockPrisma.mpesaTransaction.create).not.toHaveBeenCalled();
-    expect(result.conversationId).toBe('conv-existing');
-    expect(result.mpesaTxId).toBe('existing-tx-1');
-  });
-
-  it('skips Daraja and Prisma create when a COMPLETED disbursement already exists', async () => {
-    const completedTx = { id: 'completed-tx-1', conversationId: 'conv-completed', status: TransactionStatus.COMPLETED };
-    (mockPrisma.mpesaTransaction.findFirst as jest.Mock).mockResolvedValue(completedTx);
-    const service = makeService(1);
-
-    const result = await service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1');
-
-    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
-    expect(result.mpesaTxId).toBe('completed-tx-1');
-  });
-
-  it('throws NotFoundException without calling Daraja when loan does not exist in tenant', async () => {
-    (mockPrisma.loan.findFirst as jest.Mock).mockResolvedValue(null);
+  it('blocks direct B2C execution before Daraja and database writes', async () => {
     const service = makeService(1);
 
     await expect(
-      service.executeB2cDisbursement('nonexistent-loan', 'tenant-1', '254712345678', 50000, 'officer-1'),
-    ).rejects.toThrow(NotFoundException);
+      service.executeB2cDisbursement('loan-1', 'tenant-1', '254712345678', 50000, 'officer-1'),
+    ).rejects.toThrow(BadRequestException);
 
-    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+    expect(mockPrisma.loan.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.mpesaTransaction.findFirst).not.toHaveBeenCalled();
     expect(mockPrisma.mpesaTransaction.create).not.toHaveBeenCalled();
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+  });
+
+  it('keeps direct B2C execution disabled even for duplicate or missing loan scenarios', async () => {
+    const service = makeService(1);
+
+    await expect(
+      service.executeB2cDisbursement('loan-with-existing-b2c', 'tenant-1', '254712345678', 50000, 'SYSTEM'),
+    ).rejects.toThrow(BadRequestException);
+
+    await expect(
+      service.executeB2cDisbursement('nonexistent-loan', 'tenant-1', '254712345678', 50000, 'officer-1'),
+    ).rejects.toThrow(BadRequestException);
+
+    expect(mockPrisma.mpesaTransaction.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.mpesaTransaction.create).not.toHaveBeenCalled();
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
   });
 });

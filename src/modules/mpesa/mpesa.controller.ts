@@ -184,10 +184,7 @@ export class MpesaController {
   @ApiOperation({
     summary: 'Queue B2C loan disbursement (admin/officer)',
     description:
-      'Enqueues a B2C payment job for the specified loan. ' +
-      'The loan must be in APPROVED status. ' +
-      'Disbursement is processed asynchronously; the loan transitions to DISBURSED ' +
-      'after Safaricom confirms the B2C payment.',
+      'Disabled for financial safety. Disburse loans to FOSA, then use the FOSA withdrawal flow for M-Pesa payout.',
   })
   @ApiParam({ name: 'loanId', description: 'Loan UUID' })
   @ApiResponse({
@@ -271,7 +268,12 @@ export class MpesaController {
   @ApiOperation({ summary: 'Unified Safaricom Daraja callback (STK / C2B / B2C)' })
   @ApiHeader({ name: 'X-Mpesa-Signature', required: false, description: 'HMAC-SHA256 over raw callback body' })
   @ApiHeader({ name: 'X-Mpesa-Timestamp', required: false, description: 'Callback timestamp used for replay protection' })
-  @ApiResponse({ status: 200, description: 'Callback acknowledged' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Callback acknowledged immediately. Processing is asynchronous through BullMQ and may post repayments, deposits, or B2C status updates after the ACK.',
+    schema: { example: { ResultCode: 0, ResultDesc: 'Accepted' } },
+  })
   async unifiedCallback(
     @Req() req: RawBodyRequest<Request>,
     @Body() body: Record<string, unknown>,

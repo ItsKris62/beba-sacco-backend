@@ -520,7 +520,7 @@ export class LoansService {
       where: { id, tenantId },
       select: {
         id: true, status: true, loanNumber: true,
-        principalAmount: true, memberId: true, tenureMonths: true,
+        principalAmount: true, processingFee: true, memberId: true, tenureMonths: true,
         gracePeriodMonths: true, monthlyInstalment: true,
         repaymentScheduleGenerated: true,
         member: { select: { user: { select: { email: true, firstName: true } } } },
@@ -565,8 +565,8 @@ export class LoansService {
       );
     }
 
-    const principal = new Decimal(loan.principalAmount.toString());
     const reference = `DISB-${uuidv4()}`;
+    const feeReference = `FEE-${uuidv4()}`;
 
     // Use SERIALIZABLE isolation on the direct client to prevent race conditions
     // (lost updates) when two disbursements or a disbursement + deposit run concurrently.
@@ -578,13 +578,14 @@ export class LoansService {
             id: string;
             status: LoanStatus;
             principalAmount: string;
+            processingFee: string;
             tenureMonths: number;
             gracePeriodMonths: number | null;
             monthlyInstalment: string;
             repaymentScheduleGenerated: boolean;
           }>
         >`
-          SELECT id, status, "principalAmount", "tenureMonths", "gracePeriodMonths",
+          SELECT id, status, "principalAmount", "processingFee", "tenureMonths", "gracePeriodMonths",
                  "monthlyInstalment", "repaymentScheduleGenerated"
           FROM "Loan"
           WHERE id = ${id} AND "tenantId" = ${tenantId}
@@ -605,7 +606,12 @@ export class LoansService {
 
         await this.disbursementGate.assertPassed(tenantId, id, tx);
 
-        const txPrincipal = new Decimal(lockedLoan.principalAmount.toString());
+        const txPrincipal = new Prisma.Decimal(lockedLoan.principalAmount.toString());
+        const processingFee = new Prisma.Decimal(lockedLoan.processingFee.toString());
+        const netDisbursement = txPrincipal.minus(processingFee);
+        if (netDisbursement.lessThan(0)) {
+          throw new BadRequestException('Processing fee cannot exceed loan principal.');
+        }
 
         // Lock account row with FOR UPDATE via raw query to get current balance + version
         const lockedRows = await tx.$queryRaw`
@@ -626,9 +632,12 @@ export class LoansService {
         // Duplicate reference guard
         const dupRef = await tx.transaction.findUnique({ where: { reference } });
         if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
+        const dupFeeRef = await tx.transaction.findUnique({ where: { reference: feeReference } });
+        if (dupFeeRef) throw new ConflictException(`Reference ${feeReference} already posted`);
 
-        const balanceBefore = new Decimal(account.balance.toString());
-        const balanceAfter = balanceBefore.plus(txPrincipal);
+        const balanceBefore = new Prisma.Decimal(account.balance.toString());
+        const grossBalanceAfter = balanceBefore.plus(txPrincipal);
+        const balanceAfter = grossBalanceAfter.minus(processingFee);
         const newVersion = account.version + 1;
 
         const txn = await tx.transaction.create({
@@ -640,9 +649,25 @@ export class LoansService {
             status: TransactionStatus.COMPLETED,
             amount: txPrincipal.toDecimalPlaces(4).toString(),
             balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+            balanceAfter: grossBalanceAfter.toDecimalPlaces(4).toString(),
             reference,
             description: `Loan disbursement – ${loan.loanNumber}`,
+            processedBy: disbursedBy,
+          },
+        });
+
+        await tx.transaction.create({
+          data: {
+            tenantId,
+            accountId: fosaAccount.id,
+            loanId: id,
+            type: TransactionType.FEE_CHARGE,
+            status: TransactionStatus.COMPLETED,
+            amount: processingFee.negated().toDecimalPlaces(4).toString(),
+            balanceBefore: grossBalanceAfter.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+            reference: feeReference,
+            description: `Loan processing fee - ${loan.loanNumber}`,
             processedBy: disbursedBy,
           },
         });
@@ -687,6 +712,8 @@ export class LoansService {
                 loanId: id,
                 dayNumber: i + 1,
                 amountPaid: instalment.toDecimalPlaces(2).toString(),
+                dueDate: paymentDate,
+                principalDue: instalment.toDecimalPlaces(4).toString(),
                 paymentDate,
                 method: 'SCHEDULED',
                 status: 'PENDING',
@@ -708,8 +735,11 @@ export class LoansService {
             metadata: {
               loanNumber: loan.loanNumber,
               principalAmount: txPrincipal.toNumber(),
+              processingFee: processingFee.toNumber(),
+              netDisbursement: netDisbursement.toNumber(),
               fosaAccountId: fosaAccount.id,
               reference,
+              feeReference,
               gracePeriodMonths: lockedLoan.gracePeriodMonths ?? 0,
               disbursedAt,
               dueDate,
