@@ -28,6 +28,7 @@ describe('LoanApplicationService', () => {
     loan: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
     loanProduct: { findFirst: jest.fn() },
     account: { findMany: jest.fn(), findFirst: jest.fn() },
+    tenant: { findFirst: jest.fn().mockResolvedValue({ settings: {} }) },
     loanGuarantor: {
       findFirst: jest.fn(),
       findMany: jest.fn(),
@@ -285,6 +286,70 @@ describe('LoanApplicationService', () => {
         ),
       ).rejects.toThrow(BadRequestException);
 
+      expect(tx.loan.create).not.toHaveBeenCalled();
+      expect(tx.loanGuarantor.create).not.toHaveBeenCalled();
+    });
+
+    it('should reject guarantor if circular guarantee is detected', async () => {
+      const tx = createMockPrisma();
+      tx.member.findFirst
+        .mockResolvedValueOnce({
+          id: 'applicant-a',
+          memberNumber: 'M1',
+          kycStatus: 'APPROVED',
+          isBlacklisted: false,
+        })
+        .mockResolvedValueOnce({
+          id: 'guarantor-b',
+          kycStatus: 'APPROVED',
+          isBlacklisted: false,
+          user: { role: UserRole.MEMBER, isActive: true, status: 'APPROVED' },
+        });
+      tx.loan.findFirst.mockResolvedValue(null);
+      tx.loanProduct.findFirst.mockResolvedValue({
+        id: 'p1',
+        name: 'Development',
+        minAmount: '1000',
+        maxAmount: '50000',
+        maxTenureMonths: 12,
+        interestRate: '0.12',
+        interestType: InterestType.FLAT,
+        processingFeeRate: '0.01',
+        gracePeriodMonths: 0,
+        requiredAccountType: 'FOSA',
+        guarantorCoverageRatio: '1',
+        minGuarantors: 1,
+        maxGuarantors: 3,
+      });
+      tx.account.findMany.mockResolvedValue([{ accountType: 'FOSA', balance: '50000', lockedBalance: '0' }]);
+      tx.loanGuarantor.findFirst.mockResolvedValue({ id: 'existing-reverse-guarantee' });
+      prisma.$transaction.mockImplementation((cb: (transactionClient: any) => unknown) => cb(tx));
+
+      await expect(
+        service.memberApply(
+          {
+            loanProductId: 'p1',
+            principalAmount: 10000,
+            tenureMonths: 6,
+            purpose: 'Business',
+            guarantors: [{ memberId: 'guarantor-b', guaranteedAmount: 10000 }],
+          },
+          't1',
+          'applicant-a',
+          'u1',
+          mockReq,
+          'idem-circular-guarantor',
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(tx.loanGuarantor.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            memberId: 'applicant-a',
+            loan: expect.objectContaining({ memberId: 'guarantor-b' }),
+          }),
+        }),
+      );
       expect(tx.loan.create).not.toHaveBeenCalled();
       expect(tx.loanGuarantor.create).not.toHaveBeenCalled();
     });

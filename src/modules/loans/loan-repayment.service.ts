@@ -67,6 +67,24 @@ export class LoanRepaymentService {
     private readonly guarantorRecoveryQueue: Queue<ExecuteGuarantorDebitJobPayload>,
   ) {}
 
+  async validateLoanForRepayment(loanReference: string, tenantId: string): Promise<{ id: string; status: LoanStatus }> {
+    const loanNumber = loanReference.replace(/^LOAN-/, '');
+    const loan = await this.prisma.loan.findFirst({
+      where: { loanNumber, tenantId },
+      select: { id: true, status: true },
+    });
+    if (!loan) {
+      throw new NotFoundException(`Loan "${loanNumber}" not found`);
+    }
+
+    const repayableStatuses: LoanStatus[] = [LoanStatus.DISBURSED, LoanStatus.ACTIVE];
+    if (!repayableStatuses.includes(loan.status)) {
+      throw new BadRequestException(`Loan "${loanNumber}" is not in a repayable state`);
+    }
+
+    return loan;
+  }
+
   async processRepayment(input: ProcessRepaymentInput): Promise<RepaymentAllocationSummary> {
     if (!input.amount.isFinite() || input.amount.lessThanOrEqualTo(0)) {
       throw new BadRequestException('INVALID_REPAYMENT_AMOUNT');

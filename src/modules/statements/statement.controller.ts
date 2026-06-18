@@ -11,7 +11,8 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { UserRole } from '@prisma/client';
 import { JwtAuthGuard } from '../../common/guards/jwt.guard';
 import { StatementService, FosaStatement, BosaStatement } from './statement.service';
@@ -29,6 +30,19 @@ class StatementQueryDto {
   @IsOptional()
   @IsString()
   periodTo?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number = 20;
 }
 
 class StatementExportQueryDto extends StatementQueryDto {
@@ -60,6 +74,8 @@ export class StatementController {
   @ApiQuery({ name: 'memberId', required: false })
   @ApiQuery({ name: 'periodFrom', required: false, example: '2024-01-01' })
   @ApiQuery({ name: 'periodTo', required: false, example: '2024-12-31' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({ status: 200, description: 'FOSA statement data' })
   @ApiResponse({ status: 403, description: 'STATEMENT_EXPORT consent required or forbidden member scope' })
   async getFosaStatement(
@@ -73,7 +89,7 @@ export class StatementController {
       memberId,
       query.periodFrom,
       query.periodTo,
-      { skipConsent, exportFormat: 'VIEW', ipAddress: req.ip },
+      { skipConsent, exportFormat: 'VIEW', ipAddress: req.ip, page: query.page, limit: query.limit },
     );
   }
 
@@ -87,6 +103,8 @@ export class StatementController {
   @ApiQuery({ name: 'memberId', required: false })
   @ApiQuery({ name: 'periodFrom', required: false })
   @ApiQuery({ name: 'periodTo', required: false })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({ status: 200, description: 'BOSA statement data' })
   async getBosaStatement(
     @Query() query: StatementQueryDto,
@@ -99,7 +117,7 @@ export class StatementController {
       memberId,
       query.periodFrom,
       query.periodTo,
-      { skipConsent, exportFormat: 'VIEW', ipAddress: req.ip },
+      { skipConsent, exportFormat: 'VIEW', ipAddress: req.ip, page: query.page, limit: query.limit },
     );
   }
 

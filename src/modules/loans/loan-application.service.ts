@@ -321,6 +321,35 @@ export class LoanApplicationService {
       return { eligible: false, reason: 'Guarantor is blacklisted' };
     }
 
+    const circularGuarantee = await this.prisma.loanGuarantor.findFirst({
+      where: {
+        tenantId,
+        memberId: borrowerMemberId,
+        status: { in: [GuarantorStatus.PENDING, GuarantorStatus.ACCEPTED] },
+        loan: {
+          tenantId,
+          memberId: guarantorMemberId,
+          status: {
+            in: [
+              LoanStatus.PENDING_GUARANTORS,
+              LoanStatus.PENDING_REVIEW,
+              LoanStatus.PENDING_APPROVAL,
+              LoanStatus.APPROVED,
+              LoanStatus.ACTIVE,
+              LoanStatus.DISBURSED,
+            ],
+          },
+        },
+      },
+      select: { id: true },
+    });
+    if (circularGuarantee) {
+      return {
+        eligible: false,
+        reason: 'Circular guarantee detected. This member is already guaranteeing a loan for the applicant.',
+      };
+    }
+
     // Check FOSA
     const fosaAccount = await this.prisma.account.findFirst({
       where: { memberId: guarantorMemberId, tenantId, accountType: 'FOSA', isActive: true },
@@ -359,9 +388,11 @@ export class LoanApplicationService {
       return { eligible: false, reason: 'Guarantor has a defaulted loan' };
     }
 
-    // Check concurrent guarantee limit
-    // TODO: Replace with TenantGuaranteeConfig after schema migration
-    const maxGuarantees = 3;
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    const maxGuarantees = this.resolveMaxConcurrentGuarantees(tenant?.settings);
 
     const activeGuarantees = await this.prisma.loanGuarantor.count({
       where: {
@@ -820,6 +851,35 @@ export class LoanApplicationService {
       return { eligible: false, reason: 'Guarantor is blacklisted' };
     }
 
+    const circularGuarantee = await tx.loanGuarantor.findFirst({
+      where: {
+        tenantId,
+        memberId: borrowerMemberId,
+        status: { in: [GuarantorStatus.PENDING, GuarantorStatus.ACCEPTED] },
+        loan: {
+          tenantId,
+          memberId: guarantorMemberId,
+          status: {
+            in: [
+              LoanStatus.PENDING_GUARANTORS,
+              LoanStatus.PENDING_REVIEW,
+              LoanStatus.PENDING_APPROVAL,
+              LoanStatus.APPROVED,
+              LoanStatus.ACTIVE,
+              LoanStatus.DISBURSED,
+            ],
+          },
+        },
+      },
+      select: { id: true },
+    });
+    if (circularGuarantee) {
+      return {
+        eligible: false,
+        reason: 'Circular guarantee detected. This member is already guaranteeing a loan for the applicant.',
+      };
+    }
+
     const fosaAccount = await tx.account.findFirst({
       where: { memberId: guarantorMemberId, tenantId, accountType, isActive: true },
       select: { id: true, balance: true, lockedBalance: true },
@@ -846,6 +906,12 @@ export class LoanApplicationService {
       return { eligible: false, reason: 'Guarantor has a defaulted loan' };
     }
 
+    const tenant = await tx.tenant.findFirst({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    const maxGuarantees = this.resolveMaxConcurrentGuarantees(tenant?.settings);
+
     const activeGuarantees = await tx.loanGuarantor.count({
       where: {
         memberId: guarantorMemberId,
@@ -858,11 +924,20 @@ export class LoanApplicationService {
         },
       },
     });
-    if (activeGuarantees >= 3) {
-      return { eligible: false, reason: 'Guarantor has reached the maximum concurrent guarantee limit (3)' };
+    if (activeGuarantees >= maxGuarantees) {
+      return { eligible: false, reason: `Guarantor has reached the maximum concurrent guarantee limit (${maxGuarantees})` };
     }
 
     return { eligible: true };
+  }
+
+  private resolveMaxConcurrentGuarantees(settings: Prisma.JsonValue | null | undefined): number {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return 3;
+    }
+
+    const value = (settings as Record<string, unknown>).maxConcurrentGuarantees;
+    return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 3;
   }
 
   private async createAuditLogInTransaction(
@@ -1713,8 +1788,11 @@ export class LoanApplicationService {
     });
     if (!member) throw new NotFoundException('Member not found');
 
-    // TODO: Replace with TenantGuaranteeConfig after schema migration
-    const maxGuarantees = 3;
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    const maxGuarantees = this.resolveMaxConcurrentGuarantees(tenant?.settings);
 
     const activeGuarantees = await this.prisma.loanGuarantor.findMany({
       where: {

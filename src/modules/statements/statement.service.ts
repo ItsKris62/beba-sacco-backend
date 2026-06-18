@@ -19,6 +19,13 @@ export interface StatementTransaction {
   reference: string;
 }
 
+export interface StatementMeta {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
 export interface FosaStatement {
   memberId: string;
   memberNumber: string;
@@ -31,6 +38,7 @@ export interface FosaStatement {
   totalDisbursed: number;
   totalRepaid: number;
   transactions: StatementTransaction[];
+  meta?: StatementMeta;
   auditHash: string;
 }
 
@@ -46,6 +54,7 @@ export interface BosaStatement {
   totalSavings: number;
   welfareContributions: number;
   transactions: StatementTransaction[];
+  meta?: StatementMeta;
   auditHash: string;
 }
 
@@ -53,6 +62,8 @@ export interface StatementOptions {
   skipConsent?: boolean;
   exportFormat?: 'VIEW' | 'PDF' | 'CSV';
   ipAddress?: string;
+  page?: number;
+  limit?: number;
 }
 
 @Injectable()
@@ -214,8 +225,9 @@ export class StatementService {
         runningBalance -= tx.credit;
         return { ...tx, balance: runningBalance };
       });
+    const paginated = this.paginateTransactions(transactions, options);
 
-    const content = JSON.stringify({ memberId, openingBalance, transactions, totalDisbursed, totalRepaid });
+    const content = JSON.stringify({ memberId, openingBalance, transactions: paginated.transactions, totalDisbursed, totalRepaid });
     const auditHash = createHash('sha256').update(content).digest('hex');
     const statement: FosaStatement = {
       memberId,
@@ -228,7 +240,8 @@ export class StatementService {
       closingBalance: runningBalance,
       totalDisbursed,
       totalRepaid,
-      transactions,
+      transactions: paginated.transactions,
+      ...(paginated.meta && { meta: paginated.meta }),
       auditHash,
     };
 
@@ -288,10 +301,11 @@ export class StatementService {
       });
     }
 
+    const paginated = this.paginateTransactions(transactions, options);
     const content = JSON.stringify({
       memberId,
       openingBalance,
-      transactions,
+      transactions: paginated.transactions,
       totalSavings,
       welfareContributions,
     });
@@ -307,7 +321,8 @@ export class StatementService {
       closingBalance: runningBalance,
       totalSavings,
       welfareContributions,
-      transactions,
+      transactions: paginated.transactions,
+      ...(paginated.meta && { meta: paginated.meta }),
       auditHash,
     };
 
@@ -463,6 +478,30 @@ export class StatementService {
         'STATEMENT_EXPORT consent required. Please accept the consent in your profile.',
       );
     }
+  }
+
+  private paginateTransactions(
+    transactions: StatementTransaction[],
+    options: StatementOptions,
+  ): { transactions: StatementTransaction[]; meta?: StatementMeta } {
+    if (!options.page && !options.limit) {
+      return { transactions };
+    }
+
+    const page = Math.max(1, Number(options.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Number(options.limit ?? 20)));
+    const total = transactions.length;
+    const skip = (page - 1) * limit;
+
+    return {
+      transactions: transactions.slice(skip, skip + limit),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
   }
 
   private async auditStatement(

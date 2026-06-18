@@ -11,7 +11,7 @@ import { AuditService } from '../../audit/audit.service';
 const TENANT_ID = 'tenant-uuid-1';
 
 const mockPrisma = {
-  transaction: { findMany: jest.fn() },
+  transaction: { findMany: jest.fn(), count: jest.fn() },
   account: { groupBy: jest.fn() },
   loan: { groupBy: jest.fn() },
   mpesaTransaction: {
@@ -49,6 +49,7 @@ describe('AccountingService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockPrisma.transaction.count.mockResolvedValue(1);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -67,11 +68,27 @@ describe('AccountingService', () => {
   describe('getLedger()', () => {
     it('returns grouped data with meta', async () => {
       mockPrisma.transaction.findMany.mockResolvedValueOnce([buildTxStub()]);
+      mockPrisma.transaction.count.mockResolvedValueOnce(1);
 
       const result = await service.getLedger(TENANT_ID, {});
 
       expect(result.data).toHaveLength(1);
-      expect(result.meta).toMatchObject({ count: 1 });
+      expect(result.meta).toMatchObject({ page: 1, limit: 20, total: 1, totalPages: 1 });
+    });
+
+    it('applies skip and take pagination to the transaction query', async () => {
+      mockPrisma.transaction.findMany.mockResolvedValueOnce([buildTxStub()]);
+      mockPrisma.transaction.count.mockResolvedValueOnce(35);
+
+      const result = await service.getLedger(TENANT_ID, { page: 2, limit: 10 });
+
+      expect(mockPrisma.transaction.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 10, take: 10 }),
+      );
+      expect(mockPrisma.transaction.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({ tenantId: TENANT_ID, status: TransactionStatus.COMPLETED }),
+      });
+      expect(result.meta).toMatchObject({ page: 2, limit: 10, total: 35, totalPages: 4 });
     });
 
     it('groups transactions by accountId + date', async () => {

@@ -19,6 +19,7 @@ import {
   QUEUE_NAMES,
 } from '../queue/queue.constants';
 import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
+import { LoanRepaymentService } from '../loans/loan-repayment.service';
 
 // ─── Redis key helpers ────────────────────────────────────────────────────────
 
@@ -29,10 +30,9 @@ function secondsUntilMidnightEAT(): number {
   const now = new Date();
   const eatOffset = 3 * 60 * 60 * 1000;
   const eat = new Date(now.getTime() + eatOffset);
-  const midnight = new Date(
-    Date.UTC(eat.getUTCFullYear(), eat.getUTCMonth(), eat.getUTCDate() + 1),
-  );
-  return Math.ceil((midnight.getTime() - now.getTime()) / 1000);
+  const midnightEatUtcMs =
+    Date.UTC(eat.getUTCFullYear(), eat.getUTCMonth(), eat.getUTCDate() + 1) - eatOffset;
+  return Math.ceil((midnightEatUtcMs - now.getTime()) / 1000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -48,6 +48,7 @@ export class MpesaService {
     private readonly idempotency: IdempotencyService,
     private readonly daraja: DarajaClientService,
     private readonly audit: AuditService,
+    private readonly loanRepaymentService: LoanRepaymentService,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK)
     private readonly callbackQueue: Queue<MpesaCallbackJobPayload>,
     @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
@@ -464,18 +465,7 @@ export class MpesaService {
     tenantId: string,
   ): Promise<void> {
     if (purpose === DepositPurpose.LOAN_REPAYMENT) {
-      const loanNumber = accountRef.replace(/^LOAN-/, '');
-      const loan = await this.prisma.loan.findFirst({
-        where: { loanNumber, tenantId },
-        select: { id: true, status: true },
-      });
-      if (!loan) {
-        throw new NotFoundException(`Loan "${loanNumber}" not found`);
-      }
-      const repayableStatuses = ['DISBURSED', 'ACTIVE'];
-      if (!repayableStatuses.includes(loan.status)) {
-        throw new BadRequestException(`Loan "${loanNumber}" is not in a repayable state`);
-      }
+      await this.loanRepaymentService.validateLoanForRepayment(accountRef, tenantId);
     } else {
       const account = await this.prisma.account.findFirst({
         where: { accountNumber: accountRef, tenantId, isActive: true },

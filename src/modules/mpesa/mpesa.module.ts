@@ -12,6 +12,7 @@ import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { LoansModule } from '../loans/loans.module';
 
 /**
  * MpesaModule wires all Daraja / M-Pesa concerns:
@@ -42,6 +43,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
 @Module({
   imports: [
     AuditModule,
+    LoansModule,
     // Queue registrations (connection inherited from BullModule.forRootAsync in QueueModule)
     BullModule.registerQueue(
       { name: QUEUE_NAMES.MPESA_CALLBACK },

@@ -62,18 +62,22 @@ export class SupportService {
   }
 
   async getTicket(id: string, tenantId: string, actor: AuthenticatedUser) {
+    const member = actor.role === UserRole.MEMBER
+      ? await this.requireActorMember(tenantId, actor.id)
+      : null;
+
     const ticket = await this.prisma.supportTicket.findFirst({
-      where: { id, tenantId },
+      where: {
+        id,
+        tenantId,
+        ...(member ? { memberId: member.id } : {}),
+      },
       include: {
         member: { select: { id: true, memberNumber: true, userId: true } },
         messages: { orderBy: { createdAt: 'asc' } },
       },
     });
     if (!ticket) throw new NotFoundException('Support ticket not found');
-
-    if (actor.role === UserRole.MEMBER && ticket.member.userId !== actor.id) {
-      throw new ForbiddenException('You can only view your own support tickets');
-    }
 
     return ticket;
   }

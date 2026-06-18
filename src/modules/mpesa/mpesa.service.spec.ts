@@ -8,6 +8,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MpesaTxType, MpesaTriggerSource, TransactionStatus } from '@prisma/client';
 import { DepositPurpose } from './dto/deposit-request.dto';
+import { LoanRepaymentService } from '../loans/loan-repayment.service';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,10 @@ const mockAudit = {
   create: jest.fn().mockResolvedValue(undefined),
 } as unknown as AuditService;
 
+const mockLoanRepaymentService = {
+  validateLoanForRepayment: jest.fn().mockResolvedValue({ id: 'loan-1', status: 'ACTIVE' }),
+} as unknown as LoanRepaymentService;
+
 function makeRedis(incrResult: number): RedisService {
   return {
     incrWithExpireAt: jest.fn().mockResolvedValue(incrResult),
@@ -92,6 +97,7 @@ function makeService(incrResult = 1): MpesaService {
     mockIdempotency,
     mockDaraja,
     mockAudit,
+    mockLoanRepaymentService,
     mockCallbackQueue as never,
     mockDisbursementQueue as never,
     mockB2cTimeoutQueue as never,
@@ -165,6 +171,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       mockIdempotency,
       mockDaraja,
       mockAudit,
+      mockLoanRepaymentService,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
       mockB2cTimeoutQueue as never,
@@ -187,6 +194,7 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       mockIdempotency,
       mockDaraja,
       mockAudit,
+      mockLoanRepaymentService,
       mockCallbackQueue as never,
       mockDisbursementQueue as never,
       mockB2cTimeoutQueue as never,

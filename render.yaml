@@ -20,8 +20,8 @@ services:
     plan: starter
     region: oregon
     autoDeploy: true
-    buildCommand: npm install && npm run prisma:generate && npm run build
-    preDeployCommand: npm run prisma:deploy
+    buildCommand: npm install && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    preDeployCommand: npx prisma migrate deploy --schema=src/prisma/schema.prisma
     startCommand: npm run start:prod
     healthCheckPath: /api/health/ping
     envVars:
@@ -150,11 +150,13 @@ services:
 
   - type: worker
     name: beba-worker
+    # CRITICAL: keep BullMQ processors in this separate worker service.
+    # Do not run queue processors inside the web service; web traffic must not starve jobs.
     runtime: node
     plan: starter
     region: oregon
     autoDeploy: true
-    buildCommand: npm install && npm run prisma:generate && npm run build
+    buildCommand: npm install && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
     startCommand: npm run start:worker:prod
     envVars:
       - key: NODE_ENV

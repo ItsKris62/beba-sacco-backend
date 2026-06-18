@@ -42,30 +42,39 @@ export class AccountingService {
    */
   async getLedger(tenantId: string, query: LedgerQueryDto) {
     const { startDate, endDate, accountId } = query;
+    const page = Math.max(1, Number(query.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));
+    const skip = (page - 1) * limit;
 
     const dateFilter = this.buildDateFilter(startDate, endDate);
+    const where = {
+      tenantId,
+      status: TransactionStatus.COMPLETED,
+      ...(accountId && { accountId }),
+      ...(dateFilter && { createdAt: dateFilter }),
+    };
 
-    const txns = await this.prisma.transaction.findMany({
-      where: {
-        tenantId,
-        status: TransactionStatus.COMPLETED,
-        ...(accountId && { accountId }),
-        ...(dateFilter && { createdAt: dateFilter }),
-      },
-      orderBy: [{ accountId: 'asc' }, { createdAt: 'asc' }],
-      select: {
-        id: true,
-        accountId: true,
-        type: true,
-        amount: true,
-        balanceBefore: true,
-        balanceAfter: true,
-        reference: true,
-        description: true,
-        createdAt: true,
-        account: { select: { accountNumber: true, accountType: true } },
-      },
-    });
+    const [txns, total] = await Promise.all([
+      this.prisma.transaction.findMany({
+        where,
+        orderBy: [{ accountId: 'asc' }, { createdAt: 'asc' }],
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          accountId: true,
+          type: true,
+          amount: true,
+          balanceBefore: true,
+          balanceAfter: true,
+          reference: true,
+          description: true,
+          createdAt: true,
+          account: { select: { accountNumber: true, accountType: true } },
+        },
+      }),
+      this.prisma.transaction.count({ where }),
+    ]);
 
     // Group by accountId + YYYY-MM-DD
     const grouped = new Map<string, typeof txns>();
@@ -129,7 +138,18 @@ export class AccountingService {
     // Sort by date desc
     data.sort((a, b) => b.date.localeCompare(a.date));
 
-    return { data, meta: { count: data.length, startDate, endDate, accountId } };
+    return {
+      data,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        startDate,
+        endDate,
+        accountId,
+      },
+    };
   }
 
   // ─── RECONCILIATION ─────────────────────────────────────────────────────────

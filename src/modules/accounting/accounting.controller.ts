@@ -43,6 +43,8 @@ export class AccountingController {
       'opening/closing balances and totalIn/totalOut aggregates. ' +
       'Provide accountId to drill down into a single account and include individual transaction rows.',
   })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiQuery({ name: 'startDate', required: false, example: '2026-01-01' })
   @ApiQuery({ name: 'endDate', required: false, example: '2026-05-31' })
   @ApiQuery({ name: 'accountId', required: false, type: String })
@@ -64,7 +66,15 @@ export class AccountingController {
             transactionCount: 1,
           },
         ],
-        meta: { count: 1, startDate: '2026-01-01', endDate: '2026-05-31', accountId: null },
+        meta: {
+          page: 1,
+          limit: 20,
+          total: 1,
+          totalPages: 1,
+          startDate: '2026-01-01',
+          endDate: '2026-05-31',
+          accountId: null,
+        },
       },
     },
   })
