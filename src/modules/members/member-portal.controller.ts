@@ -42,6 +42,7 @@ import type { Tenant } from '@prisma/client';
 import { MemberApplyLoanDto, MemberRequestGuarantorsDto } from '../loans/dto/member-apply-loan.dto';
 import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
 import { MemberStkPushDto } from './dto/member-stk-push.dto';
+import { WithdrawMpesaDto } from './dto/withdraw-mpesa.dto';
 import { PatchProfileDto } from './dto/patch-profile.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
@@ -547,6 +548,29 @@ export class MemberPortalController {
       tenant.id,
       req.ip,
       idempotencyKey,
+    );
+  }
+
+  @Post('withdraw/mpesa')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Withdraw from FOSA to M-Pesa',
+    description: "Withdraws available FOSA funds to the member's phone via M-Pesa B2C.",
+  })
+  @ApiResponse({ status: 200, description: 'Withdrawal initiated successfully' })
+  @ApiResponse({ status: 400, description: 'Insufficient FOSA available balance' })
+  async withdrawMpesa(
+    @Body() dto: WithdrawMpesaDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    return this.portal.withdrawMpesa(
+      user.id,
+      dto.phoneNumber,
+      dto.amount,
+      tenant.id,
+      req.ip,
     );
   }
 }

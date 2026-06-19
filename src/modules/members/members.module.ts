@@ -28,6 +28,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     DashboardModule,
     DocumentsModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
+    BullModule.registerQueue({ name: QUEUE_NAMES.MPESA_DISBURSEMENT }),
   ],
   controllers: [MemberPortalController, MembersController, GuarantorLookupController],
   providers: [MembersService, MemberPortalService, GuarantorLookupService, PrismaService],

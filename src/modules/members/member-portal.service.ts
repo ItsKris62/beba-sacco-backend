@@ -1,19 +1,23 @@
 import {
   Injectable, Logger, NotFoundException, BadRequestException,
 } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { LoanStatus, InterestType } from '@prisma/client';
+import { LoanStatus, InterestType, TransactionStatus, TransactionType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MpesaService } from '../mpesa/mpesa.service';
 import { MemberDepositDto, DepositPurpose } from '../mpesa/dto/deposit-request.dto';
+import { maskPhone } from '../mpesa/utils/mpesa.utils';
 import { MpesaTriggerSource } from '@prisma/client';
 import { LoansService } from '../loans/loans.service';
 import { StorageService } from '../storage/storage.service';
 import { GuarantorResponseDto } from '../loans/dto/guarantor-response.dto';
 import { MemberLoanApplyDto } from './dto/member-loan-apply.dto';
 import { UploadUrlResponseDto } from './dto/upload-url.dto';
+import { QUEUE_NAMES, MpesaDisbursementJobPayload } from '../queue/queue.constants';
 
 /**
  * Member Portal Service
@@ -31,6 +35,8 @@ export class MemberPortalService {
     private readonly mpesaService: MpesaService,
     private readonly loansService: LoansService,
     private readonly storage: StorageService,
+    @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
+    private readonly disbursementQueue: Queue<MpesaDisbursementJobPayload>,
   ) {}
 
   // ─── DASHBOARD ────────────────────────────────────────────────
@@ -319,6 +325,108 @@ export class MemberPortalService {
       MpesaTriggerSource.MEMBER,
       idempotencyKey,
     );
+  }
+
+  // ─── MPESA FOSA WITHDRAWAL ───────────────────────────────────
+
+  async withdrawMpesa(
+    userId: string,
+    phone: string,
+    amount: number,
+    tenantId: string,
+    ipAddress?: string,
+  ) {
+    const member = await this.resolveMember(userId, tenantId);
+
+    // Hardcode withdrawal fee or fetch from config
+    const withdrawalFee = new Decimal(0); // Add logic to calculate fee if needed
+    const requestedAmount = new Decimal(amount);
+    const totalDeduction = requestedAmount.plus(withdrawalFee);
+
+    return this.prisma.$transaction(async (tx) => {
+      const fosaAccount = await tx.account.findFirst({
+        where: { memberId: member.id, tenantId, accountType: 'FOSA', isActive: true },
+        select: { id: true, balance: true, lockedBalance: true, accountNumber: true },
+      });
+
+      if (!fosaAccount) {
+        throw new NotFoundException('No active FOSA account found for withdrawal');
+      }
+
+      const availableBalance = new Decimal(fosaAccount.balance.toString()).minus(
+        new Decimal(fosaAccount.lockedBalance.toString())
+      );
+
+      if (availableBalance.lessThan(totalDeduction)) {
+        throw new BadRequestException('Insufficient FOSA available balance');
+      }
+
+      const balanceBefore = new Decimal(fosaAccount.balance.toString());
+      const balanceAfter = balanceBefore.minus(totalDeduction);
+
+      const accountUpdate = await tx.account.updateMany({
+        where: { id: fosaAccount.id, tenantId, isActive: true },
+        data: {
+          balance: balanceAfter.toString(),
+          version: { increment: 1 },
+        },
+      });
+
+      if (accountUpdate.count !== 1) {
+        throw new BadRequestException('Failed to process withdrawal due to concurrent updates');
+      }
+
+      // Log the transaction
+      const transaction = await tx.transaction.create({
+        data: {
+          tenantId,
+          accountId: fosaAccount.id,
+          type: TransactionType.WITHDRAWAL,
+          status: TransactionStatus.COMPLETED,
+          amount: totalDeduction.toString(),
+          balanceBefore: balanceBefore.toString(),
+          balanceAfter: balanceAfter.toString(),
+          reference: `WD-Mpesa-${Date.now()}`,
+          description: `M-Pesa withdrawal to ${maskPhone(phone)}`,
+          processedBy: userId,
+        },
+      });
+
+      // Dispatch B2C job
+      await this.disbursementQueue.add(
+        QUEUE_NAMES.MPESA_DISBURSEMENT,
+        {
+          loanId: fosaAccount.id, // Using account ID since it's a FOSA withdrawal, not loan
+          tenantId,
+          phone,
+          amount,
+          triggeredBy: userId,
+        },
+        {
+          jobId: `fosa-withdraw-${transaction.id}`,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        }
+      );
+
+      await this.audit.create({
+        tenantId,
+        actorId: userId,
+        action: 'MPESA.WITHDRAW.INITIATED',
+        entityType: 'Transaction',
+        entityId: transaction.id,
+        newValue: { amount, phone: maskPhone(phone), status: 'PROCESSING' },
+        metadata: { accountId: fosaAccount.id },
+        ipAddress,
+      }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+      return {
+        message: 'Withdrawal initiated successfully',
+        transactionId: transaction.id,
+      };
+    }, { isolationLevel: 'Serializable' });
   }
 
   // ─── DOCUMENT UPLOAD ─────────────────────────────────────────

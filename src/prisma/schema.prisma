@@ -742,6 +742,9 @@ model LoanProduct {
   // 0 = repayments start immediately in the month following disbursement.
   gracePeriodMonths Int @default(0)
 
+  // Grace period: days after default before guarantors are attacked
+  gracePeriodDays   Int @default(14)
+
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

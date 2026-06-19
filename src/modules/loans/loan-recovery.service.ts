@@ -48,13 +48,21 @@ export class LoanRecoveryService {
 
     const loan = await this.prisma.loan.findFirst({
       where: { id: loanId, tenantId },
-      select: { id: true, arrearsDays: true, status: true },
+      select: { 
+        id: true, 
+        arrearsDays: true, 
+        status: true,
+        loanProduct: { select: { gracePeriodDays: true } } 
+      },
     });
     if (!loan) {
       throw new NotFoundException('Loan not found');
     }
-    if (loan.arrearsDays < 14 && loan.status !== 'DEFAULTED') {
-      throw new BadRequestException('GUARANTOR_RECOVERY_NOTICE_REQUIRES_T14_DEFAULT');
+    
+    const gracePeriod = loan.loanProduct?.gracePeriodDays ?? 14;
+    
+    if (loan.arrearsDays < gracePeriod && loan.status !== 'DEFAULTED') {
+      throw new BadRequestException(`GUARANTOR_RECOVERY_NOTICE_REQUIRES_T${gracePeriod}_DEFAULT`);
     }
 
     const jobId = `${GUARANTOR_RECOVERY_NOTICE_JOB}:${tenantId}:${loanId}`;

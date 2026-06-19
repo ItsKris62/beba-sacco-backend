@@ -217,6 +217,14 @@ export class MpesaService {
    * Resolves loan phone + amount from the DB, then enqueues a B2C disbursement job.
    * Phone and amount are embedded in the job payload so the processor is a pure
    * executor with no DB lookups — avoids stale-data race conditions under retries.
+   * 
+   * ARCHITECTURAL DECISION: Direct B2C M-Pesa disbursement is DISABLED.
+   * Reasoning: 
+   * 1. Reconciliation Control: We must enforce disbursement to the member's internal FOSA wallet 
+   *    first to allow future offsets for BOSA contributions or outstanding fines.
+   * 2. API Reliability: Safaricom B2C timeouts cause reconciliation nightmares. Internal DB 
+   *    transactions to the FOSA wallet are 100% reliable. The member must explicitly initiate a 
+   *    FOSA withdrawal to M-Pesa to pull the funds out. Do not attempt to "fix" this.
    */
   async queueLoanDisbursement(
     _loanId: string,
