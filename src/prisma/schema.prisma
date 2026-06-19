@@ -902,6 +902,8 @@ model MpesaTransaction {
   member          Member? @relation(fields: [memberId], references: [id])
   loanId          String? // present for repayments and disbursements
   loanRepaymentId String? // set when a specific LoanRepayment record is created
+  referenceType   String?
+  referenceId     String?
 
   // ── Daraja identifiers (only the relevant fields are non-null per type) ──
   // STK Push / C2B: checkoutRequestId present

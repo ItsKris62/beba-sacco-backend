@@ -246,7 +246,7 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
     GuarantorValidationService,
     ...getQueueProcessorProviders({ mode: 'web' }),
   ],
-  exports: [BullModule],
+  exports: [BullModule, ...getQueueProcessorProviders({ mode: 'web' })],
 })
 export class QueueModule {
   static forRoot(options: QueueModuleOptions = {}): DynamicModule {
@@ -255,7 +255,7 @@ export class QueueModule {
     return {
       module: QueueModule,
       providers,
-      exports: [BullModule],
+      exports: [BullModule, ...providers],
     };
   }
 }

@@ -515,7 +515,13 @@ export class LoansService {
    *
    * Uses a Prisma interactive transaction for atomicity.
    */
-  async disburse(id: string, tenantId: string, disbursedBy: string, ipAddress?: string) {
+  async disburse(id: string, tenantId: string, disbursedBy: string, ipAddress?: string, disburseToMpesa?: boolean) {
+    if (disburseToMpesa) {
+      throw new BadRequestException(
+        'Direct M-Pesa disbursement is disabled for security and reconciliation reasons. ' +
+        'Funds must be disbursed to the member\'s FOSA account first.'
+      );
+    }
     const loan = await this.prisma.loan.findFirst({
       where: { id, tenantId },
       select: {
@@ -1367,7 +1373,7 @@ export class LoansService {
           await this.releaseGuarantorHoldsOnFullRepayment(tx, tenantId, loanId, processedBy);
         }
 
-        await this.audit.create({
+        await this.audit.createAtomic(tx, {
           tenantId,
           userId: processedBy,
           action: 'LOAN.REPAYMENT',
@@ -1381,7 +1387,7 @@ export class LoansService {
             reference,
           },
           ipAddress,
-        }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+        });
 
         return {
           loan: updatedLoan,

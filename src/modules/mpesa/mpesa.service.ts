@@ -277,36 +277,28 @@ export class MpesaService {
    * Called only by MpesaDisbursementProcessor — never from HTTP handlers.
    */
   async executeB2cDisbursement(
-    _loanId: string,
-    _tenantId: string,
-    _phone: string,
-    _amount: number,
-    _triggeredBy: string,
+    referenceId: string,
+    referenceType: 'LOAN_DISBURSEMENT' | 'FOSA_WITHDRAWAL',
+    tenantId: string,
+    phone: string,
+    amount: number,
+    triggeredBy: string,
   ): Promise<{ conversationId: string; mpesaTxId: string }> {
-    throw new BadRequestException(
-      'Direct M-Pesa loan disbursement execution is disabled. Use FOSA withdrawal payout after loan disbursement.',
-    );
+    let memberId = '';
+    let accountReference = referenceId;
 
-    const loanId = _loanId;
-    const tenantId = _tenantId;
-    const phone = _phone;
-    const amount = _amount;
-    const triggeredBy = _triggeredBy;
-    const loan = { memberId: '', loanNumber: loanId };
-    const existing = { id: '', status: TransactionStatus.FAILED } as {
-      conversationId?: string | null;
-      id: string;
-      status: TransactionStatus;
-    };
-
-    if (existing) {
-      this.logger.warn(
-        `B2C disbursement skipped – record already exists for loan ${loanId}: status=${existing.status}`,
+    if (referenceType === 'LOAN_DISBURSEMENT') {
+      throw new BadRequestException(
+        'Direct M-Pesa loan disbursement execution is disabled. Use FOSA withdrawal payout after loan disbursement.',
       );
-      return {
-        conversationId: existing.conversationId ?? existing.id,
-        mpesaTxId: existing.id,
-      };
+    } else if (referenceType === 'FOSA_WITHDRAWAL') {
+      const account = await this.prisma.account.findUnique({
+        where: { id: referenceId },
+        select: { memberId: true, accountNumber: true },
+      });
+      if (!account) throw new NotFoundException('FOSA account not found for withdrawal');
+      memberId = account.memberId;
+      accountReference = account.accountNumber;
     }
 
     const b2cShortcode = this.config.get<string>('app.mpesa.b2cShortcode', '600000');
@@ -326,8 +318,8 @@ export class MpesaService {
       amount,
       partyA: b2cShortcode,
       partyB: phone,
-      remarks: `Loan disbursement ${loan.loanNumber ?? loanId}`.slice(0, 100),
-      occasionRef: loan.loanNumber ?? loanId,
+      remarks: `${referenceType === 'FOSA_WITHDRAWAL' ? 'Withdrawal' : 'Disbursement'} ${accountReference}`.slice(0, 100),
+      occasionRef: accountReference,
       resultUrl,
       queueTimeoutUrl,
     });
@@ -337,8 +329,9 @@ export class MpesaService {
     const mpesaTx = await this.prisma.mpesaTransaction.create({
       data: {
         tenantId,
-        memberId: loan.memberId,
-        loanId,
+        memberId,
+        referenceType,
+        referenceId,
         type: MpesaTxType.B2C,
         triggerSource:
           triggeredBy === 'SYSTEM' ? MpesaTriggerSource.SYSTEM : MpesaTriggerSource.OFFICER,
@@ -346,21 +339,21 @@ export class MpesaService {
         originatorConversationId: darajaResp.OriginatorConversationID,
         phoneNumber: phone,
         amount: new Decimal(amount).toDecimalPlaces(4).toString(),
-        accountReference: loan.loanNumber ?? loanId,
-        description: 'Loan disbursement',
+        accountReference,
+        description: `${referenceType === 'FOSA_WITHDRAWAL' ? 'FOSA Withdrawal' : 'Loan disbursement'}`,
         reference,
         status: TransactionStatus.PENDING,
       },
     });
 
     this.logger.log(
-      `B2C initiated | tenant=${tenantId} loan=${loanId} ` +
+      `B2C initiated | tenant=${tenantId} refType=${referenceType} refId=${referenceId} ` +
         `phone=${maskPhone(phone)} conversation=${darajaResp.ConversationID} amount=${amount}`,
     );
 
     await this.b2cTimeoutQueue.add(
       'b2c-timeout-check',
-      { loanId, tenantId, conversationId: darajaResp.ConversationID },
+      { loanId: referenceId, tenantId, conversationId: darajaResp.ConversationID },
       {
         delay: 30 * 60 * 1000,
         jobId: `b2c-timeout:${darajaResp.ConversationID}`,

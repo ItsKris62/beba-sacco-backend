@@ -396,7 +396,8 @@ export class MemberPortalService {
       await this.disbursementQueue.add(
         QUEUE_NAMES.MPESA_DISBURSEMENT,
         {
-          loanId: fosaAccount.id, // Using account ID since it's a FOSA withdrawal, not loan
+          referenceType: 'FOSA_WITHDRAWAL',
+          referenceId: fosaAccount.id,
           tenantId,
           phone,
           amount,

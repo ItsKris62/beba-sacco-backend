@@ -147,6 +147,67 @@ export class AuditService {
     });
   }
 
+  async createAtomic(tx: Omit<Prisma.TransactionClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">, dto: CreateAuditLogDto): Promise<void> {
+    const entityType = dto.entityType ?? dto.resource ?? 'Unknown';
+    const entityId = dto.entityId ?? dto.resourceId ?? null;
+    const requestedActorId = dto.actorId ?? dto.userId ?? null;
+    const actorId = requestedActorId === 'SYSTEM' ? null : requestedActorId;
+    const metadata = {
+      ...(dto.metadata ?? {}),
+      ...(requestedActorId === 'SYSTEM' && { actorId: 'SYSTEM' }),
+      featureFlags: {
+        secureUpload: FeatureFlags.isEnabled('SECURE_UPLOAD_V2', dto.tenantId),
+        rlsEnforcement: FeatureFlags.isEnabled('RLS_ENFORCEMENT', dto.tenantId),
+        kycStatusAlias: FeatureFlags.isEnabled('KYC_STATUS_ALIAS', dto.tenantId),
+      },
+      ...(dto.requestId && { correlationId: dto.requestId }),
+    };
+
+    const prevEntry = await tx.auditLog.findFirst({
+      where: { tenantId: dto.tenantId },
+      orderBy: { timestamp: 'desc' },
+      select: { entryHash: true },
+    });
+    const prevHash = prevEntry?.entryHash ?? null;
+    const timestamp = new Date();
+    const payload = dto.payload ?? metadata;
+    const entryHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          tenantId: dto.tenantId,
+          actorId,
+          action: dto.action,
+          entityType,
+          entityId,
+          payload,
+          prevHash,
+          timestamp,
+        }),
+        'utf8',
+      )
+      .digest('hex');
+
+    await tx.auditLog.create({
+      data: {
+        tenantId: dto.tenantId,
+        actorId,
+        action: dto.action,
+        entityType,
+        entityId,
+        oldValue: dto.oldValue ? (dto.oldValue as Prisma.InputJsonValue) : Prisma.JsonNull,
+        newValue: dto.newValue ? (dto.newValue as Prisma.InputJsonValue) : Prisma.JsonNull,
+        metadata: metadata as Prisma.InputJsonValue,
+        payload: payload as Prisma.InputJsonValue,
+        ipAddress: dto.ipAddress ?? null,
+        userAgent: dto.userAgent ?? null,
+        requestId: dto.requestId ?? null,
+        prevHash,
+        entryHash,
+        timestamp,
+      },
+    });
+  }
+
   /**
    * Query audit logs with filters and pagination.
    */

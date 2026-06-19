@@ -33,7 +33,11 @@ beforeAll(() => {
     if (
       msg.includes('Audit write failed') ||
       msg.includes('EmailQueue') ||
-      msg.includes('Redis error')
+      msg.includes('Redis error') ||
+      msg.includes('WRONGPASS') ||
+      msg.includes('ECONNREFUSED') ||
+      msg.includes('AggregateError') ||
+      msg.includes('[ioredis]')
     ) {
       return;
     }

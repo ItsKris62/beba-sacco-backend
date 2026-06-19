@@ -79,7 +79,8 @@ export interface MpesaCallbackJobPayload {
 }
 
 export interface MpesaDisbursementJobPayload {
-  loanId: string;
+  referenceType: 'LOAN_DISBURSEMENT' | 'FOSA_WITHDRAWAL';
+  referenceId: string;
   tenantId: string;
   /** E.164 phone number (2547XXXXXXXX) – resolved from loan at queue time, not in the processor */
   phone: string;

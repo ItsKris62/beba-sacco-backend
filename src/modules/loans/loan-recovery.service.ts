@@ -137,7 +137,7 @@ export class LoanRecoveryService {
       }
 
       const accountType = loan.loanProduct.requiredAccountType ?? AccountType.FOSA;
-      const allocations = await this.allocateRecovery(tx, tenantId, loan.guarantors, accountType, defaultAmount);
+      const allocations = await this.allocateRecovery(tx, tenantId, loan.guarantors, accountType, defaultAmount, new Decimal(loan.outstandingBalance.toString()));
       const totalRecovered = allocations.reduce((sum, allocation) => sum.plus(allocation.deduction), new Decimal(0));
       const recoveryDate = new Date();
 
@@ -251,7 +251,9 @@ export class LoanRecoveryService {
     guarantors: AcceptedGuarantorRecoveryRow[],
     accountType: AccountType,
     defaultAmount: Decimal,
+    outstandingBalance: Decimal,
   ): Promise<RecoveryAllocation[]> {
+    const sumHolds = guarantors.reduce((sum, g) => sum.plus(g.guaranteedAmount.toString()), new Decimal(0));
     const capacities = await Promise.all(
       guarantors.map(async (guarantor) => {
         const account = await tx.account.findFirst({
@@ -259,9 +261,14 @@ export class LoanRecoveryService {
           select: { balance: true, lockedBalance: true },
         });
 
-        const guaranteeCapacity = new Decimal(guarantor.guaranteedAmount.toString()).minus(
+        let guaranteeCapacity = new Decimal(guarantor.guaranteedAmount.toString()).minus(
           new Decimal(guarantor.recoveredAmount.toString()),
         );
+
+        if (sumHolds.greaterThan(0) && outstandingBalance.lessThan(sumHolds)) {
+          const ratio = outstandingBalance.div(sumHolds);
+          guaranteeCapacity = guaranteeCapacity.times(ratio).toDecimalPlaces(4);
+        }
         const accountCapacity = account
           ? Decimal.min(new Decimal(account.balance.toString()), new Decimal(account.lockedBalance.toString()))
           : new Decimal(0);

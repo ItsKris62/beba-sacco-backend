@@ -1807,14 +1807,35 @@ export class LoanApplicationService {
             id: true,
             loanNumber: true,
             status: true,
+            outstandingBalance: true,
             member: { select: { user: { select: { firstName: true, lastName: true } } } },
+            guarantors: {
+              where: { status: GuarantorStatus.ACCEPTED, holdReleasedAt: null },
+              select: { guaranteedAmount: true },
+            },
           },
         },
       },
     });
 
-    const totalGuaranteedAmount = activeGuarantees.reduce(
-      (sum, g) => sum.plus(new Decimal(g.guaranteedAmount.toString())),
+    const activeGuaranteesWithEffectiveHolds = activeGuarantees.map(g => {
+      const outstanding = new Decimal(g.loan.outstandingBalance?.toString() ?? '0');
+      const sumHolds = g.loan.guarantors.reduce((holdSum, hold) => holdSum.plus(hold.guaranteedAmount.toString()), new Decimal(0));
+      let effectiveHold = new Decimal(g.guaranteedAmount.toString());
+
+      if (sumHolds.greaterThan(0) && outstanding.lessThan(sumHolds)) {
+        const ratio = outstanding.div(sumHolds);
+        effectiveHold = effectiveHold.times(ratio).toDecimalPlaces(4);
+      }
+
+      return {
+        ...g,
+        effectiveHold,
+      };
+    });
+
+    const totalGuaranteedAmount = activeGuaranteesWithEffectiveHolds.reduce(
+      (sum, g) => sum.plus(g.effectiveHold),
       new Decimal(0),
     );
 
