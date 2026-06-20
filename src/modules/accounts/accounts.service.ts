@@ -121,20 +121,33 @@ export class AccountsService {
     ipAddress?: string,
   ) {
     if (amountKes <= 0) throw new BadRequestException('Amount must be positive');
-    const amount = new Decimal(amountKes);
+    const amount = new Decimal(amountKes).toDecimalPlaces(4);
 
     return this.prisma.$transaction(async (tx) => {
       const account = await tx.account.findFirst({
         where: { id: accountId, tenantId, isActive: true },
+        select: { id: true, balance: true },
       });
       if (!account) throw new NotFoundException('Account not found or inactive');
 
       // Duplicate reference guard
-      const dupRef = await tx.transaction.findUnique({ where: { reference } });
+      const dupRef = await tx.transaction.findFirst({ where: { tenantId, reference } });
       if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
 
       const balanceBefore = new Decimal(account.balance.toString());
-      const balanceAfter = balanceBefore.plus(amount);
+      const balanceAfter = balanceBefore.plus(amount).toDecimalPlaces(4);
+
+      const updated = await tx.account.updateMany({
+        where: { id: accountId, tenantId, isActive: true },
+        data: {
+          balance: { increment: amount.toString() },
+          version: { increment: 1 },
+        },
+      });
+
+      if (updated.count === 0) {
+        throw new BadRequestException('Insufficient funds or concurrent modification');
+      }
 
       const txn = await tx.transaction.create({
         data: {
@@ -142,18 +155,13 @@ export class AccountsService {
           accountId,
           type: TransactionType.DEPOSIT,
           status: TransactionStatus.COMPLETED,
-          amount: amount.toDecimalPlaces(4).toString(),
+          amount: amount.toString(),
           balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+          balanceAfter: balanceAfter.toString(),
           reference,
           description,
           processedBy,
         },
-      });
-
-      await tx.account.update({
-        where: { id: accountId },
-        data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
       });
 
       await this.audit.create({
@@ -173,7 +181,7 @@ export class AccountsService {
       }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 
       return { transaction: txn, newBalance: balanceAfter.toNumber() };
-    });
+    }, { isolationLevel: 'Serializable' });
   }
 
   // ─── WITHDRAWAL ──────────────────────────────────────────────
@@ -188,25 +196,37 @@ export class AccountsService {
     ipAddress?: string,
   ) {
     if (amountKes <= 0) throw new BadRequestException('Amount must be positive');
-    const amount = new Decimal(amountKes);
+    const amount = new Decimal(amountKes).toDecimalPlaces(4);
 
     return this.prisma.$transaction(async (tx) => {
       const account = await tx.account.findFirst({
         where: { id: accountId, tenantId, isActive: true },
+        select: { id: true, balance: true },
       });
       if (!account) throw new NotFoundException('Account not found or inactive');
 
-      const balanceBefore = new Decimal(account.balance.toString());
-      if (balanceBefore.lessThan(amount)) {
-        throw new BadRequestException(
-          `Insufficient balance: KES ${balanceBefore.toNumber()} < KES ${amount.toNumber()}`,
-        );
-      }
-
-      const dupRef = await tx.transaction.findUnique({ where: { reference } });
+      const dupRef = await tx.transaction.findFirst({ where: { tenantId, reference } });
       if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
 
-      const balanceAfter = balanceBefore.minus(amount);
+      const balanceBefore = new Decimal(account.balance.toString());
+      const balanceAfter = balanceBefore.minus(amount).toDecimalPlaces(4);
+
+      const updated = await tx.account.updateMany({
+        where: {
+          id: accountId,
+          tenantId,
+          isActive: true,
+          balance: { gte: amount.toString() },
+        },
+        data: {
+          balance: { decrement: amount.toString() },
+          version: { increment: 1 },
+        },
+      });
+
+      if (updated.count === 0) {
+        throw new BadRequestException('Insufficient funds or concurrent modification');
+      }
 
       const txn = await tx.transaction.create({
         data: {
@@ -214,22 +234,17 @@ export class AccountsService {
           accountId,
           type: TransactionType.WITHDRAWAL,
           status: TransactionStatus.COMPLETED,
-          amount: amount.toDecimalPlaces(4).toString(),
+          amount: amount.toString(),
           balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+          balanceAfter: balanceAfter.toString(),
           reference,
           description,
           processedBy,
         },
       });
 
-      await tx.account.update({
-        where: { id: accountId },
-        data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
-      });
-
       return { transaction: txn, newBalance: balanceAfter.toNumber() };
-    });
+    }, { isolationLevel: 'Serializable' });
   }
 
   // ─── TRANSACTION HISTORY ─────────────────────────────────────

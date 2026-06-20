@@ -35,7 +35,6 @@ export interface AuthenticatedUser {
 }
 
 /**
-/**
  * Passport JWT Strategy
  *
  * Validates Bearer tokens on every protected request:
@@ -43,9 +42,10 @@ export interface AuthenticatedUser {
  * 2. Verifies signature with JWT_SECRET
  * 3. Checks Redis blocklist for revoked JTIs (immediate revocation)
  * 4. Confirms user still exists + is active in DB
- * 5. Attaches user to req.user
+ * 5. Verifies the token tenant matches the database tenant
+ * 6. Attaches user to req.user
  *
- * TODO: Phase 3 – add device/session management
+ * TODO: Phase 3 - add device/session management
  */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -82,6 +82,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     if (!user) {
       throw new UnauthorizedException('User no longer exists');
+    }
+
+    if (user.tenantId !== payload.tenantId && user.role !== UserRole.SUPER_ADMIN) {
+      throw new UnauthorizedException('Token tenant mismatch');
     }
 
     if (!user.isActive) {

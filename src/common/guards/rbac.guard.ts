@@ -6,59 +6,21 @@ import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import type { AuthenticatedUser } from '../../modules/auth/strategies/jwt.strategy';
 
 /**
- * Role hierarchy (higher = more permissions):
- *   SUPER_ADMIN > TENANT_ADMIN > MANAGER > LOAN_OFFICER > TELLER > CHAIRMAN > MEMBER > AUDITOR
+ * RBAC Guard - Strict Role-Based Access Control
  *
- * Hierarchical enforcement:
- *   - A role can always access endpoints requiring its own level OR lower levels.
- *   - @Roles() lists the MINIMUM required role; higher roles are implicitly allowed.
- *   - SUPER_ADMIN bypasses all checks (platform omnipotence).
+ * Route access is exact-match only:
+ *   - A user must have one of the exact roles declared by @Roles().
+ *   - SUPER_ADMIN bypasses all role checks.
+ *   - Routes without @Roles() are available to any authenticated user.
  *
- * CHAIRMAN inherits MEMBER permissions automatically via rank (CHAIRMAN > MEMBER).
- * AUDITOR is read-only: POST/PATCH/DELETE are blocked regardless of @Roles().
- *
- * Creation limits (enforced at service layer, not here):
- *   SUPER_ADMIN   → can create all roles including other super_admins
- *   TENANT_ADMIN  → can create all roles EXCEPT super_admin
- *   MANAGER       → can create LOAN_OFFICER, TELLER, MEMBER, CHAIRMAN, AUDITOR
- *   LOAN_OFFICER  → none
- *   TELLER        → none
- *   MEMBER        → none (self-registration only)
- *   CHAIRMAN      → none (stage oversight + full member rights)
- *   AUDITOR       → none (read-only)
- */
-const ROLE_RANK: Record<UserRole, number> = {
-  [UserRole.SUPER_ADMIN]: 100,
-  [UserRole.TENANT_ADMIN]: 80,
-  [UserRole.MANAGER]: 60,
-  [UserRole.LOAN_OFFICER]: 50,
-  [UserRole.ACCOUNTANT]: 45,
-  [UserRole.TELLER]: 40,
-  [UserRole.CHAIRMAN]: 30,
-  [UserRole.MEMBER]: 20,
-  [UserRole.AUDITOR]: 10,
-};
-
-/** HTTP methods considered mutating (blocked for AUDITOR) */
-const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
-
-/**
- * RBAC Guard – Hierarchical Role-Based Access Control
- *
- * Replaces the flat RolesGuard with hierarchy-aware enforcement.
- * Applied globally via APP_GUARD (runs after JwtAuthGuard).
- *
- * Usage:
- *   @Roles(UserRole.MANAGER)  // MANAGER, TENANT_ADMIN, SUPER_ADMIN allowed
- *   @Get('admin-only')
- *   async getAdminData() { ... }
+ * Creation limits remain enforced at the service layer via canManageRole().
  */
 @Injectable()
 export class RBACGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
-    // Public routes bypass JWT entirely — request.user is never set for them.
+    // Public routes bypass JWT entirely - request.user is never set for them.
     // Without this check, RBACGuard throws 403 on every @Public() route (login, register, etc.).
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
@@ -71,30 +33,22 @@ export class RBACGuard implements CanActivate {
       context.getClass(),
     ]);
 
-    const request = context.switchToHttp().getRequest<{ user?: AuthenticatedUser; method?: string }>();
+    const request = context.switchToHttp().getRequest<{ user?: AuthenticatedUser }>();
     const user = request.user;
 
     if (!user) {
       throw new ForbiddenException('User not authenticated');
     }
 
-    // AUDITOR: zero mutating permissions, regardless of route decorators
-    if (user.role === UserRole.AUDITOR && request.method && MUTATING_METHODS.has(request.method)) {
-      throw new ForbiddenException('AUDITOR role is read-only. Mutating operations are prohibited.');
-    }
-
-    // No @Roles() decorator → accessible to any authenticated user (subject to AUDITOR block above)
-    if (!requiredRoles || requiredRoles.length === 0) return true;
-
-    // SUPER_ADMIN bypasses all role restrictions
+    // SUPER_ADMIN bypasses all role restrictions.
     if (user.role === UserRole.SUPER_ADMIN) return true;
 
-    const userRank = ROLE_RANK[user.role] ?? 0;
-    const minRequiredRank = Math.min(...requiredRoles.map((r) => ROLE_RANK[r] ?? 999));
+    // No @Roles() decorator means any authenticated user is allowed.
+    if (!requiredRoles || requiredRoles.length === 0) return true;
 
-    if (userRank < minRequiredRank) {
+    if (!requiredRoles.includes(user.role)) {
       throw new ForbiddenException(
-        `Access denied. Required role level: [${requiredRoles.join(', ')}], your role: ${user.role}`,
+        `Access denied. Required role: [${requiredRoles.join(', ')}], your role: ${user.role}`,
       );
     }
 

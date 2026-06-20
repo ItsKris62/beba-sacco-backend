@@ -343,7 +343,7 @@ export class MemberPortalService {
     const requestedAmount = new Decimal(amount);
     const totalDeduction = requestedAmount.plus(withdrawalFee);
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const fosaAccount = await tx.account.findFirst({
         where: { memberId: member.id, tenantId, accountType: 'FOSA', isActive: true },
         select: { id: true, balance: true, lockedBalance: true, accountNumber: true },
@@ -392,26 +392,6 @@ export class MemberPortalService {
         },
       });
 
-      // Dispatch B2C job
-      await this.disbursementQueue.add(
-        QUEUE_NAMES.MPESA_DISBURSEMENT,
-        {
-          referenceType: 'FOSA_WITHDRAWAL',
-          referenceId: fosaAccount.id,
-          tenantId,
-          phone,
-          amount,
-          triggeredBy: userId,
-        },
-        {
-          jobId: `fosa-withdraw-${transaction.id}`,
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
-          removeOnComplete: true,
-          removeOnFail: false,
-        }
-      );
-
       await this.audit.create({
         tenantId,
         actorId: userId,
@@ -426,10 +406,35 @@ export class MemberPortalService {
       return {
         message: 'Withdrawal initiated successfully',
         transactionId: transaction.id,
+        accountId: fosaAccount.id,
       };
     }, { isolationLevel: 'Serializable' });
-  }
 
+    // Enqueue only after the database transaction commits to avoid ghost B2C payouts.
+    await this.disbursementQueue.add(
+      QUEUE_NAMES.MPESA_DISBURSEMENT,
+      {
+        referenceType: 'FOSA_WITHDRAWAL',
+        referenceId: result.accountId,
+        tenantId,
+        phone,
+        amount,
+        triggeredBy: userId,
+      },
+      {
+        jobId: `fosa-withdraw-${result.transactionId}`,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      }
+    );
+
+    return {
+      message: result.message,
+      transactionId: result.transactionId,
+    };
+  }
   // ─── DOCUMENT UPLOAD ─────────────────────────────────────────
 
   /**

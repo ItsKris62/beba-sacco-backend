@@ -96,7 +96,7 @@ export class LoanRepaymentService {
 
     const result = await txClient.$transaction(
       async (tx): Promise<RepaymentAllocationSummary> => {
-        const duplicate = await tx.transaction.findUnique({ where: { reference: input.reference } });
+        const duplicate = await tx.transaction.findFirst({ where: { tenantId: input.tenantId, reference: input.reference } });
         if (duplicate?.loanId) {
           const loan = await tx.loan.findFirst({
             where: { id: duplicate.loanId, tenantId: input.tenantId },

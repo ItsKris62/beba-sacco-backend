@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { AccountType, Prisma } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 
@@ -89,16 +89,24 @@ export class GuarantorValidationService {
         );
       }
 
+      const guaranteedAmount = guarantor.guaranteedAmount.toDecimalPlaces(4);
+      const newLockedBalance = account.lockedBalance.plus(guaranteedAmount).toDecimalPlaces(4);
       const updated = await tx.account.updateMany({
-        where: { id: account.id, tenantId, isActive: true },
+        where: {
+          id: account.id,
+          tenantId,
+          isActive: true,
+          lockedBalance: account.lockedBalance.toDecimalPlaces(4).toString(),
+          balance: { gte: newLockedBalance.toString() },
+        },
         data: {
-          lockedBalance: { increment: guarantor.guaranteedAmount.toDecimalPlaces(4).toString() },
+          lockedBalance: { increment: guaranteedAmount.toString() },
           version: { increment: 1 },
         },
       });
 
       if (updated.count !== 1) {
-        throw new BadRequestException(`HOLD_PLACEMENT_FAILED: guarantor ${guarantor.memberId} account was not updated`);
+        throw new ConflictException('Guarantor collateral changed or insufficient; please retry');
       }
     }
   }

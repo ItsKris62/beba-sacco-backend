@@ -996,7 +996,7 @@ export class AccountingService {
     const txClient = this.prisma.direct ?? this.prisma;
     await txClient.$transaction(
       async (tx) => {
-        const dup = await tx.transaction.findUnique({ where: { reference } });
+        const dup = await tx.transaction.findFirst({ where: { tenantId, reference } });
         if (dup) {
           resultTxId = dup.id;
           balanceBefore = new Decimal(dup.balanceBefore.toString());
@@ -1004,14 +1004,26 @@ export class AccountingService {
           return;
         }
 
-        const freshAccount = await tx.account.findUnique({
-          where: { id: accountId },
+        const freshAccount = await tx.account.findFirst({
+          where: { id: accountId, tenantId, isActive: true },
           select: { balance: true },
         });
         if (!freshAccount) throw new NotFoundException(`Account ${accountId} disappeared during transaction`);
 
         balanceBefore = new Decimal(freshAccount.balance.toString());
-        balanceAfter = balanceBefore.plus(amount);
+        balanceAfter = balanceBefore.plus(amount).toDecimalPlaces(4);
+
+        const updated = await tx.account.updateMany({
+          where: { id: accountId, tenantId, isActive: true },
+          data: {
+            balance: { increment: amount.toDecimalPlaces(4).toString() },
+            version: { increment: 1 },
+          },
+        });
+
+        if (updated.count === 0) {
+          throw new BadRequestException('Insufficient funds or concurrent modification');
+        }
 
         const ledgerTx = await tx.transaction.create({
           data: {
@@ -1021,16 +1033,46 @@ export class AccountingService {
             status: TransactionStatus.COMPLETED,
             amount: amount.toDecimalPlaces(4).toString(),
             balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+            balanceAfter: balanceAfter.toString(),
             reference,
-            description: `Manual M-Pesa reconciliation – receipt ${mpesaTx.mpesaReceiptNumber ?? mpesaTxId} – ${noteText}`,
+            description: `Manual M-Pesa reconciliation - receipt ${mpesaTx.mpesaReceiptNumber ?? mpesaTxId} - ${noteText}`,
             processedBy: actorId,
           },
         });
 
-        await tx.account.update({
-          where: { id: accountId },
-          data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
+        const glAccounts = await tx.gLAccount.findMany({
+          where: { tenantId, code: { in: ['1000', '2000'] }, isActive: true },
+          select: { id: true, code: true },
+        });
+        const cashAccount = glAccounts.find((gl) => gl.code === '1000');
+        const memberSavingsAccount = glAccounts.find((gl) => gl.code === '2000');
+        if (!cashAccount || !memberSavingsAccount) {
+          throw new BadRequestException('Required system GL accounts are not configured for this tenant');
+        }
+
+        await tx.journalEntry.create({
+          data: {
+            tenantId,
+            entryNumber: `JE-MPESA-RECON-${mpesaTxId}`,
+            type: JournalEntryType.MPESA_DEPOSIT,
+            status: JournalEntryStatus.POSTED,
+            description: `Manual M-Pesa reconciliation - receipt ${mpesaTx.mpesaReceiptNumber ?? mpesaTxId} - ${noteText}`,
+            referenceType: 'TRANSACTION',
+            referenceId: ledgerTx.id,
+            totalAmount: amount.toDecimalPlaces(4).toString(),
+            createdById: actorId,
+            approvedById: actorId,
+            approvalNotes: 'System-posted with operational ledger transaction',
+            postedAt: new Date(),
+            postings: {
+              create: [{
+                debitAccountId: cashAccount.id,
+                creditAccountId: memberSavingsAccount.id,
+                amount: amount.toDecimalPlaces(4).toString(),
+                description: `Manual M-Pesa reconciliation - ${reference}`,
+              }],
+            },
+          },
         });
 
         await tx.mpesaTransaction.update({
@@ -1039,7 +1081,7 @@ export class AccountingService {
             transactionId: ledgerTx.id,
             memberId: mpesaTx.memberId ?? account.member.id,
             status: TransactionStatus.COMPLETED,
-            resultDesc: `Manually reconciled – ${noteText}`,
+            resultDesc: `Manually reconciled - ${noteText}`,
           },
         });
 

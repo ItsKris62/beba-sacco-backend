@@ -23,14 +23,18 @@ export interface CreateAuditLogDto {
 }
 
 export interface AuditLogFilters {
-  tenantId: string;
+  tenantId?: string;
   actorId?: string;
   action?: string;
   entityType?: string;
+  entityId?: string;
+  ipAddress?: string;
+  userAgent?: string;
   fromDate?: Date;
   toDate?: Date;
   limit?: number;
   offset?: number;
+  crossTenant?: boolean;
 }
 
 export interface AuditLogEntry {
@@ -147,7 +151,10 @@ export class AuditService {
     });
   }
 
-  async createAtomic(tx: Omit<Prisma.TransactionClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">, dto: CreateAuditLogDto): Promise<void> {
+  async logAtomic(
+    tx: Omit<Prisma.TransactionClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">,
+    dto: CreateAuditLogDto,
+  ): Promise<void> {
     const entityType = dto.entityType ?? dto.resource ?? 'Unknown';
     const entityId = dto.entityId ?? dto.resourceId ?? null;
     const requestedActorId = dto.actorId ?? dto.userId ?? null;
@@ -208,6 +215,13 @@ export class AuditService {
     });
   }
 
+  async createAtomic(
+    tx: Omit<Prisma.TransactionClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">,
+    dto: CreateAuditLogDto,
+  ): Promise<void> {
+    await this.logAtomic(tx, dto);
+  }
+
   /**
    * Query audit logs with filters and pagination.
    */
@@ -216,9 +230,10 @@ export class AuditService {
     const safeOffset = Math.max(0, filters.offset ?? 0);
 
     const where = this.buildWhere(filters);
+    const client = filters.crossTenant ? this.prisma.direct : this.prisma;
 
-    const [data, total] = await this.prisma.$transaction([
-      this.prisma.auditLog.findMany({
+    const [data, total] = await client.$transaction([
+      client.auditLog.findMany({
         where,
         orderBy: { timestamp: 'desc' },
         skip: safeOffset,
@@ -229,14 +244,15 @@ export class AuditService {
           },
         },
       }),
-      this.prisma.auditLog.count({ where }),
+      client.auditLog.count({ where }),
     ]);
 
     return { data: data.map((entry) => this.serializeEntry(entry)), total };
   }
 
   async findForExport(filters: AuditLogFilters): Promise<AuditLogEntry[]> {
-    const data = await this.prisma.auditLog.findMany({
+    const client = filters.crossTenant ? this.prisma.direct : this.prisma;
+    const data = await client.auditLog.findMany({
       where: this.buildWhere(filters),
       orderBy: { timestamp: 'desc' },
       take: Math.min(5000, Math.max(1, filters.limit ?? 5000)),
@@ -357,11 +373,18 @@ export class AuditService {
 
   private buildWhere(filters: AuditLogFilters): Prisma.AuditLogWhereInput {
     return {
-      tenantId: filters.tenantId,
+      ...(filters.tenantId && { tenantId: filters.tenantId }),
       ...(filters.actorId && { actorId: filters.actorId }),
       ...(filters.action && { action: { contains: filters.action, mode: 'insensitive' } }),
       ...(filters.entityType && {
         entityType: { contains: filters.entityType, mode: 'insensitive' },
+      }),
+      ...(filters.entityId && { entityId: filters.entityId }),
+      ...(filters.ipAddress && {
+        ipAddress: { contains: filters.ipAddress, mode: 'insensitive' },
+      }),
+      ...(filters.userAgent && {
+        userAgent: { contains: filters.userAgent, mode: 'insensitive' },
       }),
       ...((filters.fromDate || filters.toDate) && {
         timestamp: {

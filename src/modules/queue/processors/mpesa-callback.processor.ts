@@ -183,6 +183,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
   ): Promise<void> {
     const { TransID, TransAmount, BillRefNumber, MSISDN, TransTime } = body;
 
+    try {
     // Layer 3: reference is built at create time so a duplicate TransID simply
     // fails the @unique constraint — but we also check explicitly for a clean log.
     const existing = await this.prisma.mpesaTransaction.findFirst({
@@ -298,8 +299,14 @@ export class MpesaCallbackProcessor extends WorkerHost {
       `C2B processed | TransID=${TransID} amount=${amount.toFixed(2)} ` +
         `account=${BillRefNumber} phone=${maskPhone(MSISDN)}`,
     );
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        this.logger.log(`C2B duplicate skipped by unique constraint: TransID=${TransID}`);
+        return;
+      }
+      throw error;
+    }
   }
-
   // ─── B2C result ───────────────────────────────────────────────────────────
 
   private async handleB2cCallback(body: B2cCallbackPayload, jobId: string): Promise<void> {
@@ -558,7 +565,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
     await txClient.$transaction(
       async (tx) => {
         // Layer 3 idempotency: Transaction.reference @unique
-        const dup = await tx.transaction.findUnique({ where: { reference } });
+        const dup = await tx.transaction.findFirst({ where: { tenantId: params.tenantId, reference } });
       if (dup) {
         this.logger.log(`Ledger: duplicate reference ${reference} – skipping`);
         return;
@@ -776,7 +783,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
     const txClient = this.prisma.direct ?? this.prisma;
     const auditData = await txClient.$transaction(
       async (tx): Promise<{ balanceBefore: string; balanceAfter: string; loanStatusChanged: boolean } | null> => {
-        const dup = await tx.transaction.findUnique({ where: { reference } });
+        const dup = await tx.transaction.findFirst({ where: { tenantId: params.tenantId, reference } });
         if (dup) return null;
 
         const loan = await tx.loan.findUnique({

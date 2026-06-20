@@ -167,7 +167,7 @@ export class AdminController {
     @CurrentUser() actor: AuthenticatedUser,
     @Req() req: Request,
   ) {
-    return this.adminService.reviewMember(id, dto, tenant.id, actor, req.ip);
+    return this.adminService.reviewMember(id, dto, tenant.id, actor, req.ip, req.get('user-agent'));
   }
 
   // ─── KYC UPDATE ──────────────────────────────────────────────
@@ -194,6 +194,6 @@ export class AdminController {
     @CurrentUser() actor: AuthenticatedUser,
     @Req() req: Request,
   ) {
-    return this.adminService.updateKyc(id, dto, tenant.id, actor.id, req.ip);
+    return this.adminService.updateKyc(id, dto, tenant.id, actor.id, req.ip, req.get('user-agent'));
   }
 }

@@ -75,7 +75,7 @@ export class RepaymentScheduleProcessor extends WorkerHost {
       const reference = `SCHED-REPAY-${loanId}-${dueDate}-${uuidv4().split('-')[0]}`;
 
       // Idempotency: skip if already posted
-      const existing = await tx.transaction.findUnique({ where: { reference } });
+      const existing = await tx.transaction.findFirst({ where: { tenantId: loan.tenantId, reference } });
       if (existing) return;
 
       await tx.transaction.create({

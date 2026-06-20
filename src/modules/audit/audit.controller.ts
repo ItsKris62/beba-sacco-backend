@@ -40,6 +40,10 @@ export class AuditController {
   @ApiQuery({ name: 'action', required: false, type: String, example: 'AUTH.LOGIN' })
   @ApiQuery({ name: 'entityType', required: false, type: String, example: 'Loan' })
   @ApiQuery({ name: 'actorId', required: false, type: String })
+  @ApiQuery({ name: 'entityId', required: false, type: String })
+  @ApiQuery({ name: 'ipAddress', required: false, type: String })
+  @ApiQuery({ name: 'userAgent', required: false, type: String })
+  @ApiQuery({ name: 'tenantId', required: false, type: String, description: 'SUPER_ADMIN only tenant filter' })
   @ApiQuery({ name: 'from', required: false, type: String, description: 'ISO date (YYYY-MM-DD)' })
   @ApiQuery({ name: 'to', required: false, type: String, description: 'ISO date (YYYY-MM-DD)' })
   @ApiResponse({ status: 200, description: 'Paginated audit log entries' })
@@ -47,11 +51,16 @@ export class AuditController {
   @ApiResponse({ status: 403, description: 'Forbidden – insufficient role' })
   findAll(
     @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
     @Query('page') page = 1,
     @Query('limit') limit = 50,
     @Query('action') action?: string,
     @Query('entityType') entityType?: string,
     @Query('actorId') actorId?: string,
+    @Query('entityId') entityId?: string,
+    @Query('ipAddress') ipAddress?: string,
+    @Query('userAgent') userAgent?: string,
+    @Query('tenantId') queryTenantId?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
@@ -66,15 +75,21 @@ export class AuditController {
       toDate.setHours(23, 59, 59, 999);
     }
 
+    const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
+
     return this.auditService.findAll({
-      tenantId: tenant.id,
+      tenantId: isSuperAdmin ? queryTenantId : tenant.id,
       actorId,
       action,
       entityType,
+      entityId,
+      ipAddress,
+      userAgent,
       fromDate,
       toDate,
       limit: safeLimit,
       offset,
+      crossTenant: isSuperAdmin,
     }).then((result) => ({
       data: result.data,
       meta: {
@@ -85,7 +100,6 @@ export class AuditController {
       },
     }));
   }
-
   @Get('export')
   @ApiOperation({
     summary: 'Export audit logs',
@@ -96,6 +110,10 @@ export class AuditController {
   @ApiQuery({ name: 'action', required: false, type: String })
   @ApiQuery({ name: 'entityType', required: false, type: String })
   @ApiQuery({ name: 'actorId', required: false, type: String })
+  @ApiQuery({ name: 'entityId', required: false, type: String })
+  @ApiQuery({ name: 'ipAddress', required: false, type: String })
+  @ApiQuery({ name: 'userAgent', required: false, type: String })
+  @ApiQuery({ name: 'tenantId', required: false, type: String, description: 'SUPER_ADMIN only tenant filter' })
   @ApiQuery({ name: 'from', required: false, type: String })
   @ApiQuery({ name: 'to', required: false, type: String })
   async exportAuditLogs(
@@ -106,6 +124,10 @@ export class AuditController {
     @Query('action') action?: string,
     @Query('entityType') entityType?: string,
     @Query('actorId') actorId?: string,
+    @Query('entityId') entityId?: string,
+    @Query('ipAddress') ipAddress?: string,
+    @Query('userAgent') userAgent?: string,
+    @Query('tenantId') queryTenantId?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
   ): Promise<void> {
@@ -116,14 +138,19 @@ export class AuditController {
       toDate.setHours(23, 59, 59, 999);
     }
 
+    const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
     const entries = await this.auditService.findForExport({
-      tenantId: tenant.id,
+      tenantId: isSuperAdmin ? queryTenantId : tenant.id,
       actorId,
       action,
       entityType,
+      entityId,
+      ipAddress,
+      userAgent,
       fromDate,
       toDate,
       limit: 5000,
+      crossTenant: isSuperAdmin,
     });
 
     await this.auditService.create({
@@ -131,7 +158,7 @@ export class AuditController {
       actorId: user.id,
       action: 'AUDIT.EXPORT',
       entityType: 'AuditLog',
-      metadata: { format, filters: { action, entityType, actorId, from, to }, rowCount: entries.length },
+      metadata: { format, filters: { action, entityType, actorId, entityId, ipAddress, userAgent, tenantId: queryTenantId, from, to }, rowCount: entries.length },
     });
 
     const suffix = `${from ?? 'start'}-to-${to ?? 'now'}`;
@@ -149,7 +176,6 @@ export class AuditController {
     res.setHeader('Content-Disposition', `attachment; filename="audit-trail-${suffix}.csv"`);
     res.send(csv);
   }
-
 
   // ─── SASRA M-Pesa Audit Report ────────────────────────────────────────────
 
@@ -222,10 +248,16 @@ export class AdminAuditController {
   @ApiResponse({ status: 200, description: 'Paginated audit log entries' })
   findAdminAuditLogs(
     @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
     @Query('page') page = 1,
     @Query('limit') limit = 50,
     @Query('userId') userId?: string,
     @Query('action') action?: string,
+    @Query('entityType') entityType?: string,
+    @Query('entityId') entityId?: string,
+    @Query('ipAddress') ipAddress?: string,
+    @Query('userAgent') userAgent?: string,
+    @Query('tenantId') queryTenantId?: string,
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
   ) {
@@ -239,15 +271,22 @@ export class AdminAuditController {
       toDate.setHours(23, 59, 59, 999);
     }
 
+    const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
+
     return this.auditService
       .findAll({
-        tenantId: tenant.id,
+        tenantId: isSuperAdmin ? queryTenantId : tenant.id,
         actorId: userId,
         action,
+        entityType,
+        entityId,
+        ipAddress,
+        userAgent,
         fromDate,
         toDate,
         limit: safeLimit,
         offset,
+        crossTenant: isSuperAdmin,
       })
       .then((result) => ({
         data: result.data,

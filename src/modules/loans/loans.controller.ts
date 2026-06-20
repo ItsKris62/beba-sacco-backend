@@ -158,7 +158,7 @@ export class LoansController {
     @CurrentUser() actor: AuthenticatedUser,
     @Req() req: Request,
   ) {
-    return this.loans.approve(id, tenant.id, actor.id, dto.comment, req.ip);
+    return this.loans.approve(id, tenant.id, actor.id, dto.comment, req.ip, req.get('user-agent'));
   }
 
   @Patch(':id/disburse')
@@ -226,7 +226,7 @@ export class LoansController {
     @CurrentUser() actor: AuthenticatedUser,
     @Req() req: Request,
   ) {
-    return this.loans.reject(id, dto, tenant.id, actor.id, req.ip);
+    return this.loans.reject(id, dto, tenant.id, actor.id, req.ip, req.get('user-agent'));
   }
 
   // ─── GUARANTORS ───────────────────────────────────────────────

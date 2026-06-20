@@ -1,6 +1,6 @@
 import {
   Injectable, Logger, NotFoundException, BadRequestException,
-  ConflictException, ForbiddenException, UnprocessableEntityException,
+  ConflictException, ForbiddenException, NotImplementedException, UnprocessableEntityException,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
@@ -224,6 +224,11 @@ export class LoansService {
 
   // ─── LOAN APPLICATION ────────────────────────────────────────
 
+  /**
+   * @deprecated Legacy admin loan application path disabled for production.
+   * Use LoanApplicationService.memberApply via the member portal workflow, which
+   * enforces idempotency, open-loan checks, product rules, and guarantor policy.
+   */
   async apply(
     dto: ApplyLoanDto,
     tenantId: string,
@@ -231,156 +236,15 @@ export class LoansService {
     ipAddress?: string,
     idempotencyKey?: string,
   ) {
-    // Phase 2: Idempotency guard — prevent duplicate loan applications
-    if (idempotencyKey) {
-      const idemKey = `loan:apply:${appliedBy}:${dto.memberId}:${dto.loanProductId}:${idempotencyKey}`;
-      const check = await this.idempotency.checkAndReserve(idemKey, tenantId, 24 * 60 * 60);
-      if (check.status === 'COMPLETED') {
-        this.logger.log(`Idempotency cache hit for loan apply: ${idemKey}`);
-        return check.result as Awaited<ReturnType<LoansService['_doApply']>>;
-      }
-      if (check.status === 'PROCESSING') {
-        throw new ConflictException('Loan application is already being processed. Please wait.');
-      }
-    }
-
-    try {
-      const result = await this._doApply(dto, tenantId, appliedBy, ipAddress);
-      if (idempotencyKey) {
-        const idemKey = `loan:apply:${appliedBy}:${dto.memberId}:${dto.loanProductId}:${idempotencyKey}`;
-        await this.idempotency.complete(idemKey, tenantId, result, 24 * 60 * 60);
-      }
-      return result;
-    } catch (err) {
-      // Only release on validation errors (deterministic). Don't release on transient DB errors.
-      if (idempotencyKey && (err instanceof BadRequestException || err instanceof ConflictException)) {
-        const idemKey = `loan:apply:${appliedBy}:${dto.memberId}:${dto.loanProductId}:${idempotencyKey}`;
-        await this.idempotency.release(idemKey, tenantId);
-      }
-      throw err;
-    }
-  }
-
-  private async _doApply(dto: ApplyLoanDto, tenantId: string, appliedBy: string, ipAddress?: string) {
-    const member = await this.prisma.member.findFirst({
-      where: { id: dto.memberId, tenantId, isActive: true },
-      select: { id: true, memberNumber: true, kycStatus: true },
-    });
-    if (!member) throw new NotFoundException('Active member not found in this tenant');
-
-    // KYC must be verified before loan application
-    if (member.kycStatus !== 'APPROVED') {
-      throw new BadRequestException(
-        'KYC verification is required before applying for a loan. Please complete your KYC.',
-      );
-    }
-
-    const product = await this.prisma.loanProduct.findFirst({
-      where: { id: dto.loanProductId, tenantId, isActive: true },
-    });
-    if (!product) throw new NotFoundException('Loan product not found or inactive');
-
-    const principal = new Decimal(dto.principalAmount);
-    const minAmt = new Decimal(product.minAmount.toString());
-    const maxAmt = new Decimal(product.maxAmount.toString());
-
-    if (principal.lessThan(minAmt) || principal.greaterThan(maxAmt)) {
-      throw new BadRequestException(
-        `Principal must be between KES ${minAmt.toNumber()} and KES ${maxAmt.toNumber()}`,
-      );
-    }
-
-    if (dto.tenureMonths > product.maxTenureMonths) {
-      throw new BadRequestException(`Maximum tenure is ${product.maxTenureMonths} months`);
-    }
-
-    const accounts = await this.prisma.account.findMany({
-      where: { memberId: dto.memberId, tenantId, isActive: true },
-      select: { balance: true, accountType: true },
-    });
-
-    const fosaBalance = accounts
-      .filter((a) => a.accountType === AccountType.FOSA)
-      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString())), new Decimal(0));
-    const bosaBalance = accounts
-      .filter((a) => a.accountType === AccountType.BOSA)
-      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString())), new Decimal(0));
-
-    this.productRules.assertLoanApplicationRules({
-      product,
-      principal,
-      guarantorCount: dto.guarantors?.length ?? 0,
-      fosaBalance,
-      bosaBalance,
-    });
-
-    // Calculate processing fee and instalment
-    const annualRate = new Decimal(product.interestRate.toString());
-    const processingFeeRate = new Decimal(product.processingFeeRate.toString());
-    const processingFee = principal.times(processingFeeRate).toDecimalPlaces(4);
-    const monthlyInstalment = this.calculateInstalment(
-      principal,
-      annualRate,
-      dto.tenureMonths,
-      product.interestType,
+    void dto;
+    void tenantId;
+    void appliedBy;
+    void ipAddress;
+    void idempotencyKey;
+    throw new NotImplementedException(
+      'Legacy loan application endpoint is disabled. Use the strict member loan application workflow.',
     );
-
-    // Auto-generate loan number: LN-YYYY-000001
-    // Counter upsert and loan create are wrapped in a single transaction so a
-    // failed loan.create() does not leave an orphaned incremented counter.
-    const year = new Date().getFullYear();
-    const loan = await this.prisma.$transaction(async (tx) => {
-      const counter = await tx.tenantCounter.upsert({
-        where: { tenantId },
-        create: { tenantId, loanSeq: 1 },
-        update: { loanSeq: { increment: 1 } },
-      });
-      const loanNumber = `LN-${year}-${String(counter.loanSeq).padStart(6, '0')}`;
-
-      return tx.loan.create({
-        data: {
-          tenantId,
-          memberId: dto.memberId,
-          loanProductId: dto.loanProductId,
-          loanNumber,
-          status: LoanStatus.DRAFT,
-          purpose: dto.purpose,
-          principalAmount: principal.toDecimalPlaces(4).toString(),
-          interestRate: annualRate.toDecimalPlaces(4).toString(),
-          processingFee: processingFee.toString(),
-          tenureMonths: dto.tenureMonths,
-          gracePeriodMonths: product.gracePeriodMonths,
-          monthlyInstalment: monthlyInstalment.toDecimalPlaces(4).toString(),
-          outstandingBalance: principal.toDecimalPlaces(4).toString(),
-          notes: dto.notes,
-        },
-        include: {
-          member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
-          loanProduct: { select: { name: true, interestType: true } },
-        },
-      });
-    });
-    const loanNumber = loan.loanNumber;
-
-    await this.audit.create({
-      tenantId,
-      userId: appliedBy,
-      action: 'LOAN.APPLY',
-      resource: 'Loan',
-      resourceId: loan.id,
-      metadata: {
-        loanNumber,
-        memberId: dto.memberId,
-        principalAmount: principal.toNumber(),
-        tenureMonths: dto.tenureMonths,
-        monthlyInstalment: monthlyInstalment.toNumber(),
-      },
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
-
-    return loan;
   }
-
   // ─── LIST LOANS ───────────────────────────────────────────────
 
   async findAll(
@@ -443,12 +307,20 @@ export class LoansService {
    *
    * An optional review comment is stored in `notes` and surfaced in audit metadata.
    */
-  async approve(id: string, tenantId: string, approvedBy: string, comment?: string, ipAddress?: string) {
+  async approve(
+    id: string,
+    tenantId: string,
+    approvedBy: string,
+    comment?: string,
+    ipAddress?: string,
+    userAgent?: string,
+  ) {
     const loan = await this.prisma.loan.findFirst({
       where: { id, tenantId },
       select: {
         id: true, status: true, loanNumber: true, memberId: true,
         principalAmount: true, monthlyInstalment: true, tenureMonths: true,
+        approvedAt: true, approvedBy: true, notes: true,
         member: { select: { user: { select: { email: true, firstName: true } } } },
       },
     });
@@ -467,25 +339,58 @@ export class LoansService {
 
     await this.disbursementGate.assertPassed(tenantId, id, this.prisma);
 
-    const updated = await this.prisma.loan.update({
-      where: { id },
-      data: {
-        status: LoanStatus.APPROVED,
-        approvedAt: new Date(),
-        approvedBy,
-        ...(comment && { notes: comment }),
-      },
-    });
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const oldValue = await tx.loan.findFirst({
+        where: { id, tenantId },
+        select: {
+          id: true,
+          loanNumber: true,
+          status: true,
+          approvedAt: true,
+          approvedBy: true,
+          notes: true,
+        },
+      });
+      if (!oldValue) throw new NotFoundException('Loan not found');
+      if (!approvableStatuses.includes(oldValue.status)) {
+        throw new BadRequestException(
+          `Cannot approve a loan in "${oldValue.status}" status. ` +
+          `Expected one of: ${approvableStatuses.join(', ')}.`,
+        );
+      }
 
-    await this.audit.create({
-      tenantId,
-      userId: approvedBy,
-      action: 'LOAN.APPROVE',
-      resource: 'Loan',
-      resourceId: id,
-      metadata: { loanNumber: loan.loanNumber, memberId: loan.memberId, comment },
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+      const approvedLoan = await tx.loan.update({
+        where: { id },
+        data: {
+          status: LoanStatus.APPROVED,
+          approvedAt: new Date(),
+          approvedBy,
+          ...(comment && { notes: comment }),
+        },
+      });
+
+      await this.audit.logAtomic(tx, {
+        tenantId,
+        actorId: approvedBy,
+        action: 'LOAN.APPROVE',
+        entityType: 'Loan',
+        entityId: id,
+        oldValue,
+        newValue: {
+          id: approvedLoan.id,
+          loanNumber: approvedLoan.loanNumber,
+          status: approvedLoan.status,
+          approvedAt: approvedLoan.approvedAt,
+          approvedBy: approvedLoan.approvedBy,
+          notes: approvedLoan.notes,
+        },
+        metadata: { loanNumber: loan.loanNumber, memberId: loan.memberId, comment },
+        ipAddress,
+        userAgent,
+      });
+
+      return approvedLoan;
+    });
 
     // Notify member of approval
     const memberUser = loan.member?.user;
@@ -503,7 +408,6 @@ export class LoansService {
 
     return updated;
   }
-
   // ─── DISBURSE ────────────────────────────────────────────────
 
   /**
@@ -636,9 +540,9 @@ export class LoansService {
         }
 
         // Duplicate reference guard
-        const dupRef = await tx.transaction.findUnique({ where: { reference } });
+        const dupRef = await tx.transaction.findFirst({ where: { tenantId, reference } });
         if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
-        const dupFeeRef = await tx.transaction.findUnique({ where: { reference: feeReference } });
+        const dupFeeRef = await tx.transaction.findFirst({ where: { tenantId, reference: feeReference } });
         if (dupFeeRef) throw new ConflictException(`Reference ${feeReference} already posted`);
 
         const balanceBefore = new Prisma.Decimal(account.balance.toString());
@@ -786,7 +690,7 @@ export class LoansService {
 
   // ─── REJECT ──────────────────────────────────────────────────
 
-  async reject(id: string, dto: RejectLoanDto, tenantId: string, rejectedBy: string, ipAddress?: string) {
+  async reject(id: string, dto: RejectLoanDto, tenantId: string, rejectedBy: string, ipAddress?: string, userAgent?: string) {
     const loan = await this.prisma.loan.findFirst({
       where: { id, tenantId },
       select: {
@@ -868,42 +772,22 @@ export class LoansService {
         data: { status: LoanStatus.REJECTED, notes: dto.reason },
       });
 
-      const timestamp = new Date();
-      const prev = await tx.auditLog.findFirst({
-        where: { tenantId },
-        orderBy: { timestamp: 'desc' },
-        select: { entryHash: true },
-      });
-      const payload = {
-        loanNumber: loan.loanNumber,
-        reason: dto.reason,
-        releasedHolds,
-        oldStatus: lockedLoan.status,
-        newStatus: LoanStatus.REJECTED,
-      };
-      const prevHash = prev?.entryHash ?? null;
-      const entryHash = createHash('sha256')
-        .update(JSON.stringify({ tenantId, actorId: rejectedBy, action: 'LOAN.REJECT', entityType: 'Loan', entityId: id, payload, prevHash, timestamp: timestamp.toISOString() }), 'utf8')
-        .digest('hex');
-
-      await tx.auditLog.create({
-        data: {
-          tenantId,
-          actorId: rejectedBy,
-          action: 'LOAN.REJECT',
-          entityType: 'Loan',
-          entityId: id,
-          oldValue: { status: lockedLoan.status },
-          newValue: { status: LoanStatus.REJECTED },
-          metadata: { ...payload, ipAddress },
-          payload,
-          ipAddress,
-          prevHash,
-          entryHash,
-          timestamp,
+      await this.audit.logAtomic(tx, {
+        tenantId,
+        actorId: rejectedBy,
+        action: 'LOAN.REJECT',
+        entityType: 'Loan',
+        entityId: id,
+        oldValue: { status: lockedLoan.status },
+        newValue: { status: LoanStatus.REJECTED, notes: dto.reason },
+        metadata: {
+          loanNumber: loan.loanNumber,
+          reason: dto.reason,
+          releasedHolds,
         },
+        ipAddress,
+        userAgent,
       });
-
       return rejectedLoan;
     }, { isolationLevel: 'Serializable' as const });
 
@@ -925,15 +809,9 @@ export class LoansService {
   // ─── GUARANTORS ──────────────────────────────────────────────
 
   /**
-   * Invite guarantors for a DRAFT loan.
-   * Validates each guarantor's eligibility and records PENDING guarantor rows.
-   * Loan status moves to PENDING_GUARANTORS.
-   *
-   * Eligibility rules:
-   *   - Must be an active member in the same tenant
-   *   - Must have an active FOSA account
-   *   - Must not have any ACTIVE defaulted loans
-   *   - Must not already be guaranteeing this loan
+   * @deprecated Legacy guarantor invitation path disabled for production.
+   * Use LoanApplicationService.inviteGuarantors, which enforces product-specific
+   * collateral rules, lockedBalance checks, and hardened guarantor validation.
    */
   async inviteGuarantors(
     loanId: string,
@@ -942,167 +820,15 @@ export class LoansService {
     invitedBy: string,
     ipAddress?: string,
   ) {
-    const loan = await this.prisma.loan.findFirst({
-      where: { id: loanId, tenantId },
-      select: {
-        id: true, status: true, loanNumber: true, memberId: true, principalAmount: true,
-        member: { select: { user: { select: { firstName: true, lastName: true } } } },
-      },
-    });
-    if (!loan) throw new NotFoundException('Loan not found');
-
-    if (loan.status !== LoanStatus.DRAFT && loan.status !== LoanStatus.PENDING_GUARANTORS) {
-      throw new BadRequestException(
-        `Cannot add guarantors to a loan in "${loan.status}" status`,
-      );
-    }
-
-    const principal = new Decimal(loan.principalAmount.toString());
-    const MIN_COVERAGE_RATIO = new Decimal('1.00'); // 100%
-    const minCoverageRequired = principal.times(MIN_COVERAGE_RATIO);
-
-    const results: Array<{
-      memberId: string;
-      guaranteedAmount: number;
-      status: 'invited' | 'skipped';
-      reason?: string;
-    }> = [];
-
-    for (const item of dto.guarantors) {
-      // Cannot guarantee own loan
-      if (item.memberId === loan.memberId) {
-        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'Member cannot guarantee their own loan' });
-        continue;
-      }
-
-      const guarantorMember = await this.prisma.member.findFirst({
-        where: { id: item.memberId, tenantId, isActive: true },
-        select: { id: true, user: { select: { email: true, firstName: true } } },
-      });
-      if (!guarantorMember) {
-        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'LoanGuarantor not found or inactive' });
-        continue;
-      }
-
-      const fosaAccount = await this.prisma.account.findFirst({
-        where: { memberId: item.memberId, tenantId, accountType: 'FOSA', isActive: true },
-        select: { id: true, balance: true },
-      });
-      if (!fosaAccount) {
-        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'LoanGuarantor has no active FOSA account' });
-        continue;
-      }
-
-      // LoanGuarantor's FOSA balance must cover their committed guaranteed amount.
-      // This protects the SACCO from guarantors who pledge more than they hold.
-      const fosaBalance = new Decimal(fosaAccount.balance.toString());
-      const committedAmount = new Decimal(item.guaranteedAmount);
-      if (fosaBalance.lessThan(committedAmount)) {
-        results.push({
-          memberId: item.memberId,
-          guaranteedAmount: item.guaranteedAmount,
-          status: 'skipped',
-          reason: `Insufficient FOSA balance: holds KES ${fosaBalance.toFixed(2)}, committing KES ${committedAmount.toFixed(2)}`,
-        });
-        continue;
-      }
-
-      const defaultedLoan = await this.prisma.loan.findFirst({
-        where: { memberId: item.memberId, tenantId, status: LoanStatus.DEFAULTED },
-        select: { id: true },
-      });
-      if (defaultedLoan) {
-        results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'skipped', reason: 'LoanGuarantor has a defaulted loan' });
-        continue;
-      }
-
-      // Upsert guarantor (idempotent re-invite)
-      await this.prisma.loanGuarantor.upsert({
-        where: { loanId_memberId: { loanId, memberId: item.memberId } },
-        create: {
-          tenantId,
-          loanId,
-          memberId: item.memberId,
-          guaranteedAmount: new Decimal(item.guaranteedAmount).toDecimalPlaces(4).toString(),
-          status: GuarantorStatus.PENDING,
-        },
-        update: {
-          guaranteedAmount: new Decimal(item.guaranteedAmount).toDecimalPlaces(4).toString(),
-          status: GuarantorStatus.PENDING,
-          respondedAt: null,
-        },
-      });
-
-      results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'invited' });
-
-      // Notify guarantor by email
-      const borrowerName = [
-        loan.member?.user?.firstName,
-        loan.member?.user?.lastName,
-      ].filter(Boolean).join(' ') || 'A fellow member';
-
-      if (guarantorMember.user?.email) {
-        this.enqueueEmail({
-          type: 'GUARANTOR_INVITE',
-          to: guarantorMember.user.email,
-          firstName: guarantorMember.user.firstName,
-          borrowerName,
-          loanNumber: loan.loanNumber,
-          guaranteedAmount: item.guaranteedAmount,
-          loanPrincipal: principal.toNumber(),
-        }, `loan.inviteGuarantor:${loanId}:${item.memberId}`);
-      }
-
-      // Enqueue a 24-hour reminder for this guarantor
-      this.guarantorReminderQueue.add(
-        'send-reminder',
-        {
-          loanId,
-          guarantorId: item.memberId,
-          tenantId,
-          memberId: item.memberId,
-          loanNumber: loan.loanNumber,
-        },
-        { delay: 24 * 60 * 60 * 1000, attempts: 2 },
-      ).catch((e: unknown) => this.logger.error('Failed to enqueue guarantor reminder', e));
-    }
-
-    // Update loan status to PENDING_GUARANTORS
-    await this.prisma.loan.update({
-      where: { id: loanId },
-      data: { status: LoanStatus.PENDING_GUARANTORS },
-    });
-
-    const invitedCount = results.filter((r) => r.status === 'invited').length;
-    const totalGuaranteed = results
-      .filter((r) => r.status === 'invited')
-      .reduce((sum, r) => sum.plus(r.guaranteedAmount), new Decimal(0));
-
-    await this.audit.create({
-      tenantId,
-      userId: invitedBy,
-      action: 'LOAN.GUARANTORS_INVITED',
-      resource: 'Loan',
-      resourceId: loanId,
-      metadata: {
-        loanNumber: loan.loanNumber,
-        invitedCount,
-        totalGuaranteed: totalGuaranteed.toNumber(),
-        minCoverageRequired: minCoverageRequired.toNumber(),
-      },
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
-
-    return {
-      loanId,
-      invitedCount,
-      totalGuaranteedAmount: totalGuaranteed.toNumber(),
-      minimumCoverageRequired: minCoverageRequired.toNumber(),
-      coverageMet: totalGuaranteed.greaterThanOrEqualTo(minCoverageRequired),
-      results,
-    };
+    void loanId;
+    void dto;
+    void tenantId;
+    void invitedBy;
+    void ipAddress;
+    throw new NotImplementedException(
+      'Legacy guarantor invitation endpoint is disabled. Use the strict guarantor invitation workflow.',
+    );
   }
-
   /**
    * A guarantor member responds to their guarantee request.
    * After all guarantors have responded (or threshold met), loan moves to PENDING_REVIEW.

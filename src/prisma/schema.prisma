@@ -878,7 +878,7 @@ model Transaction {
   balanceAfter  Decimal           @db.Decimal(18, 4)
 
   // Unique idempotency key – prevents double-posting
-  reference   String  @unique
+  reference   String
   description String?
 
   processedBy String? // userId of teller or "SYSTEM"
@@ -888,6 +888,7 @@ model Transaction {
 
   mpesaTransaction MpesaTransaction?
 
+  @@unique([tenantId, reference])
   @@index([tenantId, accountId])
   @@index([tenantId, loanId])
   @@index([tenantId, status, createdAt])
@@ -940,7 +941,7 @@ model MpesaTransaction {
   resultCode         Int?
   resultDesc         String?
   failureReason      String?
-  mpesaReceiptNumber String? // M-Pesa transaction ID from Safaricom
+  mpesaReceiptNumber String? @unique // M-Pesa transaction ID from Safaricom
   transactionDate    DateTime? // When Safaricom processed the payment
 
   // ── Compliance fields (SASRA: raw payload + timestamps required) ────────
