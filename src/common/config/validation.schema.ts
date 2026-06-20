@@ -15,7 +15,7 @@ export const validationSchema = Joi.object({
     .valid('development', 'production', 'test', 'staging')
     .default('development'),
   PORT: Joi.number().default(3000),
-  API_PREFIX: Joi.string().default('api'),
+  API_PREFIX: Joi.string().default('api/v1'),
   // Frontend base URL — used in password-reset email links.
   // Must be HTTPS in production to prevent reset tokens being sent over plain HTTP.
   APP_URL: Joi.when('NODE_ENV', {

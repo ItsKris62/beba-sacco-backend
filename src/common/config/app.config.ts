@@ -4,7 +4,7 @@ export default registerAs('app', () => ({
   // Application
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT || '3000', 10),
-  apiPrefix: process.env.API_PREFIX || 'api',
+  apiPrefix: process.env.API_PREFIX || 'api/v1',
   appName: process.env.APP_NAME || 'Beba SACCO Backend',
   appVersion: process.env.APP_VERSION || '1.0.0',
   /** Frontend base URL — used to build password reset links in emails */

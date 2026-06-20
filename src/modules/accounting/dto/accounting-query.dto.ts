@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsDateString, IsIn, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 
 export class LedgerQueryDto {
@@ -95,14 +95,29 @@ export class GetPendingReconQueryDto {
   @IsDateString()
   startDate?: string;
 
+  @ApiPropertyOptional({ description: 'Alias for startDate', example: '2026-05-01' })
+  @IsOptional()
+  @IsDateString()
+  dateFrom?: string;
+
   @ApiPropertyOptional({ description: 'Created-at end date (inclusive)', example: '2026-05-08' })
   @IsOptional()
   @IsDateString()
   endDate?: string;
+
+  @ApiPropertyOptional({ description: 'Alias for endDate', example: '2026-05-08' })
+  @IsOptional()
+  @IsDateString()
+  dateTo?: string;
 
   @ApiPropertyOptional({ description: 'M-Pesa rail', enum: ['STK', 'B2C'], example: 'STK' })
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.toUpperCase() : value))
   @IsIn(['STK', 'B2C'])
   type?: 'STK' | 'B2C';
+
+  @ApiPropertyOptional({ description: 'Search receipt, checkout id, phone, or account reference' })
+  @IsOptional()
+  @IsString()
+  search?: string;
 }

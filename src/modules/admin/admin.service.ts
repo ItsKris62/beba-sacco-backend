@@ -9,6 +9,8 @@ import {
   KycStatus,
   LoanStatus,
   StagePosition,
+  TransactionStatus,
+  TransactionType,
   UserRole,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -28,6 +30,13 @@ const REQUIRED_KYC_DOCUMENT_TYPES: DocumentType[] = [
   DocumentType.NATIONAL_ID_BACK,
   DocumentType.KRA_PIN,
   DocumentType.MEMBER_FORM,
+];
+
+const TRANSACTION_INFLOW_TYPES: TransactionType[] = [
+  TransactionType.DEPOSIT,
+  TransactionType.INTEREST_EARNED,
+  TransactionType.DIVIDEND_PAYOUT,
+  TransactionType.LOAN_DISBURSEMENT,
 ];
 
 /**
@@ -142,6 +151,63 @@ export class AdminService {
         balanceAfter: tx.balanceAfter.toNumber(),
       })),
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  /**
+   * Aggregates completed transaction flow for the selected tenant and filters.
+   *
+   * The totals are independent of the paginated transaction table, so dashboard
+   * cards do not accidentally report only the current page.
+   */
+  async getTransactionStats(
+    tenantId: string | undefined,
+    query: { from?: string; to?: string; search?: string },
+  ) {
+    const periodStart = query.from ? new Date(query.from) : null;
+    const periodEnd = query.to ? new Date(query.to) : null;
+    const where = {
+      ...(tenantId && { tenantId }),
+      status: TransactionStatus.COMPLETED,
+      ...((periodStart || periodEnd) && {
+        createdAt: {
+          ...(periodStart && { gte: periodStart }),
+          ...(periodEnd && { lte: periodEnd }),
+        },
+      }),
+      ...(query.search && {
+        OR: [
+          { reference: { contains: query.search, mode: 'insensitive' as const } },
+          { account: { accountNumber: { contains: query.search, mode: 'insensitive' as const } } },
+        ],
+      }),
+    };
+
+    const grouped = await this.prisma.transaction.groupBy({
+      by: ['type'],
+      where,
+      _sum: { amount: true },
+    });
+
+    let inflows = new Decimal(0);
+    let outflows = new Decimal(0);
+
+    for (const row of grouped) {
+      const amount = new Decimal(row._sum.amount?.toString() ?? 0);
+      if (TRANSACTION_INFLOW_TYPES.includes(row.type)) {
+        inflows = inflows.plus(amount);
+      } else {
+        outflows = outflows.plus(amount);
+      }
+    }
+
+    return {
+      pageVolume: inflows.plus(outflows).toNumber(),
+      inflows: inflows.toNumber(),
+      outflows: outflows.toNumber(),
+      netFlow: inflows.minus(outflows).toNumber(),
+      periodStart: periodStart?.toISOString() ?? null,
+      periodEnd: periodEnd?.toISOString() ?? null,
     };
   }
 

@@ -33,6 +33,7 @@ enum UserRole {
   MEMBER // Ordinary SACCO member – personal dashboard only
   CHAIRMAN // Stage oversight – inherits MEMBER permissions + stage analytics
   AUDITOR // Read-only compliance auditor
+  ACCOUNTANT // SACCO accountant – GL, journal entries, reconciliation
 
   @@schema("public")
 }
@@ -407,6 +408,8 @@ model Tenant {
   reportJobs            ReportJob[]
   documents             Document[]
   kycRequirements       KYCRequirement[]
+  glAccounts            GLAccount[]
+  journalEntries        JournalEntry[]
 
   @@index([slug])
   @@index([status])
@@ -472,6 +475,11 @@ model User {
   member           Member?
   stageAssignments StageAssignment[]
   requestedReports ReportJob[]
+
+  // Accounting – journal entry relations
+  createdJournalEntries  JournalEntry[] @relation("JournalEntryCreator")
+  approvedJournalEntries JournalEntry[] @relation("JournalEntryApprover")
+  rejectedJournalEntries JournalEntry[] @relation("JournalEntryRejector")
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -1970,5 +1978,147 @@ model KYCRequirement {
   @@index([tenantId, kycStage])
   @@index([tenantId, isRequired])
   @@map("kyc_requirements")
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCOUNTING LEDGER – General Ledger, Journal Entries, GL Postings
+// Overlay on top of the operational Transaction ledger. Decoupled by design.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum JournalEntryStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  POSTED
+
+  @@schema("public")
+}
+
+enum JournalEntryType {
+  MANUAL
+  LOAN_DISBURSEMENT
+  LOAN_REPAYMENT
+  FEE_CHARGE
+  FEE_REVERSAL
+  MPESA_DEPOSIT
+  INTEREST_ACCRUAL
+
+  @@schema("public")
+}
+
+enum GLAccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+
+  @@schema("public")
+}
+
+/// Chart of Accounts – tenant-scoped hierarchical account tree.
+/// System accounts (isSystemAccount=true) are seeded on tenant creation
+/// and cannot be deleted or re-coded by the tenant admin.
+model GLAccount {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  code     String        // e.g., "1000"
+  name     String        // e.g., "Cash at Bank - M-Pesa"
+  type     GLAccountType
+
+  parentId String?
+  parent   GLAccount?  @relation("GLAccountHierarchy", fields: [parentId], references: [id])
+  children GLAccount[] @relation("GLAccountHierarchy")
+
+  isSystemAccount Boolean @default(false)
+  isActive        Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  debitPostings  GLPosting[] @relation("GLPostingDebit")
+  creditPostings GLPosting[] @relation("GLPostingCredit")
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([tenantId, type])
+  @@index([tenantId, isActive])
+  @@schema("public")
+}
+
+/// Double-entry journal entry with maker-checker approval workflow.
+/// Each entry has one or more GLPosting lines where sum(debits) = sum(credits).
+///
+/// Auto-numbering: JE-{YYYY}-{seq} per tenant.
+/// Entries with totalAmount >= KES 100,000 require MANAGER approval.
+model JournalEntry {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  entryNumber String // Auto: JE-2026-000001 (tenant-scoped)
+
+  type        JournalEntryType
+  status      JournalEntryStatus @default(DRAFT)
+  description String             @db.Text
+
+  // Optional link to source entity for system-generated entries
+  referenceType String? // e.g., "LOAN", "MPESA_TRANSACTION", "TRANSACTION"
+  referenceId   String? // UUID of the source entity
+
+  totalAmount Decimal @db.Decimal(18, 4)
+
+  // Maker-checker workflow
+  createdById  String
+  createdBy    User   @relation("JournalEntryCreator", fields: [createdById], references: [id])
+
+  approvedById  String?
+  approvedBy    User?  @relation("JournalEntryApprover", fields: [approvedById], references: [id])
+
+  rejectedById  String?
+  rejectedBy    User?  @relation("JournalEntryRejector", fields: [rejectedById], references: [id])
+
+  approvalNotes String? @db.Text
+
+  postedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  postings GLPosting[]
+
+  @@unique([tenantId, entryNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, type])
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, createdAt])
+  @@schema("public")
+}
+
+/// Individual debit or credit line within a journal entry.
+/// Each posting touches exactly one debit account and one credit account.
+model GLPosting {
+  id             String       @id @default(uuid())
+  journalEntryId String
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+
+  debitAccountId  String?
+  debitAccount    GLAccount? @relation("GLPostingDebit", fields: [debitAccountId], references: [id])
+
+  creditAccountId String?
+  creditAccount   GLAccount? @relation("GLPostingCredit", fields: [creditAccountId], references: [id])
+
+  amount      Decimal  @db.Decimal(18, 4)
+  description String?
+  postingDate DateTime @default(now())
+
+  createdAt DateTime @default(now())
+
+  @@index([journalEntryId])
+  @@index([debitAccountId])
+  @@index([creditAccountId])
   @@schema("public")
 }

@@ -32,6 +32,7 @@ const ROLE_RANK: Record<UserRole, number> = {
   [UserRole.TENANT_ADMIN]: 80,
   [UserRole.MANAGER]: 60,
   [UserRole.LOAN_OFFICER]: 50,
+  [UserRole.ACCOUNTANT]: 45,
   [UserRole.TELLER]: 40,
   [UserRole.CHAIRMAN]: 30,
   [UserRole.MEMBER]: 20,
@@ -121,6 +122,7 @@ export function canManageRole(actorRole: UserRole, targetRole: UserRole): boolea
   if (actorRole === UserRole.MANAGER) {
     return (
       targetRole === UserRole.LOAN_OFFICER ||
+      targetRole === UserRole.ACCOUNTANT ||
       targetRole === UserRole.TELLER ||
       targetRole === UserRole.MEMBER ||
       targetRole === UserRole.CHAIRMAN ||

@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Header, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -19,6 +19,10 @@ import {
   ReportsQueryDto,
 } from './dto/accounting-query.dto';
 import { MatchMpesaTransactionDto } from './dto/match-mpesa.dto';
+import { CreateJournalEntryDto } from './dto/create-journal-entry.dto';
+import { JournalEntryQueryDto } from './dto/journal-entry-query.dto';
+import { ApproveRejectDto } from './dto/approve-reject.dto';
+import { ExportGLQueryDto } from './dto/export-gl.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -29,10 +33,89 @@ import type { Tenant } from '@prisma/client';
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN)
+@Roles(UserRole.ACCOUNTANT, UserRole.MANAGER, UserRole.TENANT_ADMIN)
 @Controller('admin/accounting')
 export class AccountingController {
   constructor(private readonly accounting: AccountingService) {}
+
+  @Get('dashboard-stats')
+  @HttpCode(HttpStatus.OK)
+  async getDashboardStats(@CurrentTenant() tenant: Tenant) {
+    return this.accounting.getDashboardStats(tenant.id);
+  }
+
+  @Get('gl-accounts')
+  @HttpCode(HttpStatus.OK)
+  async getGLAccounts(@CurrentTenant() tenant: Tenant) {
+    return this.accounting.getGLAccounts(tenant.id);
+  }
+
+  @Get('journal-entries')
+  @HttpCode(HttpStatus.OK)
+  async getJournalEntries(
+    @Query() query: JournalEntryQueryDto,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.accounting.getJournalEntries(tenant.id, query);
+  }
+
+  @Post('journal-entries')
+  @HttpCode(HttpStatus.CREATED)
+  async createJournalEntry(
+    @Body() dto: CreateJournalEntryDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.accounting.createJournalEntry(tenant.id, dto, user.id);
+  }
+
+  @Get('journal-entries/:id')
+  @HttpCode(HttpStatus.OK)
+  async getJournalEntry(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.accounting.getJournalEntry(tenant.id, id);
+  }
+
+  @Patch('journal-entries/:id/approve')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  async approveJournalEntry(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ApproveRejectDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.accounting.approveJournalEntry(tenant.id, id, user.id, dto.notes);
+  }
+
+  @Patch('journal-entries/:id/reject')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  async rejectJournalEntry(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ApproveRejectDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.accounting.rejectJournalEntry(tenant.id, id, user.id, dto.notes);
+  }
+
+  @Get('pending-approvals')
+  @Roles(UserRole.ACCOUNTANT, UserRole.MANAGER, UserRole.TENANT_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  async getPendingApprovals(@CurrentTenant() tenant: Tenant) {
+    return this.accounting.getPendingApprovals(tenant.id);
+  }
+
+  @Post('export-gl')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="general-ledger.csv"')
+  @HttpCode(HttpStatus.OK)
+  async exportGL(@Body() query: ExportGLQueryDto, @CurrentTenant() tenant: Tenant) {
+    return this.accounting.exportGL(tenant.id, query);
+  }
 
   @Get('ledgers')
   @HttpCode(HttpStatus.OK)
@@ -179,6 +262,22 @@ export class AccountingController {
     return this.accounting.getPendingReconciliation(tenant.id, query);
   }
 
+  @Get('mpesa/unmatched')
+  @Roles(UserRole.MANAGER, UserRole.AUDITOR, UserRole.LOAN_OFFICER, UserRole.ACCOUNTANT)
+  @HttpCode(HttpStatus.OK)
+  async getUnmatchedMpesa(
+    @Query() query: GetPendingReconQueryDto,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.accounting.getPendingReconciliation(tenant.id, query);
+  }
+
+  @Get('mpesa/reconciliation')
+  @HttpCode(HttpStatus.OK)
+  async getMpesaReconciliation(@Query() query: ReconQueryDto, @CurrentTenant() tenant: Tenant) {
+    return this.accounting.getReconciliation(tenant.id, query);
+  }
+
   @Post('reconciliation/:id/match')
   @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN)
   @HttpCode(HttpStatus.OK)
@@ -211,6 +310,18 @@ export class AccountingController {
   @ApiResponse({ status: 404, description: 'RECON_PENDING transaction or target account not found' })
   @ApiResponse({ status: 409, description: 'Transaction already matched (should not normally occur)' })
   async matchMpesaTransaction(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: MatchMpesaTransactionDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.accounting.matchMpesaTransaction(id, tenant.id, dto.accountId, user.id, dto.note);
+  }
+
+  @Post('mpesa/:id/match')
+  @Roles(UserRole.MANAGER, UserRole.TENANT_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  async matchUnmatchedMpesa(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: MatchMpesaTransactionDto,
     @CurrentTenant() tenant: Tenant,

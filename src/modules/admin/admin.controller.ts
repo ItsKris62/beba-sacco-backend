@@ -12,6 +12,10 @@ import { AdminService } from './admin.service';
 import { UpdateKycDto } from './dto/update-kyc.dto';
 import { ReviewMemberDto } from './dto/review-member.dto';
 import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
+import {
+  GetTransactionStatsQueryDto,
+  TransactionStatsResponseDto,
+} from './dto/get-transaction-stats.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
@@ -84,6 +88,28 @@ export class AdminController {
   }
 
   // ─── TRANSACTIONS ─────────────────────────────────────────────
+
+  @Get('transactions/stats')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR, UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Aggregated transaction flow stats',
+    description:
+      'Returns completed transaction inflows, outflows, volume, and net flow. ' +
+      'TENANT_ADMIN / MANAGER / AUDITOR see only their tenant\'s transactions. ' +
+      'SUPER_ADMIN omits tenant scoping to query across all tenants.',
+  })
+  @ApiQuery({ name: 'from', required: false, description: 'ISO 8601 start date' })
+  @ApiQuery({ name: 'to', required: false, description: 'ISO 8601 end date' })
+  @ApiQuery({ name: 'search', required: false, description: 'Reference or account number' })
+  @ApiResponse({ status: 200, type: TransactionStatsResponseDto })
+  getTransactionStats(
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: GetTransactionStatsQueryDto,
+  ) {
+    const tenantId = user.role === UserRole.SUPER_ADMIN ? undefined : tenant.id;
+    return this.adminService.getTransactionStats(tenantId, query);
+  }
 
   @Get('transactions')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR, UserRole.SUPER_ADMIN)
