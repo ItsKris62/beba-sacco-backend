@@ -50,8 +50,11 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Copy compiled app
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
 
-# Copy Prisma client (generated artefacts live in node_modules, already copied above)
-# Copy the schema so `prisma migrate deploy` can run at startup if needed
+# Copy Prisma client generated from the non-standard schema path.
+COPY --from=builder --chown=nestjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder --chown=nestjs:nodejs /app/node_modules/@prisma/client ./node_modules/@prisma/client
+
+# Copy the schema so operational Prisma commands can run against this image if needed.
 COPY --from=builder --chown=nestjs:nodejs /app/src/prisma ./src/prisma
 
 # Runtime environment defaults (override via docker compose / Kubernetes secrets)
@@ -65,7 +68,7 @@ USER nestjs
 
 # Lightweight healthcheck using the bundled Node runtime (no wget/curl needed)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
-  CMD node -e "require('http').get({host:'localhost',port:3000,path:'/api/health/ping'}, \
+  CMD node -e "require('http').get({host:'localhost',port:3000,path:'/api/v1/health/ping'}, \
     r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 CMD ["node", "dist/main"]

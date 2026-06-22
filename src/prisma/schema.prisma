@@ -817,6 +817,7 @@ model Loan {
 
   @@unique([tenantId, loanNumber])
   @@index([tenantId, memberId])
+  @@index([tenantId, loanProductId])
   @@index([tenantId, status])
   @@index([tenantId, staging])
   @@schema("public")
@@ -1001,6 +1002,9 @@ model SupportTicket {
   relatedLoanId String?
   relatedTxId   String?
   assignedTo    String?
+  incidentId    String?
+  incident      Incident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  resolutionDueAt DateTime?
 
   messages  TicketMessage[]
   createdAt DateTime        @default(now())
@@ -1008,6 +1012,43 @@ model SupportTicket {
 
   @@index([tenantId, memberId])
   @@index([tenantId, status])
+  @@index([tenantId, incidentId])
+  @@index([tenantId, resolutionDueAt])
+  @@schema("public")
+}
+
+model Incident {
+  id          String @id @default(uuid())
+  tenantId    String
+  title       String
+  description String @db.Text
+  severity    String
+  status      String @default("INVESTIGATING")
+
+  tickets   SupportTicket[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, status])
+  @@index([tenantId, severity])
+  @@index([tenantId, createdAt])
+  @@schema("public")
+}
+
+model InAppNotification {
+  id       String @id @default(uuid())
+  tenantId String
+  userId   String
+
+  title  String
+  body   String @db.Text
+  type   String
+  isRead Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, userId, isRead])
+  @@index([tenantId, userId, createdAt])
   @@schema("public")
 }
 
@@ -1709,6 +1750,7 @@ model MemberApplication {
 
   @@index([tenantId])
   @@index([tenantId, status])
+  @@index([tenantId, wardId])
   @@index([idNumber])
   @@index([phoneNumber])
   @@schema("public")
@@ -2048,6 +2090,7 @@ model GLAccount {
   @@index([tenantId])
   @@index([tenantId, type])
   @@index([tenantId, isActive])
+  @@index([tenantId, parentId])
   @@schema("public")
 }
 
@@ -2096,6 +2139,9 @@ model JournalEntry {
   @@index([tenantId, type])
   @@index([tenantId, status, createdAt])
   @@index([tenantId, createdAt])
+  @@index([tenantId, createdById])
+  @@index([tenantId, approvedById])
+  @@index([tenantId, rejectedById])
   @@schema("public")
 }
 

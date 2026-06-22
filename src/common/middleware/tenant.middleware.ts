@@ -2,13 +2,15 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NestMiddleware,
   UnauthorizedException,
 } from '@nestjs/common';
 import { NextFunction, Request, Response } from 'express';
-import { TenantStatus, UserRole } from '@prisma/client';
+import { Prisma, TenantStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FeatureFlags } from '../../config/feature-flags';
+import { RedisService } from '../services/redis.service';
 
 const TENANT_SKIP_PATTERNS = [
   '/health',
@@ -21,6 +23,27 @@ const TENANT_SKIP_PATTERNS = [
   '/api/v1/mpesa/callback',
 ];
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TENANT_CACHE_TTL_SECONDS = 300;
+
+type TenantRequestConfig = {
+  id: string;
+  name: string;
+  slug: string;
+  schemaName: string;
+  status: TenantStatus;
+  settings: Prisma.JsonValue | null;
+  contactEmail: string;
+  contactPhone: string;
+  address: string | null;
+  logoUrl: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type CachedTenantConfig = Omit<TenantRequestConfig, 'createdAt' | 'updatedAt'> & {
+  createdAt: string;
+  updatedAt: string;
+};
 
 interface JwtTenantClaim {
   sub?: string;
@@ -30,7 +53,12 @@ interface JwtTenantClaim {
 
 @Injectable()
 export class TenantMiddleware implements NestMiddleware {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(TenantMiddleware.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   async use(
     req: Request & { tenant?: unknown; tenantId?: string },
@@ -62,6 +90,39 @@ export class TenantMiddleware implements NestMiddleware {
       throw new ForbiddenException('Token tenant does not match X-Tenant-ID');
     }
 
+    const tenant = await this.getTenantConfig(tenantId);
+
+    if (!tenant) {
+      throw new BadRequestException('Unknown tenant');
+    }
+
+    if (tenant.status === TenantStatus.SUSPENDED && jwtClaim?.role !== UserRole.SUPER_ADMIN) {
+      throw new UnauthorizedException('This SACCO account has been suspended. Contact support.');
+    }
+
+    if (tenant.status === TenantStatus.INACTIVE && jwtClaim?.role !== UserRole.SUPER_ADMIN) {
+      throw new UnauthorizedException('This SACCO account is inactive.');
+    }
+
+    req.tenant = tenant;
+    req.tenantId = tenant.id;
+    await this.setRlsSessionContext(tenant.id, jwtClaim);
+    next();
+  }
+
+  private async getTenantConfig(tenantId: string): Promise<TenantRequestConfig | null> {
+    const cacheKey = this.tenantCacheKey(tenantId);
+    const cached = await this.redis.getJson<CachedTenantConfig>(cacheKey);
+    if (cached) {
+      this.logger.debug(`Tenant config cache hit tenant=${tenantId}`);
+      return {
+        ...cached,
+        createdAt: new Date(cached.createdAt),
+        updatedAt: new Date(cached.updatedAt),
+      };
+    }
+
+    this.logger.debug(`Tenant config cache miss tenant=${tenantId}`);
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
       select: {
@@ -80,22 +141,15 @@ export class TenantMiddleware implements NestMiddleware {
       },
     });
 
-    if (!tenant) {
-      throw new BadRequestException('Unknown tenant');
+    if (tenant) {
+      await this.redis.setJson(cacheKey, tenant, TENANT_CACHE_TTL_SECONDS);
     }
 
-    if (tenant.status === TenantStatus.SUSPENDED && jwtClaim?.role !== UserRole.SUPER_ADMIN) {
-      throw new UnauthorizedException('This SACCO account has been suspended. Contact support.');
-    }
+    return tenant;
+  }
 
-    if (tenant.status === TenantStatus.INACTIVE && jwtClaim?.role !== UserRole.SUPER_ADMIN) {
-      throw new UnauthorizedException('This SACCO account is inactive.');
-    }
-
-    req.tenant = tenant;
-    req.tenantId = tenant.id;
-    await this.setRlsSessionContext(tenant.id, jwtClaim);
-    next();
+  private tenantCacheKey(tenantId: string): string {
+    return `tenant:config:${tenantId}`;
   }
 
   private async setRlsSessionContext(

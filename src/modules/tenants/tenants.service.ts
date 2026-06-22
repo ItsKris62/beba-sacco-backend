@@ -1,10 +1,14 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../common/services/redis.service';
 import { UpdateTenantSettingsDto } from './dto/update-tenant-settings.dto';
 
 @Injectable()
 export class TenantsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   async getSettings(tenantId: string) {
     const tenant = await this.prisma.tenant.findUnique({
@@ -28,6 +32,8 @@ export class TenantsService {
       where: { id: tenantId },
       data: { settings: newSettings },
     });
+
+    await this.redis.del(`tenant:config:${tenantId}`);
 
     return newSettings;
   }

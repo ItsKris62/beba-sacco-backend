@@ -2,7 +2,7 @@ import * as Sentry from '@sentry/nestjs';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
 
 export function initializeSentry() {
-  Sentry.init({
+  const sentryOptions = {
     dsn: process.env.SENTRY_DSN,
     environment: process.env.NODE_ENV || 'development',
     integrations: [
@@ -14,7 +14,7 @@ export function initializeSentry() {
     profilesSampleRate: 0.1,
     
     // PII Scrubbing per ODPC Data Minimization Principle (Compliance Checklist B1.6)
-    beforeSend(event) {
+    beforeSend(event: Sentry.Event) {
       const request = event.request;
       if (request && request.data) {
         let data = typeof request.data === 'string' ? JSON.parse(request.data) : request.data;
@@ -35,5 +35,7 @@ export function initializeSentry() {
       }
       return event;
     },
-  });
+  };
+
+  Sentry.init(sentryOptions as Parameters<typeof Sentry.init>[0]);
 }

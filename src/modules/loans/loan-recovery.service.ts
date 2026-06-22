@@ -21,6 +21,11 @@ interface AcceptedGuarantorRecoveryRow {
 interface RecoveryAllocation {
   guarantor: AcceptedGuarantorRecoveryRow;
   deduction: Decimal;
+  account?: {
+    id: string;
+    balance: Prisma.Decimal;
+    lockedBalance: Prisma.Decimal;
+  };
 }
 
 export interface LoanRecoverySummary {
@@ -146,16 +151,7 @@ export class LoanRecoveryService {
           continue;
         }
 
-        const account = await tx.account.findFirst({
-          where: {
-            tenantId,
-            memberId: allocation.guarantor.memberId,
-            accountType,
-            isActive: true,
-          },
-          select: { id: true, balance: true },
-        });
-
+        const account = allocation.account;
         if (!account) {
           continue;
         }
@@ -254,13 +250,15 @@ export class LoanRecoveryService {
     outstandingBalance: Decimal,
   ): Promise<RecoveryAllocation[]> {
     const sumHolds = guarantors.reduce((sum, g) => sum.plus(g.guaranteedAmount.toString()), new Decimal(0));
-    const capacities = await Promise.all(
-      guarantors.map(async (guarantor) => {
-        const account = await tx.account.findFirst({
-          where: { tenantId, memberId: guarantor.memberId, accountType, isActive: true },
-          select: { balance: true, lockedBalance: true },
-        });
+    const guarantorMemberIds = guarantors.map((guarantor) => guarantor.memberId);
+    const accounts = await tx.account.findMany({
+      where: { tenantId, memberId: { in: guarantorMemberIds }, accountType, isActive: true },
+      select: { id: true, memberId: true, balance: true, lockedBalance: true },
+    });
+    const accountMap = new Map(accounts.map((account) => [account.memberId, account]));
 
+    const capacities = guarantors.map((guarantor) => {
+        const account = accountMap.get(guarantor.memberId);
         let guaranteeCapacity = new Decimal(guarantor.guaranteedAmount.toString()).minus(
           new Decimal(guarantor.recoveredAmount.toString()),
         );
@@ -276,9 +274,9 @@ export class LoanRecoveryService {
         return {
           guarantor,
           capacity: Decimal.min(guaranteeCapacity, accountCapacity).toDecimalPlaces(4),
+          account,
         };
-      }),
-    );
+      });
 
     let remainingDebt = defaultAmount.toDecimalPlaces(4);
     let remainingCapacity = capacities.reduce((sum, item) => sum.plus(item.capacity), new Decimal(0));

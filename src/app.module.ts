@@ -69,6 +69,7 @@ import { AccountingModule } from './modules/accounting/accounting.module';
 // KYC async processing
 import { KycModule } from './modules/kyc/kyc.module';
 import { SupportModule } from './modules/support/support.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 // Prisma
 import { PrismaModule } from './prisma/prisma.module';
@@ -167,6 +168,7 @@ import { AuditService } from './modules/audit/audit.service';
     AccountingModule,
     KycModule,
     SupportModule,
+    NotificationsModule,
   ],
 
   providers: [

@@ -6,13 +6,28 @@ import { MpesaService } from './mpesa.service';
 import { DarajaClientService } from './daraja-client.service';
 import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
+import { MpesaB2cTimeoutProcessor } from './processors/mpesa-b2c-timeout.processor';
 import { StkExpiryScheduler } from './jobs/stk-expiry.scheduler';
+import { StkExpiryProcessor } from './jobs/stk-expiry.processor';
 import { MpesaStkTimeoutService } from './mpesa-stk-timeout.service';
 import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { LoansModule } from '../loans/loans.module';
+
+const shouldRegisterMpesaWorkers = (): boolean =>
+  process.env.WORKER_MODE === 'true' || process.env.NODE_ROLE === 'worker';
+
+const MPESA_WORKER_PROVIDERS = shouldRegisterMpesaWorkers()
+  ? [
+      MpesaDisbursementProcessor,
+      MpesaB2cTimeoutProcessor,
+      StkExpiryProcessor,
+      StkExpiryScheduler,
+      MpesaStkTimeoutService,
+    ]
+  : [];
 
 /**
  * MpesaModule wires all Daraja / M-Pesa concerns:
@@ -61,11 +76,7 @@ import { LoansModule } from '../loans/loans.module';
     MpesaService,
     MpesaTenantResolverService,
     MpesaIpGuard,
-    // B2C disbursement processor lives here (not in QueueModule) because it
-    // needs MpesaService and there is no circular dependency in this direction.
-    MpesaDisbursementProcessor,
-    StkExpiryScheduler,
-    MpesaStkTimeoutService,
+    ...MPESA_WORKER_PROVIDERS,
     // PrismaService is @Global via PrismaModule, but listed explicitly so
     // this module is self-documenting about its dependencies.
     PrismaService,

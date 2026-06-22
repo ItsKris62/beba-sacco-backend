@@ -31,6 +31,13 @@ import { PrismaService } from './prisma/prisma.service';
  * (public schema only) but will silently break per-tenant schema switching.
  */
 async function bootstrap() {
+  if (process.env.WORKER_MODE === 'true' || process.env.NODE_ROLE === 'worker') {
+    console.error(
+      'WORKER_MODE is enabled. Refusing to start the HTTP API from src/main.ts; use src/worker.ts instead.',
+    );
+    process.exit(1);
+  }
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Buffer logs until nestjs-pino Logger is wired up
     bufferLogs: true,
@@ -60,8 +67,8 @@ async function bootstrap() {
 
   // Body size limit — reject oversized payloads before they reach route handlers.
   // 1 MB covers the largest anticipated CSV import; M-Pesa callbacks are <4 KB.
-  app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }));
   app.use(cookieParser());
 
   // CORS must be registered before helmet so that OPTIONS preflight responses

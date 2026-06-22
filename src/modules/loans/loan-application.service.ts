@@ -739,6 +739,20 @@ export class LoanApplicationService {
         },
       });
 
+      const guarantorMemberIds = txResult.guarantorNotifications.map((guarantor) => guarantor.memberId);
+      const guarantorMembers = guarantorMemberIds.length > 0
+        ? await this.prisma.member.findMany({
+            where: { id: { in: guarantorMemberIds }, tenantId },
+            select: {
+              id: true,
+              user: { select: { email: true, firstName: true, phone: true, phoneNumber: true } },
+            },
+          })
+        : [];
+      const guarantorMemberMap = new Map(
+        guarantorMembers.map((member) => [member.id, member]),
+      );
+
       for (const guarantor of txResult.guarantorNotifications) {
         await this.guarantorExpiryQueue
           .add(
@@ -748,10 +762,7 @@ export class LoanApplicationService {
           )
           .catch((e: unknown) => this.logger.error('Failed to enqueue guarantor expiry', e));
 
-        const guarantorMember = await this.prisma.member.findFirst({
-          where: { id: guarantor.memberId, tenantId },
-          select: { user: { select: { email: true, firstName: true, phone: true, phoneNumber: true } } },
-        });
+        const guarantorMember = guarantorMemberMap.get(guarantor.memberId);
 
         if (guarantorMember?.user?.email) {
           this.enqueueEmail(
@@ -1069,6 +1080,16 @@ export class LoanApplicationService {
       status: 'invited' | 'skipped';
       reason?: string;
     }> = [];
+    const guarantorMemberIds = Array.from(new Set(guarantors.map((guarantor) => guarantor.memberId)));
+    const guarantorMembers = guarantorMemberIds.length > 0
+      ? await this.prisma.member.findMany({
+          where: { id: { in: guarantorMemberIds }, tenantId },
+          select: { id: true, user: { select: { email: true, firstName: true } } },
+        })
+      : [];
+    const guarantorMemberMap = new Map(
+      guarantorMembers.map((member) => [member.id, member]),
+    );
 
     for (const item of guarantors) {
       const eligibility = await this.validateGuarantorEligibility(
@@ -1119,10 +1140,7 @@ export class LoanApplicationService {
       results.push({ memberId: item.memberId, guaranteedAmount: item.guaranteedAmount, status: 'invited' });
 
       // Notify guarantor
-      const guarantorMember = await this.prisma.member.findFirst({
-        where: { id: item.memberId, tenantId },
-        select: { user: { select: { email: true, firstName: true } } },
-      });
+      const guarantorMember = guarantorMemberMap.get(item.memberId);
 
       const borrowerName = [loan.member?.user?.firstName, loan.member?.user?.lastName]
         .filter(Boolean)

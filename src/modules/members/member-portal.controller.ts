@@ -264,7 +264,14 @@ export class MemberPortalController {
     @Query('limit') limit?: number,
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
-    return this.statements.getFosaStatement(tenant.id, user.id, memberId, periodFrom, periodTo);
+    return this.statements.getFosaStatement(
+      tenant.id,
+      user.id,
+      memberId,
+      periodFrom,
+      periodTo,
+      { page, limit },
+    );
   }
 
   // ─── LOAN SELF-APPLICATION ─────────────────────────────────────────────────

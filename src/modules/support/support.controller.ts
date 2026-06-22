@@ -14,6 +14,7 @@ import { CurrentTenant } from '../../common/decorators/current-tenant.decorator'
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { AuthActor } from './support-ticket.types';
 import type { Tenant } from '@prisma/client';
 import { CreateSupportTicketDto } from './dto/create-support-ticket.dto';
 import { CreateTicketMessageDto } from './dto/create-ticket-message.dto';
@@ -64,7 +65,8 @@ export class SupportController {
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
   ) {
-    return this.support.createTicket(dto, tenant.id, actor);
+    const authActor: AuthActor = { userId: actor.id, role: actor.role };
+    return this.support.createTicket(dto, tenant.id, authActor);
   }
 
   @Get()
@@ -101,7 +103,8 @@ export class SupportController {
     @CurrentUser() actor: AuthenticatedUser,
     @Query('status') status?: TicketStatus,
   ) {
-    return this.support.listTickets(tenant.id, actor, status);
+    const authActor: AuthActor = { userId: actor.id, role: actor.role };
+    return this.support.listTickets(tenant.id, authActor, status);
   }
 
   @Get(':id')
@@ -134,7 +137,8 @@ export class SupportController {
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
   ) {
-    return this.support.getTicket(id, tenant.id, actor);
+    const authActor: AuthActor = { userId: actor.id, role: actor.role };
+    return this.support.getTicket(id, tenant.id, authActor);
   }
 
   @Post(':id/messages')
@@ -166,7 +170,8 @@ export class SupportController {
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
   ) {
-    return this.support.addMessage(id, dto, tenant.id, actor);
+    const authActor: AuthActor = { userId: actor.id, role: actor.role };
+    return this.support.addMessage(id, dto, tenant.id, authActor);
   }
 
   @Patch(':id')
@@ -198,6 +203,7 @@ export class SupportController {
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
   ) {
-    return this.support.updateTicket(id, dto, tenant.id, actor);
+    const authActor: AuthActor = { userId: actor.id, role: actor.role };
+    return this.support.updateTicket(id, dto, tenant.id, authActor);
   }
 }

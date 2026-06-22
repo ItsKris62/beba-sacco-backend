@@ -27,6 +27,7 @@ import { RawBodyRequest } from '@nestjs/common';
 import { Request } from 'express';
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
+import { Throttle } from '@nestjs/throttler';
 import { v4 as uuidv4 } from 'uuid';
 import { UserRole, MpesaTriggerSource } from '@prisma/client';
 import { MpesaService } from './mpesa.service';
@@ -264,6 +265,7 @@ export class MpesaController {
   @Public()
   @Post('callback')
   @UseGuards(MpesaIpGuard)
+  @Throttle({ global: { limit: 10, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Unified Safaricom Daraja callback (STK / C2B / B2C)' })
   @ApiHeader({ name: 'X-Mpesa-Signature', required: false, description: 'HMAC-SHA256 over raw callback body' })

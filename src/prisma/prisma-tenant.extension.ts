@@ -46,6 +46,8 @@ export const TENANT_SCOPED_MODELS = [
   'GroupWelfareCollection',
   'DataImportLog',
   'KYCRequirement',
+  'Incident',
+  'InAppNotification',
 ] as const;
 
 export const TENANT_EXEMPT_MODELS = [

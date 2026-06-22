@@ -1172,11 +1172,15 @@ export class LoansService {
     if (!loan || loan.guarantors.length === 0) return;
 
     const accountType = loan.loanProduct.requiredAccountType ?? AccountType.FOSA;
+    const guarantorMemberIds = loan.guarantors.map((guarantor) => guarantor.memberId);
+    const accounts = await tx.account.findMany({
+      where: { tenantId, memberId: { in: guarantorMemberIds }, accountType, isActive: true },
+      select: { id: true, memberId: true, lockedBalance: true },
+    });
+    const accountMap = new Map(accounts.map((account) => [account.memberId, account]));
+
     for (const guarantor of loan.guarantors) {
-      const account = await tx.account.findFirst({
-        where: { tenantId, memberId: guarantor.memberId, accountType, isActive: true },
-        select: { id: true, lockedBalance: true },
-      });
+      const account = accountMap.get(guarantor.memberId);
       if (!account) continue;
 
       const releaseAmount = Decimal.min(

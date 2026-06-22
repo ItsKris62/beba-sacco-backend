@@ -12,7 +12,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
-import { SkipThrottle } from '@nestjs/throttler';
+import { Throttle } from '@nestjs/throttler';
 import { RawBodyRequest } from '@nestjs/common';
 import { Request } from 'express';
 import * as crypto from 'crypto';
@@ -34,7 +34,7 @@ import {
  *
  * Security model (same as MpesaController.unifiedCallback):
  *  - @Public()      — no JWT required
- *  - @SkipThrottle() — callbacks must never hit rate limit
+ *  - @Throttle()    — callback routes are capped to absorb abusive spikes
  *  - MpesaIpGuard  — Safaricom IP allowlist (production only)
  *  - HMAC signature validation via X-Mpesa-Signature header
  *
@@ -43,7 +43,7 @@ import {
  * and process asynchronously via the callback queue.
  */
 @ApiTags('M-Pesa Webhooks')
-@SkipThrottle()
+@Throttle({ global: { limit: 10, ttl: 60_000 } })
 @Controller('mpesa/webhooks')
 export class MpesaWebhookController implements OnModuleInit {
   private readonly logger = new Logger(MpesaWebhookController.name);

@@ -4,7 +4,7 @@ import * as dotenv from 'dotenv';
 // Load environment variables if they aren't loaded by your environment yet
 dotenv.config();
 
-Sentry.init({
+const sentryOptions = {
   // If you have SENTRY_DSN in your .env, Sentry will automatically find it.
   // You can also explicitly set it like this: dsn: process.env.SENTRY_DSN,
   
@@ -13,7 +13,7 @@ Sentry.init({
   tracesSampleRate: Number.parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE ?? '0.1'),
   
   // Scrub sensitive request fields before the event reaches the Sentry dashboard.
-  beforeSend(event, hint) {
+  beforeSend(event: Sentry.Event, hint: Sentry.EventHint) {
     const originalException = hint.originalException;
     if (
       originalException instanceof Error &&
@@ -59,4 +59,6 @@ Sentry.init({
     }
     return event;
   },
-});
+};
+
+Sentry.init(sentryOptions as Parameters<typeof Sentry.init>[0]);
