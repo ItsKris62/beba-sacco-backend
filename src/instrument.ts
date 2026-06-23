@@ -61,4 +61,4 @@ const sentryOptions = {
   },
 };
 
-Sentry.init(sentryOptions as Parameters<typeof Sentry.init>[0]);
+// Sentry.init(sentryOptions as Parameters<typeof Sentry.init>[0]);
