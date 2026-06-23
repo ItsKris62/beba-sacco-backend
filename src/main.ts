@@ -49,7 +49,7 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
 
   const configService = app.get(ConfigService);
-  const port = configService.get<number>('app.port', 3000);
+  const port = parseInt(process.env.PORT || '10000', 10);
   const apiPrefix = configService.get<string>('app.apiPrefix', 'api/v1');
   const nodeEnv = configService.get<string>('app.nodeEnv', 'development');
   const swaggerPath = `/${apiPrefix}/docs`;
