@@ -77,14 +77,8 @@ export const ADVANCED_FINANCIAL_QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
 ];
 
 export function shouldRegisterQueueProcessors(options: QueueModuleOptions = {}): boolean {
-  if (options.mode === 'worker') {
-    return true;
-  }
-
-  // Render/Docker deployment: run the HTTP service with WORKER_MODE unset/false,
-  // and create a separate worker service with WORKER_MODE=true. Web instances can
-  // enqueue jobs, but only worker instances register @Processor classes.
-  return process.env.WORKER_MODE === 'true' || process.env.NODE_ROLE === 'worker';
+  // TEMPORARY FIX FOR TESTING: Force jobs to run on the web server
+  return true;
 }
 
 export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Type<unknown>[] {
