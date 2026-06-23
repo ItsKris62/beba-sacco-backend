@@ -268,5 +268,6 @@ async function bootstrap() {
 
 bootstrap().catch((err) => {
   console.error('Fatal bootstrap error:', err);
-  process.exit(1);
+  // Wait 1 second before exiting so Render's log aggregator has time to flush the error message
+  setTimeout(() => process.exit(1), 1000);
 });
