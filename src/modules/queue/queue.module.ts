@@ -128,10 +128,17 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
         const bullRedisUrl = configService.get<string>('app.bullRedis.url');
+        const rawBullHost = configService.get<string>('app.bullRedis.host');
+        const bullPassword = configService.get<string>('app.bullRedis.password');
+        const bullTls = configService.get<boolean>('app.bullRedis.tls');
 
-        // ── Production path: parse BULL_REDIS_URL ──────────────────────────
-        // Render Redis URL format: redis://:password@host:port
-        //                    TLS: rediss://:password@host:port
+        const defaultJobOptions = {
+          removeOnComplete: { age: 24 * 60 * 60, count: 1000 },
+          removeOnFail: { age: 7 * 24 * 60 * 60, count: 5000 },
+          attempts: 5,
+          backoff: { type: 'exponential' as const, delay: 5000 },
+        };
+
         if (bullRedisUrl) {
           const parsed = new URL(bullRedisUrl);
           const tls = parsed.protocol === 'rediss:' ? { rejectUnauthorized: false } : undefined;
@@ -140,30 +147,39 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
             connection: {
               host: parsed.hostname,
               port: parseInt(parsed.port || '6379', 10),
-              // URL password is percent-encoded — decode before passing to ioredis
               password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
               tls,
               maxRetriesPerRequest: null,
               enableAutoPipelining: true,
               connectTimeout: 5000,
               keepAlive: 10000,
-              // Render Redis is stable — retry generously with exponential back-off
               retryStrategy: (times: number) => Math.min(times * 500, 10_000),
               reconnectOnError: (err: Error) => err.message.includes('READONLY'),
             },
-            defaultJobOptions: {
-              removeOnComplete: { count: 1000 },
-              // Cap failed jobs so they don't accumulate in Redis indefinitely
-              removeOnFail: { count: 500 },
-              attempts: 5,
-              backoff: { type: 'exponential', delay: 5000 },
-            },
+            defaultJobOptions,
           };
         }
 
-        // ── Dev fallback: share the Upstash connection ─────────────────────
-        // Acceptable for local dev where job volume is negligible.
-        // BullMQ will stop retrying after 1 attempt to avoid burning quota.
+        if (rawBullHost) {
+          const host = rawBullHost.replace(/^https?:\/\//, '');
+
+          return {
+            connection: {
+              host,
+              port: configService.get<number>('app.bullRedis.port', 6379),
+              password: bullPassword || undefined,
+              tls: bullTls ? { rejectUnauthorized: false } : undefined,
+              maxRetriesPerRequest: null,
+              enableAutoPipelining: true,
+              connectTimeout: 5000,
+              keepAlive: 10000,
+              retryStrategy: (times: number) => Math.min(times * 500, 10_000),
+              reconnectOnError: (err: Error) => err.message.includes('READONLY'),
+            },
+            defaultJobOptions,
+          };
+        }
+
         const password = configService.get<string>('app.redis.password');
         const tls = configService.get<boolean>('app.redis.tls');
         const rawHost = configService.get<string>('app.redis.host', 'localhost');
@@ -180,12 +196,11 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
             enableAutoPipelining: true,
             connectTimeout: 5000,
             keepAlive: 10000,
-            // 1 retry only — avoids burning Upstash quota if Redis is misconfigured
             retryStrategy: (times: number) => {
               if (times > 1) {
                 if (!bullGaveUp) {
                   bullGaveUp = true;
-                  console.warn('[BullMQ] Redis unavailable — queue workers disabled (degraded mode)');
+                  console.warn('[BullMQ] Dedicated Bull Redis is not configured; using app Redis fallback in degraded mode');
                 }
                 return null;
               }
@@ -193,12 +208,7 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
             },
             reconnectOnError: (err: Error) => err.message.includes('READONLY'),
           },
-          defaultJobOptions: {
-            removeOnComplete: { count: 1000 },
-            removeOnFail: { count: 500 },
-            attempts: 5,
-            backoff: { type: 'exponential', delay: 5000 },
-          },
+          defaultJobOptions,
         };
       },
     }),

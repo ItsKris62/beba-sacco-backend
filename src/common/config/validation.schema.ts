@@ -62,21 +62,24 @@ export const validationSchema = Joi.object({
   UPSTASH_REDIS_REST_URL: Joi.string().uri().optional(),
   UPSTASH_REDIS_REST_TOKEN: Joi.string().allow('').optional(),
 
-  // ── Redis (BullMQ queues) – connection-based provider, no command-count limits
-  // Required in production (Render Redis / Railway Redis).
-  // When absent in dev, BullMQ falls back to the Upstash connection above.
-  // Format: redis://:password@host:port  or  rediss://:password@host:port (TLS)
+  // ── Redis (BullMQ queues) – must be separate from app Redis in production
+  // Use either BULL_REDIS_URL or BULL_REDIS_HOST/PORT/PASSWORD/TLS.
+  // Format: redis://:password@host:port or rediss://:password@host:port (TLS)
   BULL_REDIS_URL: Joi.string()
     .uri({ scheme: ['redis', 'rediss'] })
-    .when('NODE_ENV', {
-      is: 'production',
-      then: Joi.when('REDIS_URL', {
-        is: Joi.exist(),
-        then: Joi.optional(),
-        otherwise: Joi.required(),
+    .when('BULL_REDIS_HOST', {
+      is: Joi.exist(),
+      then: Joi.optional(),
+      otherwise: Joi.when('NODE_ENV', {
+        is: 'production',
+        then: Joi.required(),
+        otherwise: Joi.optional(),
       }),
-      otherwise: Joi.optional(),
     }),
+  BULL_REDIS_HOST: Joi.string().optional(),
+  BULL_REDIS_PORT: Joi.number().default(6379),
+  BULL_REDIS_PASSWORD: Joi.string().allow('').optional(),
+  BULL_REDIS_TLS: Joi.boolean().default(false),
 
   SWAGGER_USER: Joi.string().optional(),
   SWAGGER_PASSWORD: Joi.string().optional(),

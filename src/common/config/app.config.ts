@@ -40,11 +40,15 @@ export default registerAs('app', () => ({
     ttlSeconds: parseInt(process.env.IDEMPOTENCY_TTL_SECONDS || '3600', 10),
   },
 
-  // Redis for BullMQ queues – must be a connection-based provider (no command-count billing)
-  // Use Render Redis, Railway Redis, or any provider without per-command limits.
-  // When unset in dev, BullMQ falls back to the Upstash config above.
+  // Redis for BullMQ queues. Keep this separate from the app cache Redis.
+  // Prefer BULL_REDIS_URL when the provider gives a full connection string.
+  // Otherwise use BULL_REDIS_HOST/PORT/PASSWORD/TLS.
   bullRedis: {
-    url: process.env.BULL_REDIS_URL || process.env.REDIS_URL,
+    url: process.env.BULL_REDIS_URL,
+    host: process.env.BULL_REDIS_HOST,
+    port: parseInt(process.env.BULL_REDIS_PORT || '6379', 10),
+    password: process.env.BULL_REDIS_PASSWORD,
+    tls: process.env.BULL_REDIS_TLS === 'true',
   },
 
   // Cloudflare R2
