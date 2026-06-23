@@ -13,6 +13,9 @@ import {
   AUDIT_RETENTION_QUEUE,
 } from './processors/audit-retention.processor';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { isWorkerRuntime } from '../queue/worker-runtime';
+
+const AUDIT_WORKER_PROVIDERS = isWorkerRuntime() ? [AuditRetentionProcessor] : [];
 
 @Module({
   imports: [
@@ -31,7 +34,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     PrismaAuditMiddlewareService,
     SasraValidatorService,
     PrismaService,
-    AuditRetentionProcessor,
+    ...AUDIT_WORKER_PROVIDERS,
   ],
   exports: [AuditService, AuditEventService, AuditChainService, AuditMaskerService, SasraValidatorService],
 })

@@ -2,6 +2,7 @@ import { DynamicModule, Module, Provider, Type } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QUEUE_NAMES } from './queue.constants';
+import { isWorkerRuntime } from './worker-runtime';
 
 // Processors
 import { MpesaCallbackProcessor } from './processors/mpesa-callback.processor';
@@ -84,7 +85,7 @@ export function shouldRegisterQueueProcessors(options: QueueModuleOptions = {}):
   // Render/Docker deployment: run the HTTP service with WORKER_MODE unset/false,
   // and create a separate worker service with WORKER_MODE=true. Web instances can
   // enqueue jobs, but only worker instances register @Processor classes.
-  return process.env.WORKER_MODE === 'true' || process.env.NODE_ROLE === 'worker';
+  return isWorkerRuntime();
 }
 
 export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Type<unknown>[] {

@@ -14,12 +14,10 @@ import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { isWorkerRuntime } from '../queue/worker-runtime';
 import { LoansModule } from '../loans/loans.module';
 
-const shouldRegisterMpesaWorkers = (): boolean =>
-  process.env.WORKER_MODE === 'true' || process.env.NODE_ROLE === 'worker';
-
-const MPESA_WORKER_PROVIDERS = shouldRegisterMpesaWorkers()
+const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   ? [
       MpesaDisbursementProcessor,
       MpesaB2cTimeoutProcessor,

@@ -13,6 +13,9 @@ import { SlaProcessor } from './processors/sla.processor';
 import { AutoCloseTicketsProcessor } from './processors/auto-close-tickets.processor';
 import { StorageModule } from '../storage/storage.module';
 import { AuthModule } from '../auth/auth.module';
+import { isWorkerRuntime } from '../queue/worker-runtime';
+
+const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTicketsProcessor] : [];
 
 @Module({
   imports: [
@@ -34,8 +37,7 @@ import { AuthModule } from '../auth/auth.module';
     SupportService,
     IncidentService,
     SupportRealtimeGateway,
-    SlaProcessor,
-    AutoCloseTicketsProcessor,
+    ...SUPPORT_WORKER_PROVIDERS,
   ],
   exports: [SupportService, IncidentService, SupportRealtimeGateway],
 })
@@ -46,6 +48,8 @@ export class SupportModule implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    if (!isWorkerRuntime()) return;
+
     await this.slaQueue.add('check-sla', {}, {
       repeat: { pattern: '*/5 * * * *' }, // Every 5 mins
       removeOnComplete: true,

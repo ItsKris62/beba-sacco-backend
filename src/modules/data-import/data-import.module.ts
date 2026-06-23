@@ -16,8 +16,10 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { AuditModule } from '../audit/audit.module';
 import { CommonServicesModule } from '../../common/services/common-services.module';
 import { SmsModule } from '../sms/sms.module';
+import { isWorkerRuntime } from '../queue/worker-runtime';
 
 const IMPORT_QUEUE = 'data.import';
+const DATA_IMPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [ImportProcessor] : [];
 
 @Module({
   imports: [
@@ -34,7 +36,7 @@ const IMPORT_QUEUE = 'data.import';
     CsvParserService,
     ImportValidationService,
     ImportExecutionService,
-    ImportProcessor,
+    ...DATA_IMPORT_WORKER_PROVIDERS,
     FinancialImportService,
   ],
   exports: [DataImportService, FinancialImportService],

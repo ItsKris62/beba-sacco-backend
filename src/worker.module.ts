@@ -10,6 +10,12 @@ import { CommonServicesModule } from './common/services/common-services.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { QueueModule } from './modules/queue/queue.module';
 import { MpesaModule } from './modules/mpesa/mpesa.module';
+import { AuditModule } from './modules/audit/audit.module';
+import { DataImportModule } from './modules/data-import/data-import.module';
+import { DocumentsModule } from './modules/documents/documents.module';
+import { KycModule } from './modules/kyc/kyc.module';
+import { SupportModule } from './modules/support/support.module';
+import { Phase6Module } from './modules/admin/phase6/phase6.module';
 
 /**
  * WorkerModule boots the queue-processing dependency graph without creating an
@@ -56,6 +62,12 @@ import { MpesaModule } from './modules/mpesa/mpesa.module';
     CommonServicesModule,
     QueueModule.forRoot({ mode: 'worker' }),
     MpesaModule,
+    AuditModule,
+    DataImportModule,
+    DocumentsModule,
+    KycModule,
+    SupportModule,
+    Phase6Module,
   ],
 })
 export class WorkerModule {}

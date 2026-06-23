@@ -4,6 +4,9 @@ import { KycReviewProcessor } from './kyc-review.processor';
 import { AuditModule } from '../audit/audit.module';
 import { PrismaService } from '../../prisma/prisma.service';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { isWorkerRuntime } from '../queue/worker-runtime';
+
+const KYC_WORKER_PROVIDERS = isWorkerRuntime() ? [KycReviewProcessor] : [];
 
 @Module({
   imports: [
@@ -14,6 +17,6 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     ),
     AuditModule,
   ],
-  providers: [KycReviewProcessor, PrismaService],
+  providers: [...KYC_WORKER_PROVIDERS, PrismaService],
 })
 export class KycModule {}

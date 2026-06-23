@@ -35,6 +35,9 @@ import { StorageModule } from '../../storage/storage.module';
 
 // Prisma
 import { PrismaService } from '../../../prisma/prisma.service';
+import { isWorkerRuntime } from '../../queue/worker-runtime';
+
+const PHASE6_WORKER_PROVIDERS = isWorkerRuntime() ? [AnalyticsStreamProcessor] : [];
 
 /**
  * Phase 6 Module
@@ -66,7 +69,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
     PrismaService,
     // Analytics
     CdcMiddlewareService,
-    AnalyticsStreamProcessor,
+    ...PHASE6_WORKER_PROVIDERS,
     RealTimeAnalyticsService,
     // Risk & Fraud
     BehavioralRiskScorerService,
