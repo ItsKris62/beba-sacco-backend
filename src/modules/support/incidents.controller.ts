@@ -5,7 +5,7 @@ import { IncidentService } from './incident.service';
 import { CreateIncidentDto, LinkTicketsDto } from './dto/support.dto';
 import type { Tenant } from '@prisma/client';
 
-@Controller('api/v1/admin/incidents')
+@Controller('admin/incidents')
 @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
 export class IncidentsController {
   constructor(private readonly incidentService: IncidentService) {}
@@ -15,6 +15,21 @@ export class IncidentsController {
     return this.incidentService.listIncidents(tenant.id, query);
   }
 
+  @Get(':id')
+  async get(
+    @CurrentTenant() tenant: Tenant,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.incidentService.getIncident(tenant.id, id);
+  }
+
+  @Get(':id/tickets')
+  async getTickets(
+    @CurrentTenant() tenant: Tenant,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.incidentService.getIncidentTickets(tenant.id, id);
+  }
   @Post()
   async create(@CurrentTenant() tenant: Tenant, @Body() dto: CreateIncidentDto) {
     return this.incidentService.createIncident(tenant.id, dto);

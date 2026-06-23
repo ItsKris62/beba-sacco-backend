@@ -11,7 +11,7 @@ export class IncidentService {
   ) {}
 
   async createIncident(tenantId: string, dto: CreateIncidentDto) {
-    return this.prisma.incident.create({
+    const incident = await this.prisma.incident.create({
       data: {
         tenantId,
         title: dto.title,
@@ -20,13 +20,42 @@ export class IncidentService {
         status: 'INVESTIGATING',
       },
     });
+    return this.withPresentationFields(incident);
+  }
+
+  async getIncident(tenantId: string, id: string) {
+    const incident = await this.prisma.incident.findUnique({
+      where: { id, tenantId },
+      include: { tickets: true },
+    });
+    if (!incident) throw new NotFoundException('Incident not found');
+    return this.withPresentationFields(incident);
+  }
+
+  async getIncidentTickets(tenantId: string, id: string) {
+    await this.getIncident(tenantId, id);
+    return this.prisma.supportTicket.findMany({
+      where: { incidentId: id, tenantId },
+      include: {
+        member: {
+          select: {
+            id: true,
+            memberNumber: true,
+            user: { select: { firstName: true, lastName: true, email: true, phoneNumber: true } },
+          },
+        },
+        messages: { orderBy: { createdAt: 'asc' } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
   }
 
   async updateIncident(tenantId: string, id: string, data: { status?: string; description?: string }) {
-    return this.prisma.incident.update({
+    const incident = await this.prisma.incident.update({
       where: { id, tenantId },
       data,
     });
+    return this.withPresentationFields(incident);
   }
 
   async linkTickets(tenantId: string, id: string, dto: LinkTicketsDto) {
@@ -59,10 +88,18 @@ export class IncidentService {
   }
 
   async listIncidents(tenantId: string, query?: any) {
-    return this.prisma.incident.findMany({
+    const incidents = await this.prisma.incident.findMany({
       where: { tenantId },
       orderBy: { createdAt: 'desc' },
       include: { tickets: true },
     });
+    return incidents.map((incident) => this.withPresentationFields(incident));
+  }
+
+  private withPresentationFields<T extends { description: string }>(incident: T): T & { affectedService: string } {
+    return {
+      ...incident,
+      affectedService: 'Core Banking',
+    };
   }
 }

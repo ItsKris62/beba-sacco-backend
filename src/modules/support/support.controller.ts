@@ -9,7 +9,7 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
-import { TicketStatus, UserRole } from '@prisma/client';
+import { TicketCategory, TicketPriority, TicketStatus, UserRole } from '@prisma/client';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -25,11 +25,11 @@ import { SupportService } from './support.service';
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Controller('support/tickets')
+@Controller('support')
 export class SupportController {
   constructor(private readonly support: SupportService) {}
 
-  @Post()
+  @Post('tickets')
   @Roles(UserRole.MEMBER)
   @ApiOperation({
     summary: 'Create a support ticket',
@@ -69,7 +69,7 @@ export class SupportController {
     return this.support.createTicket(dto, tenant.id, authActor);
   }
 
-  @Get()
+  @Get('tickets')
   @Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({
     summary: 'List support tickets',
@@ -101,13 +101,35 @@ export class SupportController {
   list(
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
-    @Query('status') status?: TicketStatus,
+    @Query('status') status?: string,
+    @Query('priority') priority?: TicketPriority,
+    @Query('category') category?: TicketCategory,
+    @Query('search') search?: string,
   ) {
     const authActor: AuthActor = { userId: actor.id, role: actor.role };
-    return this.support.listTickets(tenant.id, authActor, status);
+    return this.support.listTickets(tenant.id, authActor, { status, priority, category, search });
   }
 
-  @Get(':id')
+  @Get('metrics')
+  @Roles(UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Get support queue metrics' })
+  metrics(@CurrentTenant() tenant: Tenant) {
+    return this.support.getMetrics(tenant.id);
+  }
+
+  @Post('tickets/:id/assign')
+  @Roles(UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Assign a support ticket to the current staff user' })
+  assign(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    const authActor: AuthActor = { userId: actor.id, role: actor.role };
+    return this.support.updateTicket(id, { assignedTo: actor.id }, tenant.id, authActor);
+  }
+
+  @Get('tickets/:id')
   @Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({ summary: 'Get a support ticket with messages' })
   @ApiParam({ name: 'id', description: 'Ticket UUID' })
@@ -141,7 +163,7 @@ export class SupportController {
     return this.support.getTicket(id, tenant.id, authActor);
   }
 
-  @Post(':id/messages')
+  @Post('tickets/:id/messages')
   @Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({
     summary: 'Add a ticket message',
@@ -174,7 +196,7 @@ export class SupportController {
     return this.support.addMessage(id, dto, tenant.id, authActor);
   }
 
-  @Patch(':id')
+  @Patch('tickets/:id')
   @Roles(UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({
     summary: 'Update ticket status, priority, assignment, or staff note',
@@ -207,3 +229,4 @@ export class SupportController {
     return this.support.updateTicket(id, dto, tenant.id, authActor);
   }
 }
+

@@ -6,7 +6,7 @@ import { AuthActor } from './support-ticket.types';
 import { RequestPresignDto } from './dto/support.dto';
 import type { Tenant } from '@prisma/client';
 
-@Controller('api/v1/support/tickets/:ticketId/attachments')
+@Controller('support/tickets/:ticketId/attachments')
 export class TicketAttachmentsController {
   constructor(private readonly supportService: SupportService) {}
 
@@ -20,3 +20,4 @@ export class TicketAttachmentsController {
     return this.supportService.requestPresignedUpload(ticketId, tenant.id, actor, dto);
   }
 }
+

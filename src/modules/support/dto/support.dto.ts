@@ -1,10 +1,11 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsArray, IsNotEmpty, IsString } from 'class-validator';
+import { IsArray, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class CreateIncidentDto {
   @ApiProperty() @IsString() @IsNotEmpty() title!: string;
   @ApiProperty() @IsString() @IsNotEmpty() description!: string;
   @ApiProperty() @IsString() @IsNotEmpty() severity!: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() affectedService?: string;
 }
 
 export class LinkTicketsDto {

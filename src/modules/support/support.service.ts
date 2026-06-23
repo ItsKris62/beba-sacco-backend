@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { TicketStatus, UserRole } from '@prisma/client';
+import { TicketCategory, TicketPriority, TicketStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { AuthActor } from './support-ticket.types';
@@ -18,7 +18,12 @@ export class SupportService {
   async assertTicketAccess(ticketId: string, tenantId: string, actor: AuthActor) {
     const ticket = await this.prisma.supportTicket.findUnique({
       where: { id: ticketId, tenantId },
-      include: { member: true },
+      include: {
+        member: {
+          include: { user: { select: { firstName: true, lastName: true, email: true, phoneNumber: true } } },
+        },
+        messages: { orderBy: { createdAt: 'asc' } },
+      },
     });
 
     if (!ticket) throw new NotFoundException('Support ticket not found');
@@ -56,16 +61,46 @@ export class SupportService {
     });
   }
 
-  async listTickets(tenantId: string, actor: AuthActor, status?: TicketStatus) {
+  async listTickets(
+    tenantId: string,
+    actor: AuthActor,
+    filters: {
+      status?: string;
+      priority?: TicketPriority;
+      category?: TicketCategory;
+      search?: string;
+    } = {},
+  ) {
     const member = actor.role === UserRole.MEMBER
       ? await this.requireActorMember(tenantId, actor.userId)
       : null;
+    const statuses = filters.status
+      ?.split(',')
+      .map((status) => status.trim())
+      .filter((status): status is TicketStatus =>
+        Object.values(TicketStatus).includes(status as TicketStatus),
+      );
 
     return this.prisma.supportTicket.findMany({
       where: {
         tenantId,
         ...(member ? { memberId: member.id } : {}),
-        ...(status ? { status } : {}),
+        ...(statuses?.length === 1 ? { status: statuses[0] } : {}),
+        ...(statuses && statuses.length > 1 ? { status: { in: statuses } } : {}),
+        ...(filters.priority ? { priority: filters.priority } : {}),
+        ...(filters.category ? { category: filters.category } : {}),
+        ...(filters.search
+          ? {
+              OR: [
+                { subject: { contains: filters.search, mode: 'insensitive' } },
+                { description: { contains: filters.search, mode: 'insensitive' } },
+                { member: { memberNumber: { contains: filters.search, mode: 'insensitive' } } },
+                { member: { user: { firstName: { contains: filters.search, mode: 'insensitive' } } } },
+                { member: { user: { lastName: { contains: filters.search, mode: 'insensitive' } } } },
+                { member: { user: { email: { contains: filters.search, mode: 'insensitive' } } } },
+              ],
+            }
+          : {}),
       },
       include: {
         member: {
@@ -179,3 +214,5 @@ export class SupportService {
     }
   }
 }
+
+
