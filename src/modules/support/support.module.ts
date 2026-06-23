@@ -12,11 +12,13 @@ import { SupportRealtimeGateway } from './support-realtime.gateway';
 import { SlaProcessor } from './processors/sla.processor';
 import { AutoCloseTicketsProcessor } from './processors/auto-close-tickets.processor';
 import { StorageModule } from '../storage/storage.module';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
     PrismaModule,
     StorageModule,
+    AuthModule,
     forwardRef(() => NotificationsModule),
     BullModule.registerQueue(
       { name: 'support-sla' },
