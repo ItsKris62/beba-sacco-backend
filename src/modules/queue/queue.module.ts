@@ -132,12 +132,12 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
         const bullPassword = configService.get<string>('app.bullRedis.password');
         const bullTls = configService.get<boolean>('app.bullRedis.tls');
 
-        const defaultJobOptions = {
-          removeOnComplete: { age: 24 * 60 * 60, count: 1000 },
-          removeOnFail: { age: 7 * 24 * 60 * 60, count: 5000 },
-          attempts: 5,
-          backoff: { type: 'exponential' as const, delay: 5000 },
-        };
+          const defaultJobOptions = {
+            removeOnComplete: true,
+            removeOnFail: { count: 10 },
+            attempts: 5,
+            backoff: { type: 'exponential' as const, delay: 5000 },
+          };
 
         if (bullRedisUrl) {
           const parsed = new URL(bullRedisUrl);

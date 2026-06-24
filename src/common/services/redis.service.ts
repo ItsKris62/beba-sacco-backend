@@ -153,6 +153,10 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
    */
   async set(key: string, value: string, ttlSeconds?: number, nx?: boolean): Promise<boolean> {
     try {
+      // Enforce default TTL of 24h for audit and threat keys if not provided
+      if (!ttlSeconds && (key.startsWith('audit:') || key.startsWith('threat:'))) {
+        ttlSeconds = 86_400; // 24 hours
+      }
       if (nx && ttlSeconds) {
         const result = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');
         return result === 'OK';
