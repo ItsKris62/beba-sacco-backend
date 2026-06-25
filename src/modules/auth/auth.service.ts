@@ -11,7 +11,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { UserRole } from '@prisma/client';
+import { TenantStatus, UserRole } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import * as argon2 from 'argon2';
@@ -164,6 +164,8 @@ export class AuthService {
    * Returns access + refresh token pair on success.
    */
   async login(loginDto: LoginDto, tenantId: string, ipAddress?: string): Promise<LoginResponseDto> {
+    await this.assertTenantAcceptsLogin(tenantId);
+
     const normalizedEmail =
       typeof loginDto.email === 'string' ? loginDto.email.trim().toLowerCase() : undefined;
     // Strip leading '+' so '254...' and '+254...' both resolve to the same stored value
@@ -193,6 +195,8 @@ export class AuthService {
         select: {
           id: true,
           email: true,
+          phone: true,
+          phoneNumber: true,
           passwordHash: true,
           role: true,
           isActive: true,
@@ -234,14 +238,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    let passwordValid: boolean;
-    try {
-      passwordValid = await argon2.verify(user.passwordHash, loginDto.password);
-    } catch {
-      // argon2.verify() throws on non-argon2 hashes (e.g. legacy bcrypt)
-      passwordValid = false;
-    }
-    if (!passwordValid) {
+    if (!(await this.verifyPassword(user.passwordHash, loginDto.password))) {
       await this.writeAuditSafe({
         tenantId,
         userId: user.id,
@@ -256,7 +253,7 @@ export class AuthService {
     }
 
     const enforceEmailVerification =
-      this.configService.get<string>('app.features.emailVerificationEnforced') !== 'false';
+      this.configService.get<string>('app.features.emailVerificationEnforced') === 'true';
     if (enforceEmailVerification && !user.emailVerified) {
       await this.writeAuditSafe({
         tenantId,
@@ -279,6 +276,7 @@ export class AuthService {
     const { accessToken, refreshToken } = this.generateTokens({
       id: user.id,
       email: user.email,
+      phone: user.phone ?? user.phoneNumber ?? null,
       role: user.role,
       tenantId: user.tenantId,
     });
@@ -362,6 +360,8 @@ export class AuthService {
       select: {
         id: true,
         email: true,
+        phone: true,
+        phoneNumber: true,
         role: true,
         firstName: true,
         lastName: true,
@@ -373,6 +373,7 @@ export class AuthService {
     const { accessToken, refreshToken } = this.generateTokens({
       id: user.id,
       email: user.email,
+      phone: user.phone ?? user.phoneNumber ?? null,
       role: user.role,
       tenantId: user.tenantId,
     });
@@ -453,6 +454,8 @@ export class AuthService {
         select: {
           id: true,
           email: true,
+          phone: true,
+          phoneNumber: true,
           role: true,
           tenantId: true,
           isActive: true,
@@ -520,6 +523,7 @@ export class AuthService {
     const { accessToken, refreshToken } = this.generateTokens({
       id: user.id,
       email: user.email,
+      phone: user.phone ?? user.phoneNumber ?? null,
       role: user.role,
       tenantId: user.tenantId,
     });
@@ -1228,7 +1232,33 @@ export class AuthService {
     return `${localPart.slice(0, 2)}***@${domain}`;
   }
 
-  private generateTokens(user: { id: string; email: string; role: UserRole; tenantId: string }): {
+
+  private async assertTenantAcceptsLogin(tenantId: string): Promise<void> {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true, status: true },
+    });
+
+    if (!tenant || tenant.status !== TenantStatus.ACTIVE) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+  }
+
+  private async verifyPassword(passwordHash: string, password: string): Promise<boolean> {
+    try {
+      return await argon2.verify(passwordHash, password);
+    } catch {
+      return false;
+    }
+  }
+
+  private generateTokens(user: {
+    id: string;
+    email: string;
+    phone?: string | null;
+    role: UserRole;
+    tenantId: string;
+  }): {
     accessToken: string;
     refreshToken: string;
     jti: string;
@@ -1237,6 +1267,7 @@ export class AuthService {
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
+      phone: user.phone ?? null,
       role: user.role,
       tenantId: user.tenantId,
       jti,
@@ -1289,3 +1320,4 @@ export class AuthService {
     }
   }
 }
+

@@ -3,7 +3,8 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UnauthorizedException, ConflictException } from '@nestjs/common';
 import { getQueueToken } from '@nestjs/bullmq';
-import { UserRole } from '@prisma/client';
+import { TenantStatus, UserRole } from '@prisma/client';
+import * as argon2 from 'argon2';
 import { AuthService } from '../auth.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
@@ -13,6 +14,11 @@ import { OtpService } from '../otp.service';
 import { SmsService } from '../../sms/sms.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { RedisService } from '../../../common/services/redis.service';
+
+jest.mock('argon2', () => ({
+  verify: jest.fn(),
+  hash: jest.fn(),
+}));
 
 // ─────────────────────────── Mocks ───────────────────────────
 
@@ -35,7 +41,7 @@ const mockPrismaService = {
     upsert: jest.fn().mockResolvedValue({}),
   },
   tenant: {
-    findUnique: jest.fn().mockResolvedValue({ name: 'Test SACCO' }),
+    findUnique: jest.fn().mockResolvedValue({ id: 'tenant-uuid-1234', status: TenantStatus.ACTIVE, name: 'Test SACCO' }),
   },
 };
 
@@ -119,6 +125,9 @@ describe('AuthService', () => {
     lastName: 'Doe',
     tenantId: TENANT_ID,
     mustChangePassword: false,
+    emailVerified: false,
+    phone: '254712345678',
+    phoneNumber: null,
   };
 
   beforeEach(async () => {
@@ -140,6 +149,14 @@ describe('AuthService', () => {
 
     service = module.get<AuthService>(AuthService);
     jest.clearAllMocks();
+    mockPrismaService.tenant.findUnique.mockResolvedValue({
+      id: TENANT_ID,
+      status: TenantStatus.ACTIVE,
+      name: 'Test SACCO',
+    });
+    mockJwtService.sign
+      .mockReturnValueOnce('access.jwt.token')
+      .mockReturnValueOnce('refresh.jwt.token');
   });
 
   // ─── validateUser ────────────────────────────────────────────
@@ -187,11 +204,84 @@ describe('AuthService', () => {
       ).rejects.toThrow(UnauthorizedException);
     });
 
-    // TODO: mock argon2.verify → true and assert LoginResponseDto shape
-    it.todo('returns access + refresh tokens on valid credentials');
+    it('returns access + refresh tokens on valid credentials', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue(baseUser);
+      mockPrismaService.user.update.mockResolvedValue({ ...baseUser, refreshToken: 'hashed-refresh' });
+      jest.mocked(argon2.verify).mockResolvedValueOnce(true);
+      jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
 
-    // TODO: mock argon2.verify → false and assert UnauthorizedException
-    it.todo('throws UnauthorizedException on wrong password');
+      const result = await service.login(
+        { email: baseUser.email.toUpperCase(), password: 'Pass123!' },
+        TENANT_ID,
+        '127.0.0.1',
+      );
+
+      expect(result).toEqual({
+        accessToken: 'access.jwt.token',
+        refreshToken: 'refresh.jwt.token',
+        migrateRefreshToken: true,
+        requiresPasswordChange: false,
+        user: {
+          id: baseUser.id,
+          email: baseUser.email,
+          firstName: baseUser.firstName,
+          lastName: baseUser.lastName,
+          role: baseUser.role,
+          tenantId: TENANT_ID,
+          mustChangePassword: false,
+        },
+      });
+      expect(mockPrismaService.user.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: expect.objectContaining({ passwordHash: true, phone: true, phoneNumber: true }),
+        }),
+      );
+      expect(mockJwtService.sign).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sub: baseUser.id,
+          tenantId: TENANT_ID,
+          role: UserRole.MEMBER,
+          email: baseUser.email,
+          phone: baseUser.phone,
+        }),
+        expect.objectContaining({ expiresIn: '15m' }),
+      );
+      expect(mockPrismaService.user.update).toHaveBeenCalledWith({
+        where: { id: baseUser.id },
+        data: expect.objectContaining({ refreshToken: 'hashed-refresh-token' }),
+      });
+      expect(JSON.stringify(result)).not.toContain('passwordHash');
+    });
+
+    it('throws UnauthorizedException on wrong password', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue(baseUser);
+      jest.mocked(argon2.verify).mockResolvedValueOnce(false);
+
+      await expect(
+        service.login({ email: baseUser.email, password: 'WrongPass123!' }, TENANT_ID),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
+      expect(mockAuditService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'AUTH.LOGIN.FAILED',
+          metadata: expect.objectContaining({ reason: 'invalid_password' }),
+        }),
+      );
+    });
+
+    it('throws UnauthorizedException when tenant is locked', async () => {
+      mockPrismaService.tenant.findUnique.mockResolvedValueOnce({
+        id: TENANT_ID,
+        status: TenantStatus.SUSPENDED,
+      });
+
+      await expect(
+        service.login({ email: baseUser.email, password: 'Pass123!' }, TENANT_ID),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockPrismaService.user.findFirst).not.toHaveBeenCalled();
+    });
 
     it('writes a FAILED audit log when user is not found', async () => {
       mockPrismaService.user.findFirst.mockResolvedValue(null);
@@ -257,7 +347,7 @@ describe('AuthService', () => {
         refreshToken: '$argon2id$stored-hash',
       });
       // argon2.verify returns false → reuse detected
-      jest.spyOn(require('argon2'), 'verify').mockResolvedValueOnce(false);
+      jest.mocked(argon2.verify).mockResolvedValueOnce(false);
 
       await expect(
         service.refreshToken({ refreshToken: 'reused.token' }, TENANT_ID),
@@ -315,3 +405,4 @@ describe('AuthService', () => {
     });
   });
 });
+

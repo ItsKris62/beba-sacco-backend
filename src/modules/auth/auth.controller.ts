@@ -10,6 +10,7 @@ import {
   Res,
   UseGuards,
   UnauthorizedException,
+  BadRequestException,
   Logger,
 } from '@nestjs/common';
 import {
@@ -131,6 +132,15 @@ export class AuthController {
     @Req() req: TenantRequest,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
+    // Log request details
+    this.logger.log('Login attempt', {
+      email: loginDto.email,
+      ip: req.ip,
+      tenantId: req.tenant?.id,
+    });
+    if (!req.tenant?.id) {
+      throw new BadRequestException('Missing X-Tenant-ID header');
+    }
     try {
       const data = await this.authService.login(loginDto, req.tenant.id, req.ip);
       this.setRefreshCookie(res, data.refreshToken);

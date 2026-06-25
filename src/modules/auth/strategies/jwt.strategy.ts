@@ -14,6 +14,7 @@ import { JwtBlocklistService } from '../jwt-blocklist.service';
 export interface JwtPayload {
   sub: string;
   email: string;
+  phone?: string | null;
   role: UserRole;
   tenantId: string;
   jti: string;
@@ -28,6 +29,7 @@ export interface JwtPayload {
 export interface AuthenticatedUser {
   id: string;
   email: string;
+  phone: string | null;
   role: UserRole;
   tenantId: string;
   isActive: boolean;
@@ -73,6 +75,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       select: {
         id: true,
         email: true,
+        phone: true,
         role: true,
         tenantId: true,
         isActive: true,
@@ -95,3 +98,4 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     return user;
   }
 }
+
