@@ -10,6 +10,7 @@ import {
   Res,
   UseGuards,
   UnauthorizedException,
+  Logger,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -67,6 +68,7 @@ interface TenantRequest extends Request {
 @ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier', required: true })
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
   /** 7 days in milliseconds — matches JWT_REFRESH_EXPIRATION */
   private readonly REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -129,9 +131,14 @@ export class AuthController {
     @Req() req: TenantRequest,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
-    const data = await this.authService.login(loginDto, req.tenant.id, req.ip);
-    this.setRefreshCookie(res, data.refreshToken);
-    return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
+    try {
+      const data = await this.authService.login(loginDto, req.tenant.id, req.ip);
+      this.setRefreshCookie(res, data.refreshToken);
+      return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
+    } catch (error) {
+      this.logger.error(`Login failed for tenant ${req?.tenant?.id}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
   }
 
   // ─────────────────────────── REGISTER ───────────────────────────

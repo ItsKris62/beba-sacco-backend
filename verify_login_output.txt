@@ -1,0 +1,13 @@
+=== TESTING DEMO ACCOUNT LOGINS ===
+Backend: http://localhost:3001
+Tenant ID: b2ae96e2-2ad4-491a-
+
+--- ADMIN (admin@beba-sacco.com / Admin@1234) ---
+Status: 500
+LOGIN FAILED: undefined
+
+--- MEMBER (member@beba-sacco.com / Member@1234) ---
+Status: 500
+LOGIN FAILED: undefined
+
+=== DONE ===
