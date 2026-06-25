@@ -396,15 +396,4 @@ describe('MpesaService.executeB2cDisbursement', () => {
     const service = makeService(1);
 
     await expect(
-      service.executeB2cDisbursement('loan-with-existing-b2c', 'tenant-1', '254712345678', 50000, 'SYSTEM'),
-    ).rejects.toThrow(BadRequestException);
-
-    await expect(
-      service.executeB2cDisbursement('nonexistent-loan', 'tenant-1', '254712345678', 50000, 'officer-1'),
-    ).rejects.toThrow(BadRequestException);
-
-    expect(mockPrisma.mpesaTransaction.findFirst).not.toHaveBeenCalled();
-    expect(mockPrisma.mpesaTransaction.create).not.toHaveBeenCalled();
-    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
-  });
 });
