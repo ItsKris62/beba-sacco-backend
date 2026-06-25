@@ -5,7 +5,7 @@ import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { getQueueToken } from '@nestjs/bullmq';
 import { Test } from '@nestjs/testing';
-import { UserRole } from '@prisma/client';
+import { TenantStatus, UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
@@ -15,9 +15,11 @@ import { AuthService } from '../../src/modules/auth/auth.service';
 import { JwtStrategy } from '../../src/modules/auth/strategies/jwt.strategy';
 import { JwtBlocklistService } from '../../src/modules/auth/jwt-blocklist.service';
 import { SessionService } from '../../src/modules/auth/session.service';
+import { OtpService } from '../../src/modules/auth/otp.service';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { RedisService } from '../../src/common/services/redis.service';
+import { SmsService } from '../../src/modules/sms/sms.service';
 import { QUEUE_NAMES } from '../../src/modules/queue/queue.constants';
 import { JwtAuthGuard } from '../../src/common/guards/jwt.guard';
 import { tenantAsyncStorage } from '../../src/common/services/tenant-context.service';
@@ -122,6 +124,9 @@ describe('Auth Cookie Migration', () => {
           return user;
         }),
       },
+      tenant: {
+        findUnique: jest.fn(async () => ({ id: TENANT_ID, status: TenantStatus.ACTIVE })),
+      },
       refreshSession: {
         findFirst: jest.fn(async () => null),
         updateMany: jest.fn(async () => ({ count: 0 })),
@@ -161,6 +166,7 @@ describe('Auth Cookie Migration', () => {
             'app.jwt.refreshSecret': JWT_REFRESH_SECRET,
             'app.jwt.accessExpiration': '15m',
             'app.jwt.refreshExpiration': '7d',
+            'app.apiPrefix': 'api/v1',
           }[key] ?? fallback),
           getOrThrow: (key: string) => ({
             'app.jwt.secret': JWT_SECRET,
@@ -169,12 +175,14 @@ describe('Auth Cookie Migration', () => {
         } },
         { provide: AuditService, useValue: { create: jest.fn(async () => undefined) } },
         { provide: SessionService, useValue: { rotateSession: jest.fn(async () => undefined) } },
+        { provide: OtpService, useValue: { generate: jest.fn(), validate: jest.fn(), delete: jest.fn() } },
+        { provide: SmsService, useValue: { enqueueSms: jest.fn(async () => undefined) } },
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: { add: jest.fn(async () => undefined) } },
       ],
     }).compile();
 
     app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
+    app.setGlobalPrefix('api/v1');
     app.use(cookieParser());
     app.use((req: ExpressRequest & { tenant?: { id: string }; tenantId?: string }, res: ExpressResponse, next: NextFunction) => {
       const tenantId = req.headers['x-tenant-id'];
@@ -199,39 +207,41 @@ describe('Auth Cookie Migration', () => {
   });
 
   afterAll(async () => {
-    await app.close();
+    await app?.close();
   });
 
   it('sets refresh cookie on login and still supports legacy body refresh', async () => {
     const login = await request(app.getHttpServer())
-      .post('/api/auth/login')
+      .post('/api/v1/auth/login')
       .set('X-Tenant-ID', TENANT_ID)
       .send({ email: 'member-cookie@test.co.ke', password: 'TestPassword123!' })
       .expect(200);
 
     expect(cookieHeader(login.headers)).toContain('refresh_token=');
+    expect(cookieHeader(login.headers)).toContain('Path=/api/v1/auth');
     expect(login.body.data.migrateRefreshToken).toBe(true);
 
     await request(app.getHttpServer())
-      .post('/api/auth/refresh')
+      .post('/api/v1/auth/refresh')
       .set('X-Tenant-ID', TENANT_ID)
       .send({ refreshToken: login.body.data.refreshToken })
       .expect(200)
       .expect((res) => {
         expect(res.body.data.accessToken).toBeDefined();
         expect(cookieHeader(res.headers)).toContain('refresh_token=');
+        expect(cookieHeader(res.headers)).toContain('Path=/api/v1/auth');
       });
   });
 
   it('returns tenant-scoped /auth/me profile', async () => {
     const login = await request(app.getHttpServer())
-      .post('/api/auth/login')
+      .post('/api/v1/auth/login')
       .set('X-Tenant-ID', TENANT_ID)
       .send({ email: 'member-cookie@test.co.ke', password: 'TestPassword123!' })
       .expect(200);
 
     await request(app.getHttpServer())
-      .get('/api/auth/me')
+      .get('/api/v1/auth/me')
       .set('X-Tenant-ID', TENANT_ID)
       .set('Authorization', `Bearer ${login.body.data.accessToken}`)
       .expect(200)
@@ -241,7 +251,7 @@ describe('Auth Cookie Migration', () => {
       });
 
     await request(app.getHttpServer())
-      .get('/api/auth/me')
+      .get('/api/v1/auth/me')
       .set('X-Tenant-ID', OTHER_TENANT_ID)
       .set('Authorization', `Bearer ${login.body.data.accessToken}`)
       .expect(403);
@@ -249,19 +259,20 @@ describe('Auth Cookie Migration', () => {
 
   it('clears cookie on logout and blocks the current access token JTI', async () => {
     const login = await request(app.getHttpServer())
-      .post('/api/auth/login')
+      .post('/api/v1/auth/login')
       .set('X-Tenant-ID', TENANT_ID)
       .send({ email: 'member-cookie@test.co.ke', password: 'TestPassword123!' })
       .expect(200);
 
     await request(app.getHttpServer())
-      .post('/api/auth/logout')
+      .post('/api/v1/auth/logout')
       .set('X-Tenant-ID', TENANT_ID)
       .set('Authorization', `Bearer ${login.body.data.accessToken}`)
       .expect(204)
       .expect((res) => {
         expect(cookieHeader(res.headers)).toContain('refresh_token=');
         expect(cookieHeader(res.headers)).toContain('Expires=Thu, 01 Jan 1970');
+        expect(cookieHeader(res.headers)).toContain('Path=/api/v1/auth');
       });
 
     expect([...redisStore.keys()].some((key) => key.startsWith('blocklist:access:'))).toBe(true);
@@ -272,7 +283,7 @@ describe('Auth Cookie Migration', () => {
     ).toBe(true);
 
     await request(app.getHttpServer())
-      .get('/api/auth/me')
+      .get('/api/v1/auth/me')
       .set('X-Tenant-ID', TENANT_ID)
       .set('Authorization', `Bearer ${login.body.data.accessToken}`)
       .expect(401);

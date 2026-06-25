@@ -40,6 +40,7 @@ import { PasswordResetVerifyDto } from './dto/password-reset-verify.dto';
 import type { AuthenticatedUser, JwtPayload } from './strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import type { AuthProfileDto } from './auth.service';
 
 /** Typed request shape after TenantInterceptor + JwtStrategy run */
@@ -76,7 +77,16 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
   ) {}
+
+  private getRefreshCookiePath(): string {
+    const apiPrefix =
+      this.configService.get<string>('app.apiPrefix') ??
+      process.env.API_PREFIX ??
+      'api/v1';
+    return `/${apiPrefix.replace(/^\/+|\/+$/g, '')}/auth`;
+  }
 
   /** Set the HttpOnly refresh token cookie */
   private setRefreshCookie(res: Response, token: string): void {
@@ -84,13 +94,21 @@ export class AuthController {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      path: '/api/auth',
+      path: this.getRefreshCookiePath(),
       maxAge: this.REFRESH_COOKIE_MAX_AGE_MS,
     });
   }
 
   /** Clear the refresh token cookie on logout */
   private clearRefreshCookie(res: Response): void {
+    res.clearCookie('refresh_token', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      path: this.getRefreshCookiePath(),
+    });
+    // Clear the previous hard-coded path as a migration cleanup for existing
+    // production browsers that logged in before API_PREFIX-aware cookies.
     res.clearCookie('refresh_token', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
