@@ -27,7 +27,12 @@ export class GlobalAuditInterceptor implements NestInterceptor {
     const response = context.switchToHttp().getResponse<Response>();
     const startedAt = Date.now();
 
-    if (SKIP_PATTERNS.some((pattern) => request.originalUrl.includes(pattern))) {
+    // Bypass audit for safe HTTP methods and defined skip patterns
+    const method = request.method?.toUpperCase();
+    if (
+      ['GET', 'HEAD', 'OPTIONS'].includes(method) ||
+      SKIP_PATTERNS.some((pattern) => request.originalUrl.includes(pattern))
+    ) {
       return next.handle();
     }
 
