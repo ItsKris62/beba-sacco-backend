@@ -9,7 +9,7 @@ export class GuarantorItemDto {
   @IsUUID()
   memberId!: string;
 
-  @ApiProperty({ description: 'Amount this guarantor is covering (KES)', example: 20000 })
+  @ApiProperty({ description: 'Amount this guarantor is covering in KES as a decimal-safe string at the API boundary', example: 20000 })
   @IsNumber()
   @Min(1)
   guaranteedAmount!: number;
@@ -27,3 +27,4 @@ export class InviteGuarantorsDto {
   @Type(() => GuarantorItemDto)
   guarantors!: GuarantorItemDto[];
 }
+

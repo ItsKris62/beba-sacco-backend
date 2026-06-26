@@ -73,7 +73,7 @@ export class MpesaDisbursementProcessor extends WorkerHost {
         failedReason: job.failedReason,
         failedAt: new Date().toISOString(),
       },
-      { removeOnFail: false, removeOnComplete: false },
+      { removeOnFail: { age: 86400, count: 50 }, removeOnComplete: { age: 7200, count: 100 } },
     );
   }
 }

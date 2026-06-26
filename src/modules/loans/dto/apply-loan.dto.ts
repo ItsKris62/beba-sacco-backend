@@ -25,7 +25,7 @@ export class ApplyLoanDto {
   @IsUUID()
   loanProductId!: string;
 
-  @ApiProperty({ description: 'Requested loan amount in KES', example: 50000 })
+  @ApiProperty({ description: 'Requested loan Amount in KES as a decimal-safe string at the API boundary as a decimal-safe string at the API boundary', example: 50000 })
   @IsNumber()
   @Min(100)
   principalAmount!: number;
@@ -62,7 +62,7 @@ export class MemberApplyLoanDto {
   @IsUUID()
   loanProductId!: string;
 
-  @ApiProperty({ description: 'Requested loan amount in KES', example: 50000 })
+  @ApiProperty({ description: 'Requested loan Amount in KES as a decimal-safe string at the API boundary as a decimal-safe string at the API boundary', example: 50000 })
   @IsNumber()
   @Min(100)
   principalAmount!: number;
@@ -105,3 +105,4 @@ export function assertProductMinGuarantors(
     );
   }
 }
+

@@ -68,7 +68,7 @@ export class LoansService {
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
         removeOnComplete: 500,
-        removeOnFail: false,
+        removeOnFail: { age: 86400, count: 50 },
       })
       .catch((e: unknown) =>
         this.logger.error(
@@ -734,8 +734,8 @@ export class LoansService {
       const releasedHolds: Array<{ guarantorId: string; memberId: string; releasedAmount: string }> = [];
 
       for (const guarantor of acceptedGuarantors) {
-        const accounts = await tx.$queryRaw<Array<{ id: string; lockedBalance: string }>>`
-          SELECT id, "lockedBalance"
+        const accounts = await tx.$queryRaw<Array<{ id: string; frozenSavings: string }>>`
+          SELECT id, "frozenSavings"
           FROM "Account"
           WHERE "tenantId" = ${tenantId}
             AND "memberId" = ${guarantor.memberId}
@@ -747,14 +747,14 @@ export class LoansService {
         if (!account) continue;
 
         const releaseAmount = Decimal.min(
-          new Decimal(account.lockedBalance.toString()),
+          new Decimal(account.frozenSavings.toString()),
           new Decimal(guarantor.guaranteedAmount.toString()),
         ).toDecimalPlaces(4);
         if (releaseAmount.lessThanOrEqualTo(0)) continue;
 
         await tx.account.updateMany({
           where: { id: account.id, tenantId, isActive: true },
-          data: { lockedBalance: { decrement: releaseAmount.toString() }, version: { increment: 1 } },
+          data: { frozenSavings: { decrement: releaseAmount.toString() }, version: { increment: 1 } },
         });
         await tx.loanGuarantor.updateMany({
           where: { id: guarantor.id, tenantId },
@@ -811,7 +811,7 @@ export class LoansService {
   /**
    * @deprecated Legacy guarantor invitation path disabled for production.
    * Use LoanApplicationService.inviteGuarantors, which enforces product-specific
-   * collateral rules, lockedBalance checks, and hardened guarantor validation.
+   * collateral rules, frozenSavings checks, and hardened guarantor validation.
    */
   async inviteGuarantors(
     loanId: string,
@@ -1175,7 +1175,7 @@ export class LoansService {
     const guarantorMemberIds = loan.guarantors.map((guarantor) => guarantor.memberId);
     const accounts = await tx.account.findMany({
       where: { tenantId, memberId: { in: guarantorMemberIds }, accountType, isActive: true },
-      select: { id: true, memberId: true, lockedBalance: true },
+      select: { id: true, memberId: true, frozenSavings: true },
     });
     const accountMap = new Map(accounts.map((account) => [account.memberId, account]));
 
@@ -1184,14 +1184,14 @@ export class LoansService {
       if (!account) continue;
 
       const releaseAmount = Decimal.min(
-        new Decimal(account.lockedBalance.toString()),
+        new Decimal(account.frozenSavings.toString()),
         new Decimal(guarantor.guaranteedAmount.toString()),
       ).toDecimalPlaces(4);
       if (releaseAmount.lessThanOrEqualTo(0)) continue;
 
       await tx.account.updateMany({
         where: { id: account.id, tenantId, isActive: true },
-        data: { lockedBalance: { decrement: releaseAmount.toString() }, version: { increment: 1 } },
+        data: { frozenSavings: { decrement: releaseAmount.toString() }, version: { increment: 1 } },
       });
       await tx.loanGuarantor.updateMany({
         where: { id: guarantor.id, tenantId },
@@ -1264,3 +1264,4 @@ export class LoansService {
     return principal.times(r).times(onePlusRPowN).dividedBy(onePlusRPowN.minus(1));
   }
 }
+

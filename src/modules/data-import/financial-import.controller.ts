@@ -11,14 +11,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiConsumes,
-  ApiBody,
-  ApiBearerAuth,
-  ApiResponse,
-} from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiConsumes, ApiBody, ApiBearerAuth, ApiResponse, ApiHeader } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { FinancialImportService } from './financial-import.service';
@@ -32,6 +25,7 @@ import type { AuthenticatedRequest } from '../../common/types/request.types';
 
 @ApiTags('Financial Import')
 @ApiBearerAuth()
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller('admin/data-import')
 export class FinancialImportController {
   constructor(private readonly financialImportService: FinancialImportService) {}

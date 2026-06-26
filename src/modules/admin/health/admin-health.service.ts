@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -101,16 +101,16 @@ export class AdminHealthService {
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly config: ConfigService,
-    @InjectQueue(QUEUE_NAMES.EMAIL)               private readonly emailQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.AUDIT_LOG)           private readonly auditQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.LOAN_DISBURSE)       private readonly loanQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK)      private readonly mpesaCallbackQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)  private readonly mpesaDisbQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)  private readonly mpesaDlqQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.INTEREST_ACCRUAL)    private readonly interestQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.REPAYMENT_SCHEDULE)  private readonly repaymentQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.LEDGER_INTEGRITY)    private readonly ledgerQueue: Queue,
-    @InjectQueue(QUEUE_NAMES.OUTBOUND_WEBHOOK)    private readonly webhookQueue: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.EMAIL)               private readonly emailQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.AUDIT_LOG)           private readonly auditQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.LOAN_DISBURSE)       private readonly loanQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK)      private readonly mpesaCallbackQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)  private readonly mpesaDisbQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)  private readonly mpesaDlqQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.INTEREST_ACCRUAL)    private readonly interestQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.REPAYMENT_SCHEDULE)  private readonly repaymentQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.LEDGER_INTEGRITY)    private readonly ledgerQueue?: Queue,
+    @Optional() @InjectQueue(QUEUE_NAMES.OUTBOUND_WEBHOOK)    private readonly webhookQueue?: Queue,
   ) {}
 
   // ─── Services Health ──────────────────────────────────────────────────────
@@ -368,7 +368,7 @@ export class AdminHealthService {
   // ─── Background Jobs ──────────────────────────────────────────────────────
 
   async getBackgroundJobs(): Promise<BackgroundJobStatus[]> {
-    const queues: Array<[Queue, string, string]> = [
+    const configuredQueues: Array<[Queue | undefined, string, string]> = [
       [this.emailQueue,         QUEUE_NAMES.EMAIL,              'Email Notifications'],
       [this.auditQueue,         QUEUE_NAMES.AUDIT_LOG,          'Audit Log Writer'],
       [this.loanQueue,          QUEUE_NAMES.LOAN_DISBURSE,      'Loan Disbursement'],
@@ -380,6 +380,9 @@ export class AdminHealthService {
       [this.ledgerQueue,        QUEUE_NAMES.LEDGER_INTEGRITY,   'Ledger Integrity Check'],
       [this.webhookQueue,       QUEUE_NAMES.OUTBOUND_WEBHOOK,   'Outbound Webhooks'],
     ];
+    const queues = configuredQueues.filter(
+      (entry): entry is [Queue, string, string] => Boolean(entry[0]),
+    );
 
     const results = await Promise.allSettled(
       queues.map(async ([queue, key, displayName]) => {

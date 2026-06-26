@@ -62,9 +62,30 @@ export class MpesaCallbackProcessor extends WorkerHost {
   // ─── Main dispatcher ──────────────────────────────────────────────────────
 
   async process(job: Job<MpesaCallbackJobPayload>): Promise<void> {
-    const { callbackPayload, callbackType, tenantId, correlationId } = job.data;
+    const { mpesaTransactionId, callbackType, tenantId, correlationId } = job.data;
+    let callbackPayload = job.data.callbackPayload;
+    let resolvedTenantId = tenantId;
+
+    if (mpesaTransactionId) {
+      const transaction = await this.prisma.mpesaTransaction.findUnique({
+        where: { id: mpesaTransactionId },
+        select: { id: true, tenantId: true, callbackPayload: true },
+      });
+
+      if (!transaction?.callbackPayload) {
+        throw new Error(`M-Pesa callback payload not found for transaction ${mpesaTransactionId}`);
+      }
+
+      callbackPayload = transaction.callbackPayload as unknown as Record<string, unknown>;
+      resolvedTenantId = transaction.tenantId;
+    }
+
+    if (!callbackPayload) {
+      throw new Error(`M-Pesa callback job ${job.id} has no payload reference or legacy payload`);
+    }
+
     this.logger.log(
-      `Processing mpesa callback | job=${job.id} type=${callbackType} tenant=${tenantId} correlation=${correlationId ?? ''}`,
+      `Processing mpesa callback | job=${job.id} type=${callbackType} tenant=${resolvedTenantId} mpesaTransactionId=${mpesaTransactionId ?? ''} correlation=${correlationId ?? ''}`,
     );
 
     if (isStkCallback(callbackPayload)) {
@@ -73,15 +94,15 @@ export class MpesaCallbackProcessor extends WorkerHost {
       await this.handleC2bCallback(
         callbackPayload as unknown as C2bCallbackPayload,
         job.id ?? '',
-        tenantId,
+        resolvedTenantId,
+        mpesaTransactionId,
       );
     } else if (isB2cCallback(callbackPayload)) {
       await this.handleB2cCallback(callbackPayload as unknown as B2cCallbackPayload, job.id ?? '');
     } else {
-      this.logger.warn(`Unknown callback structure for job ${job.id} – logging and discarding`);
+      this.logger.warn(`Unknown callback structure for job ${job.id} - logging and discarding`);
     }
   }
-
   // ─── STK Push result ──────────────────────────────────────────────────────
 
   private async handleStkCallback(body: StkCallbackPayload, jobId: string): Promise<void> {
@@ -180,125 +201,168 @@ export class MpesaCallbackProcessor extends WorkerHost {
     body: C2bCallbackPayload,
     jobId: string,
     resolvedTenantId?: string,
+    persistedTxId?: string,
   ): Promise<void> {
     const { TransID, TransAmount, BillRefNumber, MSISDN, TransTime } = body;
 
     try {
-    // Layer 3: reference is built at create time so a duplicate TransID simply
-    // fails the @unique constraint — but we also check explicitly for a clean log.
-    const existing = await this.prisma.mpesaTransaction.findFirst({
-      where: { mpesaReceiptNumber: TransID },
-    });
-    if (existing) {
-      this.logger.log(`C2B duplicate skipped: TransID=${TransID}`);
-      return;
-    }
-
-    const amount = new Decimal(TransAmount);
-    const rawPayload = body as unknown as Prisma.InputJsonValue;
-    const reference = buildMpesaRef.c2b(TransID);
-
-    // Use findMany so we detect cross-tenant account number collisions.
-    // accountNumber is unique within a tenant (@@unique([tenantId, accountNumber]))
-    // but NOT globally — a findFirst without tenantId would non-deterministically
-    // credit whichever tenant's record the DB returns first.
-    const accounts = await this.prisma.account.findMany({
-      where: {
-        accountNumber: BillRefNumber,
-        ...(resolvedTenantId && resolvedTenantId !== 'resolve-in-processor'
-          ? { tenantId: resolvedTenantId }
-          : {}),
-      },
-      select: { id: true, balance: true, memberId: true, tenantId: true },
-    });
-
-    if (accounts.length === 0) {
-      this.logger.warn(
-        `C2B: account not found for BillRefNumber=${BillRefNumber} TransID=${TransID}`,
-      );
-      await this.prisma.mpesaTransaction.create({
-        data: {
-          tenantId: resolvedTenantId && resolvedTenantId !== 'resolve-in-processor' ? resolvedTenantId : 'UNRESOLVED',
-          type: MpesaTxType.C2B,
-          triggerSource: MpesaTriggerSource.MEMBER,
-          phoneNumber: MSISDN,
-          amount: amount.toDecimalPlaces(4).toString(),
-          accountReference: BillRefNumber,
-          mpesaReceiptNumber: TransID,
-          reference,
-          status: TransactionStatus.FAILED,
-          resultCode: 9999,
-          resultDesc: 'Account not found – requires manual reconciliation',
-          callbackPayload: rawPayload,
-          transactionDate: parseDarajaTimestamp(TransTime),
-        },
+      const existing = await this.prisma.mpesaTransaction.findFirst({
+        where: { mpesaReceiptNumber: TransID },
       });
-      return;
-    }
+      if (existing && existing.id !== persistedTxId) {
+        this.logger.log(`C2B duplicate skipped: TransID=${TransID}`);
+        return;
+      }
 
-    if (accounts.length > 1) {
-      // Cross-tenant account number collision — cannot safely credit without
-      // a per-tenant shortcode mapping. Flag for manual reconciliation.
-      this.logger.error(
-        `C2B TENANT COLLISION: BillRefNumber=${BillRefNumber} matches ${accounts.length} ` +
-          `accounts across tenants [${accounts.map((a) => a.tenantId).join(', ')}] ` +
-          `TransID=${TransID} — requires manual reconciliation`,
-      );
-      await this.prisma.mpesaTransaction.create({
-        data: {
-          tenantId: resolvedTenantId && resolvedTenantId !== 'resolve-in-processor' ? resolvedTenantId : 'UNRESOLVED',
-          type: MpesaTxType.C2B,
-          triggerSource: MpesaTriggerSource.MEMBER,
-          phoneNumber: MSISDN,
-          amount: amount.toDecimalPlaces(4).toString(),
-          accountReference: BillRefNumber,
-          mpesaReceiptNumber: TransID,
-          reference,
-          status: TransactionStatus.FAILED,
-          resultCode: 9998,
-          resultDesc: 'Cross-tenant account collision – requires manual reconciliation',
-          callbackPayload: rawPayload,
-          transactionDate: parseDarajaTimestamp(TransTime),
+      const amount = new Decimal(TransAmount);
+      const rawPayload = body as unknown as Prisma.InputJsonValue;
+      const reference = buildMpesaRef.c2b(TransID);
+      const fallbackTenantId =
+        resolvedTenantId && resolvedTenantId !== 'resolve-in-processor'
+          ? resolvedTenantId
+          : 'UNRESOLVED';
+
+      const accounts = await this.prisma.account.findMany({
+        where: {
+          accountNumber: BillRefNumber,
+          ...(resolvedTenantId && resolvedTenantId !== 'resolve-in-processor'
+            ? { tenantId: resolvedTenantId }
+            : {}),
         },
+        select: { id: true, balance: true, memberId: true, tenantId: true },
       });
-      return;
-    }
 
-    const account = accounts[0];
+      if (accounts.length === 0) {
+        this.logger.warn(
+          `C2B: account not found for BillRefNumber=${BillRefNumber} TransID=${TransID}`,
+        );
+        if (persistedTxId) {
+          await this.prisma.mpesaTransaction.update({
+            where: { id: persistedTxId },
+            data: {
+              tenantId: fallbackTenantId,
+              status: TransactionStatus.FAILED,
+              resultCode: 9999,
+              resultDesc: 'Account not found - requires manual reconciliation',
+              callbackPayload: rawPayload,
+              transactionDate: parseDarajaTimestamp(TransTime),
+            },
+          });
+        } else {
+          await this.prisma.mpesaTransaction.create({
+            data: {
+              tenantId: fallbackTenantId,
+              type: MpesaTxType.C2B,
+              triggerSource: MpesaTriggerSource.MEMBER,
+              phoneNumber: MSISDN,
+              amount: amount.toDecimalPlaces(4).toString(),
+              accountReference: BillRefNumber,
+              mpesaReceiptNumber: TransID,
+              reference,
+              status: TransactionStatus.FAILED,
+              resultCode: 9999,
+              resultDesc: 'Account not found - requires manual reconciliation',
+              callbackPayload: rawPayload,
+              transactionDate: parseDarajaTimestamp(TransTime),
+            },
+          });
+        }
+        return;
+      }
 
-    const mpesaTx = await this.prisma.mpesaTransaction.create({
-      data: {
+      if (accounts.length > 1) {
+        this.logger.error(
+          `C2B TENANT COLLISION: BillRefNumber=${BillRefNumber} matches ${accounts.length} ` +
+            `accounts across tenants [${accounts.map((a) => a.tenantId).join(', ')}] ` +
+            `TransID=${TransID} - requires manual reconciliation`,
+        );
+        if (persistedTxId) {
+          await this.prisma.mpesaTransaction.update({
+            where: { id: persistedTxId },
+            data: {
+              tenantId: fallbackTenantId,
+              status: TransactionStatus.FAILED,
+              resultCode: 9998,
+              resultDesc: 'Cross-tenant account collision - requires manual reconciliation',
+              callbackPayload: rawPayload,
+              transactionDate: parseDarajaTimestamp(TransTime),
+            },
+          });
+        } else {
+          await this.prisma.mpesaTransaction.create({
+            data: {
+              tenantId: fallbackTenantId,
+              type: MpesaTxType.C2B,
+              triggerSource: MpesaTriggerSource.MEMBER,
+              phoneNumber: MSISDN,
+              amount: amount.toDecimalPlaces(4).toString(),
+              accountReference: BillRefNumber,
+              mpesaReceiptNumber: TransID,
+              reference,
+              status: TransactionStatus.FAILED,
+              resultCode: 9998,
+              resultDesc: 'Cross-tenant account collision - requires manual reconciliation',
+              callbackPayload: rawPayload,
+              transactionDate: parseDarajaTimestamp(TransTime),
+            },
+          });
+        }
+        return;
+      }
+
+      const account = accounts[0];
+      const mpesaTx = persistedTxId
+        ? await this.prisma.mpesaTransaction.update({
+            where: { id: persistedTxId },
+            data: {
+              tenantId: account.tenantId,
+              memberId: account.memberId,
+              type: MpesaTxType.C2B,
+              triggerSource: MpesaTriggerSource.MEMBER,
+              phoneNumber: MSISDN,
+              amount: amount.toDecimalPlaces(4).toString(),
+              accountReference: BillRefNumber,
+              mpesaReceiptNumber: TransID,
+              reference,
+              status: TransactionStatus.PENDING,
+              callbackPayload: rawPayload,
+              transactionDate: parseDarajaTimestamp(TransTime),
+            },
+          })
+        : await this.prisma.mpesaTransaction.create({
+            data: {
+              tenantId: account.tenantId,
+              memberId: account.memberId,
+              type: MpesaTxType.C2B,
+              triggerSource: MpesaTriggerSource.MEMBER,
+              phoneNumber: MSISDN,
+              amount: amount.toDecimalPlaces(4).toString(),
+              accountReference: BillRefNumber,
+              mpesaReceiptNumber: TransID,
+              reference,
+              status: TransactionStatus.PENDING,
+              callbackPayload: rawPayload,
+              transactionDate: parseDarajaTimestamp(TransTime),
+            },
+          });
+
+      await this.postLedgerEntry({
         tenantId: account.tenantId,
         memberId: account.memberId,
-        type: MpesaTxType.C2B,
-        triggerSource: MpesaTriggerSource.MEMBER,
-        phoneNumber: MSISDN,
-        amount: amount.toDecimalPlaces(4).toString(),
         accountReference: BillRefNumber,
-        mpesaReceiptNumber: TransID,
-        reference,
-        status: TransactionStatus.PENDING,
+        amount,
+        receipt: TransID,
+        mpesaTxId: mpesaTx.id,
+        rawPayload,
+        resultCode: 0,
+        resultDesc: 'Success',
         transactionDate: parseDarajaTimestamp(TransTime),
-      },
-    });
+      });
 
-    await this.postLedgerEntry({
-      tenantId: account.tenantId,
-      memberId: account.memberId,
-      accountReference: BillRefNumber,
-      amount,
-      receipt: TransID,
-      mpesaTxId: mpesaTx.id,
-      rawPayload,
-      resultCode: 0,
-      resultDesc: 'Success',
-      transactionDate: parseDarajaTimestamp(TransTime),
-    });
-
-    this.logger.log(
-      `C2B processed | TransID=${TransID} amount=${amount.toFixed(2)} ` +
-        `account=${BillRefNumber} phone=${maskPhone(MSISDN)}`,
-    );
+      this.logger.log(
+        `C2B processed | TransID=${TransID} amount=${amount.toFixed(2)} ` +
+          `account=${BillRefNumber} phone=${maskPhone(MSISDN)}`,
+      );
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         this.logger.log(`C2B duplicate skipped by unique constraint: TransID=${TransID}`);
@@ -902,7 +966,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
         failedReason: job.failedReason,
         failedAt: new Date().toISOString(),
       },
-      { removeOnFail: false, removeOnComplete: false },
+      { removeOnComplete: { age: 3600, count: 200 }, removeOnFail: { age: 604800, count: 100 } },
     );
 
     // Audit the DLQ transition — critical for manual reconciliation
@@ -948,3 +1012,5 @@ export class MpesaCallbackProcessor extends WorkerHost {
     throw new Error(`No active account for member ${memberId} in tenant ${tenantId}`);
   }
 }
+
+

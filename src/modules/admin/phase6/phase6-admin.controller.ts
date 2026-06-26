@@ -11,6 +11,7 @@ import {
   HttpStatus,
   Req,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
 import { Response, Request } from 'express';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../../../common/decorators/roles.decorator';
@@ -35,6 +36,9 @@ import { CanaryService } from '../../deploy/canary/canary.service';
  *  GET  /admin/config                    – Live config
  *  POST /sandbox/reset                   – Sandbox reset
  */
+@ApiTags('Admin - Phase 6')
+@ApiBearerAuth()
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller('admin')
 @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
 export class Phase6AdminController {

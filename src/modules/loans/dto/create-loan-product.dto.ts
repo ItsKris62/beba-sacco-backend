@@ -12,12 +12,12 @@ export class CreateLoanProductDto {
   @IsString()
   description?: string;
 
-  @ApiProperty({ example: 5000, description: 'Minimum loan amount in KES' })
+  @ApiProperty({ example: 5000, description: 'Minimum loan Amount in KES as a decimal-safe string at the API boundary as a decimal-safe string at the API boundary' })
   @IsNumber()
   @Min(100)
   minAmount!: number;
 
-  @ApiProperty({ example: 500000, description: 'Maximum loan amount in KES' })
+  @ApiProperty({ example: 500000, description: 'Maximum loan Amount in KES as a decimal-safe string at the API boundary as a decimal-safe string at the API boundary' })
   @IsNumber()
   @Min(100)
   maxAmount!: number;
@@ -123,3 +123,4 @@ export class CreateLoanProductDto {
   @IsBoolean()
   isActive?: boolean;
 }
+

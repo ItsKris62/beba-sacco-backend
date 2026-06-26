@@ -271,7 +271,7 @@ export class ReconciliationService {
           jobId,
           attempts: 1,
           removeOnComplete: true,
-          removeOnFail: false,
+          removeOnFail: { age: 86400, count: 50 },
         })
         .catch((err: unknown) => {
           this.logger.error(

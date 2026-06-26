@@ -18,3 +18,4 @@ export class WithdrawMpesaDto {
   @IsPhoneNumber('KE', { message: 'Must be a valid Kenyan phone number' })
   phoneNumber!: string;
 }
+

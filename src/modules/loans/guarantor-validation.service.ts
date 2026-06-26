@@ -22,6 +22,7 @@ interface GuarantorAccountBalance {
   id: string;
   balance: Decimal;
   lockedBalance: Decimal;
+  frozenSavings: Decimal;
   availableBalance: Decimal;
 }
 
@@ -90,17 +91,17 @@ export class GuarantorValidationService {
       }
 
       const guaranteedAmount = guarantor.guaranteedAmount.toDecimalPlaces(4);
-      const newLockedBalance = account.lockedBalance.plus(guaranteedAmount).toDecimalPlaces(4);
+      const newFrozenSavings = account.frozenSavings.plus(guaranteedAmount).toDecimalPlaces(4);
       const updated = await tx.account.updateMany({
         where: {
           id: account.id,
           tenantId,
           isActive: true,
-          lockedBalance: account.lockedBalance.toDecimalPlaces(4).toString(),
-          balance: { gte: newLockedBalance.toString() },
+          frozenSavings: account.frozenSavings.toDecimalPlaces(4).toString(),
+          balance: { gte: account.lockedBalance.plus(newFrozenSavings).toDecimalPlaces(4).toString() },
         },
         data: {
-          lockedBalance: { increment: guaranteedAmount.toString() },
+          frozenSavings: { increment: guaranteedAmount.toString() },
           version: { increment: 1 },
         },
       });
@@ -125,7 +126,7 @@ export class GuarantorValidationService {
         continue;
       }
 
-      const releaseAmount = Decimal.min(account.lockedBalance, guarantor.guaranteedAmount).toDecimalPlaces(4);
+      const releaseAmount = Decimal.min(account.frozenSavings, guarantor.guaranteedAmount).toDecimalPlaces(4);
       if (releaseAmount.isZero()) {
         continue;
       }
@@ -133,7 +134,7 @@ export class GuarantorValidationService {
       const updated = await tx.account.updateMany({
         where: { id: account.id, tenantId, isActive: true },
         data: {
-          lockedBalance: { decrement: releaseAmount.toString() },
+          frozenSavings: { decrement: releaseAmount.toString() },
           version: { increment: 1 },
         },
       });
@@ -177,7 +178,7 @@ export class GuarantorValidationService {
   ): Promise<GuarantorAccountBalance | null> {
     const account = await tx.account.findFirst({
       where: { tenantId, memberId, accountType, isActive: true },
-      select: { id: true, balance: true, lockedBalance: true },
+      select: { id: true, balance: true, lockedBalance: true, frozenSavings: true },
     });
 
     if (!account) {
@@ -186,12 +187,15 @@ export class GuarantorValidationService {
 
     const balance = new Decimal(account.balance.toString());
     const lockedBalance = new Decimal(account.lockedBalance?.toString() ?? '0');
+    const frozenSavings = new Decimal(account.frozenSavings?.toString() ?? '0');
 
     return {
       id: account.id,
       balance,
       lockedBalance,
-      availableBalance: balance.minus(lockedBalance),
+      frozenSavings,
+      availableBalance: balance.minus(lockedBalance).minus(frozenSavings),
     };
   }
 }
+

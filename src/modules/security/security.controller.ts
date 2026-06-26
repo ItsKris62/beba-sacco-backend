@@ -10,14 +10,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiBearerAuth,
-  ApiResponse,
-  ApiBody,
-  ApiParam,
-} from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse, ApiBody, ApiParam, ApiHeader } from '@nestjs/swagger';
 import { IsString, IsOptional, IsEnum } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../common/guards/jwt.guard';
@@ -54,6 +47,7 @@ class AcceptConsentDto {
 @ApiTags('Security & Compliance')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller()
 export class SecurityController {
   constructor(private readonly securityService: SecurityService) {}

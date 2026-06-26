@@ -128,30 +128,16 @@ export class DataImportService {
     if (!rows || !Array.isArray(rows)) {
       throw new BadRequestException('Import log has no validated rows. Please run preview first.');
     }
-
-    // Find the wardId from the first valid row's stage (stored in errorDetails)
-    // We need to get wardId from the original preview call
-    // For now, get it from the first stage in the tenant
-    const firstStage = await this.prisma.stage.findFirst({
-      where: { tenantId },
-      select: { wardId: true },
-    });
-    const wardId = firstStage?.wardId ?? '';
-
     const payload: ImportJobPayload = {
-      importLogId: importLog.id,
+      importJobId: importLog.id,
       tenantId,
-      wardId,
-      actorId,
-      dryRun: dto.dryRun ?? false,
-      rows,
     };
 
     // Queue the job
     const job = await this.importQueue.add('execute-import', payload, {
       attempts: 1, // Import jobs should not auto-retry
-      removeOnComplete: false,
-      removeOnFail: false,
+      removeOnComplete: { age: 604800, count: 100 },
+      removeOnFail: { age: 2592000, count: 50 },
     });
 
     // Update import log with job ID
@@ -318,25 +304,15 @@ export class DataImportService {
         errorDetails: failedRows as never,
       },
     });
-
-    const firstStage = await this.prisma.stage.findFirst({
-      where: { tenantId },
-      select: { wardId: true },
-    });
-
     const payload: ImportJobPayload = {
-      importLogId: retryLog.id,
+      importJobId: retryLog.id,
       tenantId,
-      wardId: firstStage?.wardId ?? '',
-      actorId,
-      dryRun: false,
-      rows: failedRows as never,
     };
 
     const job = await this.importQueue.add('execute-import', payload, {
       attempts: 1,
-      removeOnComplete: false,
-      removeOnFail: false,
+      removeOnComplete: { age: 604800, count: 100 },
+      removeOnFail: { age: 2592000, count: 50 },
     });
 
     await this.prisma.dataImportLog.update({
@@ -352,3 +328,4 @@ export class DataImportService {
     };
   }
 }
+

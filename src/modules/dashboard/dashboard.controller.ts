@@ -1,5 +1,5 @@
 import { Controller, Get, Req, HttpCode, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse, ApiHeader } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { DashboardService, DashboardStats, DashboardReports } from './dashboard.service';
@@ -7,6 +7,7 @@ import type { AuthenticatedRequest } from '../../common/types/request.types';
 
 @ApiTags('Dashboard')
 @ApiBearerAuth()
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller('admin/dashboard')
 export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}

@@ -49,8 +49,8 @@ export class ReportsService {
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 1000,
-        removeOnFail: false,
+        removeOnComplete: { age: 604800, count: 50 },
+        removeOnFail: { age: 2592000, count: 50 },
       },
     );
 

@@ -86,12 +86,8 @@ export interface ImportPreviewReport {
 }
 
 export interface ImportJobPayload {
-  importLogId: string;
+  importJobId: string;
   tenantId: string;
-  wardId: string;
-  actorId: string;
-  dryRun: boolean;
-  rows: ValidatedRow[];
 }
 
 export interface ImportReport {
@@ -114,3 +110,4 @@ export interface ImportReport {
   updatedUsers: string[];
   createdStages: string[];
 }
+

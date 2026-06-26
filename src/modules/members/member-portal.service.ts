@@ -346,7 +346,7 @@ export class MemberPortalService {
     const result = await this.prisma.$transaction(async (tx) => {
       const fosaAccount = await tx.account.findFirst({
         where: { memberId: member.id, tenantId, accountType: 'FOSA', isActive: true },
-        select: { id: true, balance: true, lockedBalance: true, accountNumber: true },
+        select: { id: true, balance: true, lockedBalance: true, frozenSavings: true, accountNumber: true },
       });
 
       if (!fosaAccount) {
@@ -354,7 +354,7 @@ export class MemberPortalService {
       }
 
       const availableBalance = new Decimal(fosaAccount.balance.toString()).minus(
-        new Decimal(fosaAccount.lockedBalance.toString())
+        new Decimal(fosaAccount.lockedBalance.toString()).plus(new Decimal(fosaAccount.frozenSavings.toString()))
       );
 
       if (availableBalance.lessThan(totalDeduction)) {
@@ -426,7 +426,7 @@ export class MemberPortalService {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
         removeOnComplete: true,
-        removeOnFail: false,
+        removeOnFail: { age: 86400, count: 50 },
       }
     );
 
@@ -601,16 +601,16 @@ export class MemberPortalService {
     const scheduleRows = await this.prisma.loanRepayment.findMany({
       where: { loanId, tenantId },
       orderBy: { dayNumber: 'asc' },
-      select: { dayNumber: true, amountPaid: true, paymentDate: true, status: true },
+      select: { dayNumber: true, amountPaid: true, dueDate: true, status: true },
     });
     const now = new Date();
     const schedule = scheduleRows.map((r) => ({
       month: r.dayNumber,
-      dueDate: r.paymentDate.toISOString().split('T')[0],
+      dueDate: r.dueDate.toISOString().split('T')[0],
       expectedAmount: new Decimal(r.amountPaid.toString()).toNumber(),
       status: (
-        r.status === 'CONFIRMED' ? 'PAID'
-        : r.paymentDate < now ? 'OVERDUE'
+        r.status === 'PAID' ? 'PAID'
+        : r.dueDate < now ? 'OVERDUE'
         : 'UPCOMING'
       ) as 'PAID' | 'OVERDUE' | 'UPCOMING',
     }));
@@ -723,3 +723,5 @@ export class MemberPortalService {
     return member;
   }
 }
+
+

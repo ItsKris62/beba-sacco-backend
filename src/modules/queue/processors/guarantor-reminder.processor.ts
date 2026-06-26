@@ -16,7 +16,12 @@ import { PlunkService } from '../../../common/services/plunk.service';
  * run in the BullMQ worker context where DI is not always reliable for
  * circular-dependency-heavy feature modules.
  */
-@Processor(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER, { concurrency: 10 })
+@Processor(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER, {
+  concurrency: 3,
+  lockDuration: 60000,
+  stalledInterval: 60000,
+  maxStalledCount: 1,
+})
 export class GuarantorReminderProcessor extends WorkerHost {
   private readonly logger = new Logger(GuarantorReminderProcessor.name);
   // PrismaClient is instantiated directly to avoid circular DI in queue context
@@ -128,3 +133,4 @@ export class GuarantorReminderProcessor extends WorkerHost {
 </html>`.trim();
   }
 }
+

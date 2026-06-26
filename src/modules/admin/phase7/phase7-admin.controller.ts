@@ -6,6 +6,7 @@ import {
   Controller, Get, Post, Body, Query, Param,
   UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { DataErasureService } from '../../governance/erasure/data-erasure.service';
@@ -18,6 +19,9 @@ import { StressTestService } from '../../reports/stress-test.service';
 import { SloTrackerService } from '../../sre/slo-tracker.service';
 import { FinOpsService } from '../../sre/finops.service';
 
+@ApiTags('Admin - Phase 7')
+@ApiBearerAuth()
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller('admin')
 export class Phase7AdminController {
   constructor(

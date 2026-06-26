@@ -12,7 +12,10 @@ import { AuditService } from '../../audit/audit.service';
  * A missed audit log is never worth blocking a business transaction.
  */
 @Processor(QUEUE_NAMES.AUDIT_LOG, {
-  concurrency: 10,
+  concurrency: 3,
+  lockDuration: 60000,
+  stalledInterval: 60000,
+  maxStalledCount: 1,
 })
 export class AuditLogProcessor extends WorkerHost {
   private readonly logger = new Logger(AuditLogProcessor.name);
@@ -33,3 +36,5 @@ export class AuditLogProcessor extends WorkerHost {
     }
   }
 }
+
+

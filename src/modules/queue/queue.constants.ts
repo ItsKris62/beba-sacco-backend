@@ -14,6 +14,10 @@ export const QUEUE_NAMES = {
   LOAN_GUARANTOR_EXPIRY: 'loan.guarantor.expiry',
   REPAYMENT_REMINDER: 'loan.repayment.reminder',
   GUARANTOR_RECOVERY: 'loan.guarantor.recovery',
+  LOAN_DAILY_PENALTIES: 'loan.daily-penalties',
+  LOAN_GUARANTOR_FORFEITURE: 'loan.guarantor-forfeiture',
+  LOAN_PENALTY_QUEUE: 'loan.daily-penalties',
+  GUARANTOR_DEFAULT_OFFSET_QUEUE: 'loan.guarantor-forfeiture',
   GUARANTOR_VALIDATION: 'loan.guarantor.validation',
   GUARANTOR_VALIDATION_DLQ: 'loan.guarantor.validation.dlq',
   AUDIT_LOG: 'audit.log',
@@ -26,6 +30,7 @@ export const QUEUE_NAMES = {
   INTEREST_ACCRUAL: 'financial.interest-accrual',
   REPAYMENT_SCHEDULE: 'financial.repayment-schedule',
   MPESA_RECONCILIATION: 'financial.mpesa-reconciliation',
+  MPESA_RECONCILE_QUEUE: 'mpesa.reconcile',
   LEDGER_INTEGRITY: 'financial.ledger-integrity',
   // Phase 4 – Outbound Webhooks
   OUTBOUND_WEBHOOK: 'webhooks.outbound',
@@ -63,6 +68,9 @@ export const GUARANTOR_EXPIRY_CHECK_JOB = 'guarantor-expiry-check';
 export const REPAYMENT_REMINDER_SCAN_JOB = 'repayment-reminder-scan';
 export const GUARANTOR_RECOVERY_NOTICE_JOB = 'guarantor-recovery-notice';
 export const GUARANTOR_DEBIT_JOB = 'guarantor-debit-execute';
+export const RECONCILE_PENDING_STK_JOB = 'reconcile-pending-stk';
+export const APPLY_DAILY_PENALTIES_JOB = 'apply-daily-penalties';
+export const PROCESS_GUARANTOR_FORFEITURE_JOB = 'process-guarantor-forfeiture';
 export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
 
 // ─── Job payload types ────────────────────────────────────────────────────────
@@ -72,8 +80,9 @@ export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
 export interface MpesaCallbackJobPayload {
   tenantId: string;
   correlationId?: string;
-  /** Raw Daraja callback payload (STK, C2B, or B2C result) */
-  callbackPayload: Record<string, unknown>;
+  mpesaTransactionId: string;
+  /** Legacy fallback for jobs that were queued before the payload reference migration. */
+  callbackPayload?: Record<string, unknown>;
   /** Discriminator so the processor routes to the right handler */
   callbackType: 'STK_PUSH' | 'C2B' | 'B2C_RESULT' | 'B2C_TIMEOUT';
 }
@@ -345,7 +354,6 @@ export interface OutboundWebhookJobPayload {
   subscriptionId: string;
   deliveryId: string;
   event: string;
-  payload: Record<string, unknown>;
   attempt: number;
 }
 
@@ -422,3 +430,7 @@ export interface CanaryAnalysisJobPayload {
   version: string;
   prometheusBaseUrl: string;
 }
+
+
+
+

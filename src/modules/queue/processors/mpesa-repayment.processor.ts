@@ -22,7 +22,7 @@ import { StkRepaymentJobPayload } from './mpesa-repayment.scheduler';
  *  - attempts: 1 (set by scheduler) — job is logged and not retried.
  *  - The next day's cron creates a fresh stk-repay-{loanId}-{YYYYMMDD+1} job.
  *  - This prevents DLQ accumulation of stale multi-day repayment retries.
- *  - removeOnFail: false — jobs remain in failed state for Bull Board inspection.
+ *  - removeOnFail: { age: 86400, count: 50 } — jobs remain in failed state for Bull Board inspection.
  */
 @Processor(QUEUE_NAMES.MPESA_STK_REPAYMENT, { concurrency: 3 })
 export class MpesaRepaymentProcessor extends WorkerHost {

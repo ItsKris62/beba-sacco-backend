@@ -53,6 +53,7 @@ async function bootstrap() {
   const apiPrefix = configService.get<string>('app.apiPrefix', 'api/v1');
   const nodeEnv = configService.get<string>('app.nodeEnv', 'development');
   const swaggerPath = `/${apiPrefix}/docs`;
+  const swaggerAliasPath = 'api/docs';
 
   // ── Proxy trust ────────────────────────────────────────────────
   // Render sits behind one layer of load balancers. Setting trust proxy to 1
@@ -172,6 +173,10 @@ async function bootstrap() {
       'Protected endpoints also require **Authorization: Bearer <access_token>**.',
     )
     .setVersion('1.0')
+    .addServer('{protocol}://{host}/api/v1', 'Configured API base URL', {
+      protocol: { default: nodeEnv === 'production' ? 'https' : 'http', enum: ['http', 'https'] },
+      host: { default: process.env.API_HOST || ('localhost:' + port) },
+    })
     .addBearerAuth(
       {
         type: 'http',
@@ -209,6 +214,8 @@ async function bootstrap() {
     .addTag('Loans', 'Loan products, applications, repayments – Phase 2')
     .addTag('M-Pesa', 'M-Pesa STK push and webhooks – Phase 2')
     .addTag('Health', 'Liveness and readiness probes')
+    .addSecurityRequirements('bearer')
+    .addSecurityRequirements('X-Tenant-ID')
     .build();
 
   const swaggerUser = process.env.SWAGGER_USER;
@@ -228,7 +235,57 @@ async function bootstrap() {
     }
 
     const document = SwaggerModule.createDocument(app, swaggerConfig);
+    const tenantHeaderParameter = {
+      name: 'X-Tenant-ID',
+      in: 'header' as const,
+      required: true,
+      description: 'Tenant identifier for multi-tenancy',
+      schema: { type: 'string', example: '550e8400-e29b-41d4-a716-446655440000' },
+    };
+    const isCallbackOrPublicInfra = (routePath: string) =>
+      routePath.includes('/mpesa/callback') ||
+      routePath.includes('/mpesa/webhooks/') ||
+      routePath.includes('/health') ||
+      routePath.includes('/metrics');
+
+    for (const [routePath, pathItem] of Object.entries(document.paths)) {
+      if (!pathItem || isCallbackOrPublicInfra(routePath)) continue;
+      for (const method of ['get', 'post', 'put', 'patch', 'delete', 'options', 'head'] as const) {
+        const operation = pathItem[method];
+        if (!operation) continue;
+        operation.security = operation.security?.length
+          ? operation.security
+          : [{ bearer: [] }, { 'X-Tenant-ID': [] }];
+        operation.parameters = operation.parameters ?? [];
+        const hasTenantHeader = operation.parameters.some(
+          (parameter) =>
+            typeof parameter === 'object' &&
+            'name' in parameter &&
+            parameter.name === 'X-Tenant-ID',
+        );
+        if (!hasTenantHeader) {
+          operation.parameters.unshift(tenantHeaderParameter);
+        }
+        operation.responses = operation.responses ?? {};
+        operation.responses['401'] = operation.responses['401'] ?? {
+          description: 'Unauthorized: missing or invalid JWT, or missing tenant context',
+        };
+        operation.responses['403'] = operation.responses['403'] ?? {
+          description: 'Forbidden: insufficient role, invalid tenant access, or invalid M-Pesa IP allowlist where applicable',
+        };
+        operation.responses['409'] = operation.responses['409'] ?? {
+          description: 'Conflict: duplicate request, OCC version mismatch, or insufficient available funds',
+        };
+      }
+    }
     SwaggerModule.setup(swaggerPath.replace(/^\//, ''), app, document, {
+      swaggerOptions: {
+        persistAuthorization: true,
+        tagsSorter: 'alpha',
+        operationsSorter: 'alpha',
+      },
+    });
+    SwaggerModule.setup(swaggerAliasPath, app, document, {
       swaggerOptions: {
         persistAuthorization: true,
         tagsSorter: 'alpha',
@@ -271,3 +328,6 @@ bootstrap().catch((err) => {
   // Wait 1 second before exiting so Render's log aggregator has time to flush the error message
   setTimeout(() => process.exit(1), 1000);
 });
+
+
+

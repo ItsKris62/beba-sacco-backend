@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AlertsService } from '../alerts/alerts.service';
 import { Gauge, register } from 'prom-client';
 import Redis from 'ioredis';
@@ -17,7 +18,7 @@ export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
   private dlqGauge: Gauge<string>;
   private alertedQueues = new Set<string>();
 
-  constructor(private readonly alertsService: AlertsService) {
+  constructor(private readonly alertsService: AlertsService, private readonly configService: ConfigService) {
     // Register gauge safely avoiding duplicate registration errors in test environments
     this.dlqGauge =
       (register.getSingleMetric('bullmq_dlq_depth') as Gauge<string>) ||
@@ -29,12 +30,42 @@ export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    // Initialize Redis client with Upstash‑compatible options
+    const bullRedisUrl = this.configService.get<string>('app.bullRedis.url');
+    const rawBullHost = this.configService.get<string>('app.bullRedis.host');
+    const bullPassword = this.configService.get<string>('app.bullRedis.password');
+    const bullTls = this.configService.get<boolean>('app.bullRedis.tls');
+
+    if (bullRedisUrl) {
+      const parsed = new URL(bullRedisUrl);
+      this.redisClient = new Redis({
+        host: parsed.hostname,
+        port: parseInt(parsed.port || '6379', 10),
+        password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+        tls: parsed.protocol === 'rediss:' ? { rejectUnauthorized: false } : undefined,
+        maxRetriesPerRequest: null,
+        enableReadyCheck: false,
+      });
+      return;
+    }
+
+    if (rawBullHost) {
+      this.redisClient = new Redis({
+        host: rawBullHost.replace(/^https?:\/\//, ''),
+        port: this.configService.get<number>('app.bullRedis.port', 6379),
+        password: bullPassword || undefined,
+        tls: bullTls ? { rejectUnauthorized: false } : undefined,
+        maxRetriesPerRequest: null,
+        enableReadyCheck: false,
+      });
+      return;
+    }
+
+    const rawHost = this.configService.get<string>('app.redis.host', 'localhost');
     this.redisClient = new Redis({
-      host: process.env.REDIS_HOST || 'localhost',
-      port: parseInt(process.env.REDIS_PORT || '6379', 10),
-      password: process.env.REDIS_PASSWORD,
-      tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
+      host: rawHost.replace(/^https?:\/\//, ''),
+      port: this.configService.get<number>('app.redis.port', 6379),
+      password: this.configService.get<string>('app.redis.password') || undefined,
+      tls: this.configService.get<boolean>('app.redis.tls') ? { rejectUnauthorized: false } : undefined,
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
     });
@@ -71,3 +102,4 @@ export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
     }
   }
 }
+

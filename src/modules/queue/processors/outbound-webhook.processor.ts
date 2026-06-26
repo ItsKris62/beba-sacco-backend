@@ -7,10 +7,15 @@ import { WebhooksService } from '../../webhooks/webhooks.service';
 /**
  * Delivers outbound webhook payloads to tenant-configured endpoints.
  *
- * Concurrency = 10: webhooks are low-latency external HTTP calls.
+ * Concurrency = 3: tuned for low-tier Redis command budgets.
  * BullMQ handles retries (3x, exponential back-off) on thrown errors.
  */
-@Processor(QUEUE_NAMES.OUTBOUND_WEBHOOK, { concurrency: 10 })
+@Processor(QUEUE_NAMES.OUTBOUND_WEBHOOK, {
+  concurrency: 3,
+  lockDuration: 60000,
+  stalledInterval: 60000,
+  maxStalledCount: 1,
+})
 export class OutboundWebhookProcessor extends WorkerHost {
   private readonly logger = new Logger(OutboundWebhookProcessor.name);
 
@@ -19,8 +24,10 @@ export class OutboundWebhookProcessor extends WorkerHost {
   }
 
   async process(job: Job<OutboundWebhookJobPayload>): Promise<void> {
-    const { subscriptionId, deliveryId, event, payload } = job.data;
+    const { subscriptionId, deliveryId, event } = job.data;
     this.logger.debug(`Delivering webhook: sub=${subscriptionId} event=${event}`);
-    await this.webhooks.deliverOne(subscriptionId, deliveryId, event, payload);
+    await this.webhooks.deliverOne(subscriptionId, deliveryId, event);
   }
 }
+
+

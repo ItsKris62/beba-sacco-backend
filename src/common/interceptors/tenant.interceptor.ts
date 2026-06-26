@@ -18,7 +18,7 @@ import { FeatureFlags } from '../../config/feature-flags';
  * Routes that do NOT require X-Tenant-ID.
  * Only infrastructure endpoints — auth routes still need tenant context.
  */
-const TENANT_SKIP_PATTERNS = ['/health', '/docs', '/docs-json', '/favicon.ico'];
+const TENANT_SKIP_PATTERNS = ['/health', '/docs', '/docs-json', '/favicon.ico', '/mpesa/callback'];
 
 /**
  * Tenant Context Interceptor
@@ -146,3 +146,4 @@ export class TenantInterceptor implements NestInterceptor {
     );
   }
 }
+

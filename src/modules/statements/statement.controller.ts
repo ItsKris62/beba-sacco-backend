@@ -10,7 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags, ApiHeader } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { UserRole } from '@prisma/client';
@@ -60,6 +60,7 @@ const STAFF_STATEMENT_ROLES = new Set<UserRole>([
 @ApiTags('Statements')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller()
 export class StatementController {
   constructor(private readonly statementService: StatementService) {}

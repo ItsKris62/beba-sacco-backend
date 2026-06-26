@@ -67,7 +67,7 @@ export class RepaymentReminderProcessor extends WorkerHost {
       where: {
         tenantId,
         status: { in: ['PENDING', 'PARTIAL'] },
-        paymentDate: { gte: start, lte: end },
+        dueDate: { gte: start, lte: end },
         loan: { status: { in: ['ACTIVE', 'DISBURSED', 'DEFAULTED'] } },
       },
       include: {
@@ -83,7 +83,7 @@ export class RepaymentReminderProcessor extends WorkerHost {
       const member = row.loan.member;
       const firstName = member.user.firstName;
       const amount = new Decimal(row.amountPaid.toString()).toFixed(2);
-      const dueDate = row.paymentDate.toISOString().split('T')[0];
+      const dueDate = row.dueDate.toISOString().split('T')[0];
       const timing = offsetDays > 0
         ? `due in ${offsetDays} day${offsetDays === 1 ? '' : 's'}`
         : offsetDays === 0
@@ -200,3 +200,4 @@ export class RepaymentReminderProcessor extends WorkerHost {
     }).catch((error: unknown) => this.logger.warn(`Audit queue action failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
+

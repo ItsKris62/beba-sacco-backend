@@ -5,7 +5,12 @@ import { Job, Queue } from 'bullmq';
 import { AuditChainService } from '../../audit/audit.chain.service';
 import { AuditPersistJobPayload, QUEUE_NAMES } from '../queue.constants';
 
-@Processor(QUEUE_NAMES.AUDIT_PERSIST, { concurrency: 8 })
+@Processor(QUEUE_NAMES.AUDIT_PERSIST, {
+  concurrency: 3,
+  lockDuration: 60000,
+  stalledInterval: 60000,
+  maxStalledCount: 1,
+})
 export class AuditQueueProcessor extends WorkerHost {
   private readonly logger = new Logger(AuditQueueProcessor.name);
 
@@ -58,7 +63,8 @@ export class AuditQueueProcessor extends WorkerHost {
           failedAt: new Date().toISOString(),
         },
       },
-      { removeOnComplete: false, removeOnFail: false },
+      { removeOnComplete: { age: 86400, count: 1000 }, removeOnFail: { age: 604800, count: 500 } },
     );
   }
 }
+

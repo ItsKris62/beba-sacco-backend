@@ -79,6 +79,16 @@ enum GuarantorStatus {
   @@schema("public")
 }
 
+enum InstallmentStatus {
+  PENDING
+  PARTIAL
+  PAID
+  OVERDUE
+  WAIVED
+
+  @@schema("public")
+}
+
 enum ReportType {
   LOAN_BOOK
   MEMBER_BALANCES
@@ -702,6 +712,7 @@ model Account {
   // Balance stored as Decimal(18,4) – always use Decimal class, never number
   balance       Decimal     @default(0) @db.Decimal(18, 4)
   lockedBalance Decimal     @default(0) @db.Decimal(18, 4)
+  frozenSavings Decimal     @default(0) @db.Decimal(18, 4)
   isActive      Boolean     @default(true)
 
   // Optimistic locking version for concurrent balance updates
@@ -714,6 +725,7 @@ model Account {
 
   @@unique([tenantId, accountNumber])
   @@index([tenantId, memberId])
+  @@index([tenantId, memberId, accountType, isActive])
   @@schema("public")
 }
 
@@ -732,8 +744,8 @@ model LoanProduct {
   // Rules Engine Fields
   requiredAccountType    AccountType? // null = combined, otherwise restrict to BOSA or FOSA
   savingsMultiplier      Decimal      @default(3.0000) @db.Decimal(7, 4)
-  minGuarantors          Int          @default(0)
-  maxGuarantors          Int          @default(5)
+  minGuarantors          Int          @default(2)
+  maxGuarantors          Int          @default(3)
   guarantorCoverageRatio Decimal      @default(1.0) @db.Decimal(7, 4)
   requiresPayslip        Boolean      @default(false)
 
@@ -820,6 +832,7 @@ model Loan {
   @@index([tenantId, loanProductId])
   @@index([tenantId, status])
   @@index([tenantId, staging])
+  @@index([tenantId, staging, arrearsDays])
   @@schema("public")
 }
 
@@ -1840,9 +1853,9 @@ model LoanRepayment {
   dayNumber   Int // 1-N per tenure months (schedule) or 1-30 per CSV (legacy)
   amountPaid  Decimal  @db.Decimal(10, 2) // Legacy expected/payment amount for imports and portal views
   paymentDate DateTime
-  dueDate     DateTime?
+  dueDate     DateTime
   method      String   @default("CASH")
-  status      String   @default("CONFIRMED") // PENDING | PARTIAL | PAID | CONFIRMED (legacy paid)
+  status      InstallmentStatus @default(PENDING)
   recordedBy  String? // userId of teller
   tenantId    String
 
@@ -1853,12 +1866,14 @@ model LoanRepayment {
   interestPaid  Decimal @default(0) @db.Decimal(18, 4)
   penaltyPaid   Decimal @default(0) @db.Decimal(18, 4)
   paidAt        DateTime?
+  lastPenaltyAccrualDate DateTime?
 
   createdAt   DateTime @default(now())
 
   @@unique([loanId, dayNumber, tenantId])
   @@index([tenantId, loanId])
   @@index([tenantId, paymentDate, status])
+  @@index([tenantId, status, dueDate])
   @@index([tenantId])
   @@schema("public")
 }
@@ -2169,3 +2184,4 @@ model GLPosting {
   @@index([creditAccountId])
   @@schema("public")
 }
+

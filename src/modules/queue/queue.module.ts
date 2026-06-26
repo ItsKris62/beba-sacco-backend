@@ -25,7 +25,11 @@ import { DeadLetterAlertProcessor } from './dead-letter.processor';
 import { MpesaRepaymentScheduler } from './processors/mpesa-repayment.scheduler';
 import { MpesaRepaymentProcessor } from './processors/mpesa-repayment.processor';
 import { DailyReconProcessor } from './processors/daily-recon.processor';
+import { MpesaReconcileProcessor } from './processors/mpesa-reconcile.processor';
+import { LoanPenaltyProcessor } from './processors/loan-penalty.processor';
+import { GuarantorDefaultOffsetProcessor } from './processors/guarantor-default-offset.processor';
 import { DailyReconScheduler } from './daily-recon.scheduler';
+import { DailyJobsScheduler } from '../../queues/schedulers/daily-jobs.scheduler';
 
 // Service dependencies needed by processors
 import { MpesaModule } from '../mpesa/mpesa.module';
@@ -49,6 +53,25 @@ export interface QueueModuleOptions {
   mode?: QueueModuleMode;
 }
 
+const DEFAULT_JOB_OPTIONS = {
+  removeOnComplete: true,
+  removeOnFail: { age: 86_400, count: 50 },
+  attempts: 5,
+  backoff: { type: 'exponential' as const, delay: 5000 },
+};
+
+export const LOW_TIER_WORKER_DEFAULTS = {
+  lockDuration: 30_000,
+  stalledInterval: 60_000,
+  maxStalledCount: 1,
+  removeOnComplete: { age: 7_200, count: 100 },
+  removeOnFail: { age: 86_400, count: 50 },
+};
+
+const STREAM_OPTIONS = {
+  events: { maxLen: 1000 },
+};
+
 export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   MpesaCallbackProcessor,
   GuarantorReminderProcessor,
@@ -66,6 +89,10 @@ export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   DailyReconProcessor,
   DailyReconScheduler,
   DeadLetterAlertProcessor,
+  DailyJobsScheduler,
+  MpesaReconcileProcessor,
+  LoanPenaltyProcessor,
+  GuarantorDefaultOffsetProcessor,
   RepaymentReminderProcessor,
   GuarantorRecoveryProcessor,
 ];
@@ -131,14 +158,6 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
         const rawBullHost = configService.get<string>('app.bullRedis.host');
         const bullPassword = configService.get<string>('app.bullRedis.password');
         const bullTls = configService.get<boolean>('app.bullRedis.tls');
-
-          const defaultJobOptions = {
-            removeOnComplete: true,
-            removeOnFail: { count: 10 },
-            attempts: 5,
-            backoff: { type: 'exponential' as const, delay: 5000 },
-          };
-
         if (bullRedisUrl) {
           const parsed = new URL(bullRedisUrl);
           const tls = parsed.protocol === 'rediss:' ? { rejectUnauthorized: false } : undefined;
@@ -156,7 +175,8 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
               retryStrategy: (times: number) => Math.min(times * 500, 10_000),
               reconnectOnError: (err: Error) => err.message.includes('READONLY'),
             },
-            defaultJobOptions,
+            defaultJobOptions: DEFAULT_JOB_OPTIONS,
+            streams: STREAM_OPTIONS,
           };
         }
 
@@ -176,7 +196,8 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
               retryStrategy: (times: number) => Math.min(times * 500, 10_000),
               reconnectOnError: (err: Error) => err.message.includes('READONLY'),
             },
-            defaultJobOptions,
+            defaultJobOptions: DEFAULT_JOB_OPTIONS,
+            streams: STREAM_OPTIONS,
           };
         }
 
@@ -208,7 +229,8 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
             },
             reconnectOnError: (err: Error) => err.message.includes('READONLY'),
           },
-          defaultJobOptions,
+          defaultJobOptions: DEFAULT_JOB_OPTIONS,
+          streams: STREAM_OPTIONS,
         };
       },
     }),
@@ -222,6 +244,8 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       { name: QUEUE_NAMES.LOAN_GUARANTOR_EXPIRY },
       { name: QUEUE_NAMES.REPAYMENT_REMINDER },
       { name: QUEUE_NAMES.GUARANTOR_RECOVERY },
+      { name: QUEUE_NAMES.LOAN_DAILY_PENALTIES },
+      { name: QUEUE_NAMES.LOAN_GUARANTOR_FORFEITURE },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION },
       { name: QUEUE_NAMES.GUARANTOR_VALIDATION_DLQ },
       { name: QUEUE_NAMES.AUDIT_LOG },
@@ -234,6 +258,7 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       { name: QUEUE_NAMES.INTEREST_ACCRUAL },
       { name: QUEUE_NAMES.REPAYMENT_SCHEDULE },
       { name: QUEUE_NAMES.MPESA_RECONCILIATION },
+      { name: QUEUE_NAMES.MPESA_RECONCILE_QUEUE },
       { name: QUEUE_NAMES.LEDGER_INTEGRITY },
       { name: QUEUE_NAMES.OUTBOUND_WEBHOOK },
       { name: QUEUE_NAMES.MPESA_STK_REPAYMENT },
@@ -273,3 +298,5 @@ export class QueueModule {
     };
   }
 }
+
+

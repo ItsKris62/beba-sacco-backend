@@ -102,7 +102,6 @@ export class WebhooksService {
             subscriptionId: sub.id,
             deliveryId: delivery.id,
             event,
-            payload,
             attempt: 1,
           },
           {
@@ -123,13 +122,20 @@ export class WebhooksService {
     subscriptionId: string,
     deliveryId: string,
     event: string,
-    payload: Record<string, unknown>,
   ): Promise<void> {
     const sub = await this.prisma.webhookSubscription.findUnique({ where: { id: subscriptionId } });
     if (!sub) throw new NotFoundException(`Webhook subscription ${subscriptionId} not found`);
 
+    const delivery = await this.prisma.webhookDelivery.findUnique({
+      where: { id: deliveryId },
+      select: { event: true, payload: true },
+    });
+    if (!delivery) throw new NotFoundException(`Webhook delivery ${deliveryId} not found`);
+
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    const body = JSON.stringify({ event, timestamp, data: payload });
+    const deliveryEvent = delivery.event ?? event;
+    const payload = delivery.payload as Record<string, unknown>;
+    const body = JSON.stringify({ event: deliveryEvent, timestamp, data: payload });
     const signature = createHmac('sha256', sub.secret).update(`${timestamp}.${body}`).digest('hex');
 
     let httpStatus: number | null = null;
@@ -143,7 +149,7 @@ export class WebhooksService {
           'Content-Type': 'application/json',
           'X-Beba-Signature': `sha256=${signature}`,
           'X-Beba-Timestamp': timestamp,
-          'X-Beba-Event': event,
+          'X-Beba-Event': deliveryEvent,
         },
         body,
         signal: AbortSignal.timeout(10_000), // 10 s timeout
@@ -157,7 +163,7 @@ export class WebhooksService {
         throw new BadRequestException(`Webhook target returned HTTP ${httpStatus}`);
       }
     } catch (err) {
-      this.logger.warn(`Webhook delivery failed: sub=${subscriptionId} event=${event}`, err);
+      this.logger.warn(`Webhook delivery failed: sub=${subscriptionId} event=${deliveryEvent}`, err);
       await this.prisma.webhookDelivery.update({
         where: { id: deliveryId },
         data: {
@@ -181,7 +187,7 @@ export class WebhooksService {
       },
     });
 
-    this.logger.log(`Webhook delivered: sub=${subscriptionId} event=${event} status=${httpStatus}`);
+    this.logger.log(`Webhook delivered: sub=${subscriptionId} event=${deliveryEvent} status=${httpStatus}`);
   }
 
   async getDeliveries(subscriptionId: string, tenantId: string) {
@@ -195,3 +201,5 @@ export class WebhooksService {
     });
   }
 }
+
+

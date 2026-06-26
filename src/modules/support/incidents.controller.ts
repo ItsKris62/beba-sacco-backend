@@ -1,10 +1,14 @@
 import { Controller, Get, Post, Patch, Param, Body, ParseUUIDPipe, Query } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { IncidentService } from './incident.service';
 import { CreateIncidentDto, LinkTicketsDto } from './dto/support.dto';
 import type { Tenant } from '@prisma/client';
 
+@ApiTags('Support Incidents')
+@ApiBearerAuth()
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller('admin/incidents')
 @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
 export class IncidentsController {

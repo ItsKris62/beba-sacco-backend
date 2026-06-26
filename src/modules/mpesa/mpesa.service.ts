@@ -3,14 +3,15 @@ import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { MpesaTxType, MpesaTriggerSource, TransactionStatus } from '@prisma/client';
+import { Prisma, MpesaTxType, MpesaTriggerSource, TransactionStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
 import { MpesaException, MpesaConfigException } from './exceptions/mpesa.exceptions';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
-import { maskPhone, buildMpesaRef } from './utils/mpesa.utils';
+import { isStkCallback, isC2bCallback, isB2cCallback } from './dto/mpesa-callback.dto';
+import { maskPhone, buildMpesaRef, parseDarajaTimestamp } from './utils/mpesa.utils';
 import { AuditService } from '../audit/audit.service';
 import {
   MpesaCallbackJobPayload,
@@ -358,7 +359,7 @@ export class MpesaService {
         delay: 30 * 60 * 1000,
         jobId: `b2c-timeout:${darajaResp.ConversationID}`,
         removeOnComplete: true,
-        removeOnFail: false,
+        removeOnFail: { age: 86400, count: 50 },
       },
     );
 
@@ -377,23 +378,102 @@ export class MpesaService {
     tenantId = 'resolve-in-processor',
     correlationId?: string,
   ): Promise<void> {
+    const mpesaTransactionId = await this.persistCallbackPayload(payload, callbackType, tenantId);
     const jobId = `${callbackType.toLowerCase().replace('_', '-')}-${uniqueId}`;
+
     await this.callbackQueue.add(
       'process-callback',
-      { tenantId, correlationId, callbackPayload: payload, callbackType },
+      { tenantId, correlationId, mpesaTransactionId, callbackType },
       {
         jobId,
         attempts: 3,
         backoff: { type: 'exponential', delay: 3000 },
-        removeOnComplete: { count: 2000 },
-        removeOnFail: false,
+        removeOnComplete: { age: 3600, count: 200 },
+        removeOnFail: { age: 604800, count: 100 },
       },
     );
     this.logger.log(
-      `JOB_ENQUEUED queue=${QUEUE_NAMES.MPESA_CALLBACK} type=${callbackType} jobId=${jobId} tenant=${tenantId} correlation=${correlationId ?? ''}`,
+      `JOB_ENQUEUED queue=${QUEUE_NAMES.MPESA_CALLBACK} type=${callbackType} jobId=${jobId} tenant=${tenantId} mpesaTransactionId=${mpesaTransactionId} correlation=${correlationId ?? ''}`,
     );
   }
 
+  private async persistCallbackPayload(
+    payload: Record<string, unknown>,
+    callbackType: MpesaCallbackJobPayload['callbackType'],
+    tenantId: string,
+  ): Promise<string> {
+    const rawPayload = payload as Prisma.InputJsonValue;
+
+    if (isStkCallback(payload)) {
+      const checkoutRequestId = payload.Body.stkCallback.CheckoutRequestID;
+      const transaction = await this.prisma.mpesaTransaction.findUnique({
+        where: { checkoutRequestId },
+        select: { id: true },
+      });
+
+      if (!transaction) {
+        throw new Error(`STK callback has no MpesaTransaction for CheckoutRequestID=${checkoutRequestId}`);
+      }
+
+      await this.prisma.mpesaTransaction.update({
+        where: { id: transaction.id },
+        data: { callbackPayload: rawPayload },
+      });
+      return transaction.id;
+    }
+
+    if (isB2cCallback(payload)) {
+      const { ConversationID, OriginatorConversationID } = payload.Result;
+      const transaction = await this.prisma.mpesaTransaction.findFirst({
+        where: {
+          OR: [
+            { conversationId: ConversationID },
+            { originatorConversationId: OriginatorConversationID },
+          ],
+        },
+        select: { id: true },
+      });
+
+      if (!transaction) {
+        throw new Error(`B2C callback has no MpesaTransaction for ConversationID=${ConversationID}`);
+      }
+
+      await this.prisma.mpesaTransaction.update({
+        where: { id: transaction.id },
+        data: { callbackPayload: rawPayload },
+      });
+      return transaction.id;
+    }
+
+    if (isC2bCallback(payload)) {
+      const amount = new Decimal(payload.TransAmount);
+      const reference = buildMpesaRef.c2b(payload.TransID);
+      const transaction = await this.prisma.mpesaTransaction.upsert({
+        where: { reference },
+        create: {
+          tenantId: tenantId && tenantId !== 'resolve-in-processor' ? tenantId : 'UNRESOLVED',
+          type: MpesaTxType.C2B,
+          triggerSource: MpesaTriggerSource.MEMBER,
+          phoneNumber: payload.MSISDN,
+          amount: amount.toDecimalPlaces(4).toString(),
+          accountReference: payload.BillRefNumber,
+          mpesaReceiptNumber: payload.TransID,
+          reference,
+          status: TransactionStatus.PENDING,
+          callbackPayload: rawPayload,
+          transactionDate: parseDarajaTimestamp(payload.TransTime),
+        },
+        update: {
+          callbackPayload: rawPayload,
+          transactionDate: parseDarajaTimestamp(payload.TransTime),
+        },
+        select: { id: true },
+      });
+      return transaction.id;
+    }
+
+    throw new Error(`Unsupported M-Pesa callback structure for type=${callbackType}`);
+  }
   // ─── DLQ admin: requeue a failed callback job ───────────────────────────
 
   /**
@@ -414,8 +494,8 @@ export class MpesaService {
       jobId: newJobId,
       attempts: 3,
       backoff: { type: 'exponential', delay: 3000 },
-      removeOnComplete: { count: 2000 },
-      removeOnFail: false,
+      removeOnComplete: { age: 3600, count: 200 },
+      removeOnFail: { age: 604800, count: 100 },
     });
 
     // Remove from DLQ after successful re-enqueue
@@ -551,3 +631,6 @@ export class MpesaService {
     return secondsUntilMidnightEAT();
   }
 }
+
+
+

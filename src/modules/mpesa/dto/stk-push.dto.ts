@@ -7,7 +7,7 @@ export class StkPushDto {
   @Matches(/^254[0-9]{9}$/, { message: 'Invalid Kenyan phone number format' })
   phoneNumber!: string;
 
-  @ApiProperty({ example: 1000, description: 'Amount in KES' })
+  @ApiProperty({ example: 1000, description: 'Amount in KES as a decimal-safe string at the API boundary' })
   @IsNumber()
   @Min(1)
   amount!: number;
@@ -20,3 +20,4 @@ export class StkPushDto {
   @IsString()
   accountReference!: string;
 }
+

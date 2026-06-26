@@ -156,7 +156,7 @@ export class StatementService {
               where: {
                 loanId: { in: loanIds },
                 tenantId,
-                status: 'CONFIRMED',
+                status: 'PAID',
                 paymentDate: { gte: from, lte: to },
               },
               orderBy: { paymentDate: 'asc' },
@@ -165,7 +165,7 @@ export class StatementService {
               where: {
                 loanId: { in: loanIds },
                 tenantId,
-                status: 'CONFIRMED',
+                status: 'PAID',
                 paymentDate: { lt: from },
               },
             }),
@@ -542,3 +542,4 @@ export class StatementService {
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 }
+

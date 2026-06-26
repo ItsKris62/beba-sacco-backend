@@ -1,5 +1,5 @@
 import { Controller, Get, Patch, Body, UseGuards, Req } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { TenantsService } from './tenants.service';
 import { UpdateTenantSettingsDto } from './dto/update-tenant-settings.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt.guard';
@@ -10,6 +10,7 @@ import { UserRole } from '@prisma/client';
 @ApiTags('Tenants')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RBACGuard)
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller('api/v1/tenants')
 export class TenantsController {
   constructor(private readonly tenantsService: TenantsService) {}

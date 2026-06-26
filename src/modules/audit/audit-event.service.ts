@@ -11,6 +11,12 @@ export type CreateAuditEventInput = Omit<AuditPersistJobPayload, 'correlationId'
   success?: boolean;
 };
 
+const AUDIT_MAX_FIELD_BYTES = 4096;
+const AUDIT_MAX_STRING_BYTES = 1024;
+const AUDIT_MAX_DEPTH = 4;
+const AUDIT_MAX_ARRAY_ITEMS = 25;
+const AUDIT_MAX_OBJECT_KEYS = 50;
+
 @Injectable()
 export class AuditEventService {
   private readonly logger = new Logger(AuditEventService.name);
@@ -48,8 +54,8 @@ export class AuditEventService {
         jobId: `audit:${payload.tenantId}:${payload.correlationId}:${payload.action}:${Date.now()}`,
         attempts: 5,
         backoff: { type: 'exponential', delay: 1000 },
-        removeOnComplete: { count: 5000 },
-        removeOnFail: false,
+        removeOnComplete: { age: 86400, count: 1000 },
+        removeOnFail: { age: 604800, count: 500 },
       });
       this.logger.debug(
         `JOB_ENQUEUED queue=${QUEUE_NAMES.AUDIT_PERSIST} action=${payload.action} correlation=${payload.correlationId}`,
@@ -72,6 +78,84 @@ export class AuditEventService {
     if (value == null) {
       return null;
     }
-    return this.masker.maskPII(value);
+    return this.boundRecord(this.masker.maskPII(value));
+  }
+
+  private boundRecord(value: Record<string, unknown>): Record<string, unknown> {
+    const bounded = this.boundValue(value, 0);
+    const record = this.isRecord(bounded) ? bounded : { value: bounded };
+    return this.truncateToBytes(record, AUDIT_MAX_FIELD_BYTES);
+  }
+
+  private boundValue(value: unknown, depth: number): unknown {
+    if (value == null || typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      return this.truncateString(value, AUDIT_MAX_STRING_BYTES);
+    }
+
+    if (depth >= AUDIT_MAX_DEPTH) {
+      return '[Truncated: max audit depth reached]';
+    }
+
+    if (Array.isArray(value)) {
+      const items = value
+        .slice(0, AUDIT_MAX_ARRAY_ITEMS)
+        .map((item) => this.boundValue(item, depth + 1));
+      if (value.length > AUDIT_MAX_ARRAY_ITEMS) {
+        items.push(`[Truncated: ${value.length - AUDIT_MAX_ARRAY_ITEMS} additional items]`);
+      }
+      return items;
+    }
+
+    if (this.isRecord(value)) {
+      const output: Record<string, unknown> = {};
+      const entries = Object.entries(value).slice(0, AUDIT_MAX_OBJECT_KEYS);
+      for (const [key, child] of entries) {
+        output[key] = this.boundValue(child, depth + 1);
+      }
+      const omitted = Object.keys(value).length - entries.length;
+      if (omitted > 0) {
+        output.__truncatedKeys = omitted;
+      }
+      return output;
+    }
+
+    return this.truncateString(String(value), AUDIT_MAX_STRING_BYTES);
+  }
+
+  private truncateToBytes(
+    value: Record<string, unknown>,
+    maxBytes: number,
+  ): Record<string, unknown> {
+    if (Buffer.byteLength(JSON.stringify(value), 'utf8') <= maxBytes) {
+      return value;
+    }
+
+    return {
+      __truncated: true,
+      summary: this.truncateString(JSON.stringify(value), maxBytes - 128),
+    };
+  }
+
+  private truncateString(value: string, maxBytes: number): string {
+    if (Buffer.byteLength(value, 'utf8') <= maxBytes) {
+      return value;
+    }
+
+    let end = Math.min(value.length, maxBytes);
+    while (end > 0 && Buffer.byteLength(value.slice(0, end), 'utf8') > maxBytes) {
+      end -= 1;
+    }
+    return `${value.slice(0, end)}...[truncated]`;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 }
+
+
+

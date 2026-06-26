@@ -51,7 +51,7 @@ export class GuarantorLookupService {
         user: { select: { firstName: true, lastName: true } },
         accounts: {
           where: { tenantId, isActive: true, accountType },
-          select: { balance: true, lockedBalance: true },
+          select: { balance: true, lockedBalance: true, frozenSavings: true },
         },
       },
     });
@@ -61,7 +61,7 @@ export class GuarantorLookupService {
     }
     const availableBalance = member.accounts.reduce((sum, account) => {
       const balance = new Decimal(account.balance.toString());
-      const locked = new Decimal(account.lockedBalance?.toString() ?? '0');
+      const locked = new Decimal(account.lockedBalance?.toString() ?? '0').plus(new Decimal(account.frozenSavings?.toString() ?? '0'));
       return sum.plus(balance.minus(locked));
     }, new Decimal(0));
     const required = new Decimal(requiredAmount ?? 0).toDecimalPlaces(4);
@@ -144,7 +144,7 @@ export class GuarantorLookupService {
         user: { select: { firstName: true, lastName: true } },
         accounts: {
           where: { tenantId, isActive: true, accountType },
-          select: { balance: true, lockedBalance: true },
+          select: { balance: true, lockedBalance: true, frozenSavings: true },
         },
       },
     });
@@ -152,7 +152,7 @@ export class GuarantorLookupService {
     return members.map((member) => {
       const availableBalance = member.accounts.reduce((sum, account) => {
         const balance = new Decimal(account.balance.toString());
-        const locked = new Decimal(account.lockedBalance?.toString() ?? '0');
+        const locked = new Decimal(account.lockedBalance?.toString() ?? '0').plus(new Decimal(account.frozenSavings?.toString() ?? '0'));
         return sum.plus(balance.minus(locked));
       }, new Decimal(0));
 
@@ -205,3 +205,4 @@ export class GuarantorLookupService {
     return `${value.slice(0, 2)}***${value.slice(-3)}`;
   }
 }
+

@@ -114,7 +114,7 @@ export class GuarantorRecoveryProcessor extends WorkerHost {
         attempts: 3,
         backoff: { type: 'exponential', delay: 10000 },
         removeOnComplete: { count: 500 },
-        removeOnFail: false,
+        removeOnFail: { age: 86400, count: 50 },
       },
     );
     await this.audit(payload.tenantId, 'GUARANTOR_RECOVERY.DEBIT_SCHEDULED', payload.loanId, {

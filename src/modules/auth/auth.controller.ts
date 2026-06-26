@@ -13,14 +13,7 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiResponse,
-  ApiBearerAuth,
-  ApiSecurity,
-  ApiHeader,
-} from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiSecurity, ApiHeader } from '@nestjs/swagger';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
@@ -68,6 +61,7 @@ interface TenantRequest extends Request {
 @ApiTags('Authentication')
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier', required: true })
+@ApiBearerAuth()
 @Controller('auth')
 export class AuthController {
   private readonly logger = new Logger(AuthController.name);

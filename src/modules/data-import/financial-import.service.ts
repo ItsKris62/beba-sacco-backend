@@ -332,8 +332,9 @@ export class FinancialImportService {
         dayNumber: row.dayNumber,
         amountPaid: new Decimal(row.amountPaid),
         paymentDate: new Date(row.paymentDate),
+        dueDate: new Date(row.paymentDate),
         method: row.method ?? 'CASH',
-        status: 'CONFIRMED',
+        status: 'PAID',
         recordedBy,
         tenantId,
       },
@@ -598,3 +599,4 @@ export class FinancialImportService {
     }
   }
 }
+

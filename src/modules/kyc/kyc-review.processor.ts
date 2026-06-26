@@ -217,7 +217,7 @@ export class KycReviewProcessor extends WorkerHost {
             _error: error.message,
             _failedAt: new Date().toISOString(),
           } as unknown as KycReviewJobPayload,
-          { removeOnComplete: false },
+          { removeOnComplete: { age: 7200, count: 100 } },
         )
         .catch((err: unknown) =>
           this.logger.error('Failed to enqueue to KYC DLQ', err),

@@ -1,4 +1,4 @@
-﻿import {
+import {
   Controller,
   Get,
   Post,
@@ -22,6 +22,7 @@ import {
   ApiResponse,
   ApiHeader,
   ApiParam,
+  ApiExcludeEndpoint,
 } from '@nestjs/swagger';
 import { RawBodyRequest } from '@nestjs/common';
 import { Request } from 'express';
@@ -43,7 +44,7 @@ import { MpesaExceptionFilter } from './filters/mpesa-exception.filter';
 import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
 import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 
-// â”€â”€â”€ Response shapes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Response shapes ──────────────────────────────────────────────────────────
 
 class DepositInitiatedResponse {
   @ApiProperty({ example: '29115-34620561-1' })
@@ -60,17 +61,21 @@ class DepositInitiatedResponse {
 }
 
 class DisbursementQueuedResponse {
+  @ApiProperty({ example: 'loan-disburse:tenant:loan-id' })
   jobId!: string;
 }
 
 class DlqRequeueResponse {
+  @ApiProperty({ example: true })
   requeued!: boolean;
+
+  @ApiProperty({ example: 'dlq-replay-original-1710000000000' })
   jobId!: string;
 }
 
 const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
 @ApiTags('M-Pesa')
 @ApiBearerAuth()
@@ -96,19 +101,19 @@ export class MpesaController {
     if (!this.webhookSecret) {
       if (this.isProduction) {
         this.logger.warn(
-          'âš ï¸  MPESA_WEBHOOK_SECRET is not set in production. ' +
+          '⚠️  MPESA_WEBHOOK_SECRET is not set in production. ' +
             'All incoming Daraja callbacks will be rejected until this is configured.',
         );
       } else {
         this.logger.warn(
-          'MPESA_WEBHOOK_SECRET not configured â€” HMAC signature validation is DISABLED. ' +
+          'MPESA_WEBHOOK_SECRET not configured — HMAC signature validation is DISABLED. ' +
             'Safe for sandbox/staging only.',
         );
       }
     }
   }
 
-  // â”€â”€â”€ Member deposit / repayment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Member deposit / repayment ──────────────────────────────────────────
 
   /**
    * POST /api/mpesa/members/deposit
@@ -137,7 +142,7 @@ export class MpesaController {
   @ApiResponse({ status: 403, description: 'Insufficient role' })
   @ApiResponse({
     status: 503,
-    description: 'M-Pesa temporarily unavailable â€” retryable',
+    description: 'M-Pesa temporarily unavailable — retryable',
     schema: {
       properties: {
         statusCode: { type: 'number' },
@@ -170,14 +175,14 @@ export class MpesaController {
     );
   }
 
-  // â”€â”€â”€ Admin: queue B2C disbursement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Admin: queue B2C disbursement ──────────────────────────────────────
 
   /**
    * POST /api/mpesa/loans/:loanId/disburse
    *
    * Queues a B2C loan disbursement. Normally triggered by the loan-approval
    * workflow; this endpoint lets officers manually trigger after a failure.
-   * The job is idempotent (same loanId â†’ same BullMQ jobId).
+   * The job is idempotent (same loanId → same BullMQ jobId).
    */
   @Post('loans/:loanId/disburse')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
@@ -223,13 +228,13 @@ export class MpesaController {
     return this.mpesaService.getTransactionStatus(checkoutRequestId, actor.id, tenant.id);
   }
 
-  // â”€â”€â”€ Admin: replay a DLQ job â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Admin: replay a DLQ job ─────────────────────────────────────────────
 
   /**
    * POST /api/mpesa/admin/dlq/:jobId/requeue
    *
    * Moves a failed callback job from MPESA_CALLBACK_DLQ back into the live
-   * mpesa.callback queue for replay. Use only after manual investigation â€”
+   * mpesa.callback queue for replay. Use only after manual investigation —
    * DLQ jobs failed for a reason and blind replays can cause double-posting.
    *
    * Access: TENANT_ADMIN, MANAGER only.
@@ -253,7 +258,7 @@ export class MpesaController {
     return this.mpesaService.requeueFromDlq(jobId);
   }
 
-  // â”€â”€â”€ Unified Daraja callback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Unified Daraja callback ──────────────────────────────────────────────
 
   /**
    * POST /api/mpesa/callback
@@ -268,6 +273,7 @@ export class MpesaController {
   @Throttle({ global: { limit: 10, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Unified Safaricom Daraja callback (STK / C2B / B2C)' })
+  @ApiExcludeEndpoint()
   @ApiHeader({ name: 'X-Mpesa-Signature', required: false, description: 'HMAC-SHA256 over raw callback body' })
   @ApiHeader({ name: 'X-Mpesa-Timestamp', required: false, description: 'Callback timestamp used for replay protection' })
   @ApiResponse({
@@ -301,7 +307,7 @@ export class MpesaController {
    * Behavior when MPESA_WEBHOOK_SECRET is absent:
    *  - Non-production: logs a warning and skips validation (sandbox safe).
    *  - Production: throws ServiceUnavailableException so Daraja retries and
-   *    operators are alerted immediately â€” no unvalidated webhooks go through.
+   *    operators are alerted immediately — no unvalidated webhooks go through.
    */
   private async acceptCallbackAsync(params: {
     rawBody?: Buffer;
@@ -355,7 +361,7 @@ export class MpesaController {
             'Set the environment variable and redeploy before processing live callbacks.',
         );
       }
-      // Non-production: permissive â€” sandbox callbacks have no secret
+      // Non-production: permissive — sandbox callbacks have no secret
       return true;
     }
 
@@ -374,3 +380,5 @@ export class MpesaController {
     return crypto.timingSafeEqual(expectedBuf, sigBuf);
   }
 }
+
+

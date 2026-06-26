@@ -336,7 +336,7 @@ export class LoanRepaymentService {
   ): Promise<void> {
     const rows = await tx.loanRepayment.findMany({
       where: { tenantId, loanId, status: { in: ['PENDING', 'PARTIAL'] } },
-      orderBy: [{ paymentDate: 'asc' }, { dayNumber: 'asc' }],
+      orderBy: [{ dueDate: 'asc' }, { dayNumber: 'asc' }],
     });
 
     let penalty = allocation.penalty;
@@ -444,3 +444,4 @@ export class LoanRepaymentService {
     return transaction.id;
   }
 }
+

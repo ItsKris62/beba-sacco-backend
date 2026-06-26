@@ -24,7 +24,7 @@ interface RecoveryAllocation {
   account?: {
     id: string;
     balance: Prisma.Decimal;
-    lockedBalance: Prisma.Decimal;
+    frozenSavings: Prisma.Decimal;
   };
 }
 
@@ -85,7 +85,7 @@ export class LoanRecoveryService {
         attempts: 3,
         backoff: { type: 'exponential', delay: 10000 },
         removeOnComplete: { count: 500 },
-        removeOnFail: false,
+        removeOnFail: { age: 86400, count: 50 },
       },
     );
 
@@ -163,7 +163,7 @@ export class LoanRecoveryService {
           where: { id: account.id, tenantId, isActive: true },
           data: {
             balance: balanceAfter.toString(),
-            lockedBalance: { decrement: amount },
+            frozenSavings: { decrement: amount },
             version: { increment: 1 },
           },
         });
@@ -253,7 +253,7 @@ export class LoanRecoveryService {
     const guarantorMemberIds = guarantors.map((guarantor) => guarantor.memberId);
     const accounts = await tx.account.findMany({
       where: { tenantId, memberId: { in: guarantorMemberIds }, accountType, isActive: true },
-      select: { id: true, memberId: true, balance: true, lockedBalance: true },
+      select: { id: true, memberId: true, balance: true, frozenSavings: true },
     });
     const accountMap = new Map(accounts.map((account) => [account.memberId, account]));
 
@@ -268,7 +268,7 @@ export class LoanRecoveryService {
           guaranteeCapacity = guaranteeCapacity.times(ratio).toDecimalPlaces(4);
         }
         const accountCapacity = account
-          ? Decimal.min(new Decimal(account.balance.toString()), new Decimal(account.lockedBalance.toString()))
+          ? Decimal.min(new Decimal(account.balance.toString()), new Decimal(account.frozenSavings.toString()))
           : new Decimal(0);
 
         return {
@@ -346,3 +346,4 @@ export class LoanRecoveryService {
     });
   }
 }
+

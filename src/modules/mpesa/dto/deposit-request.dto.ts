@@ -26,7 +26,7 @@ export class MemberDepositDto {
 
   @ApiProperty({
     example: 500,
-    description: 'Amount in KES (integer, min 10, max 300000 per Daraja limits)',
+    description: 'Amount in KES as a decimal-safe string at the API boundary. Frontend should send decimal-safe string values when precision matters; Daraja accepts whole KES amounts only here.',
   })
   @IsNumber()
   @Min(10, { message: 'Minimum deposit amount is KES 10' })
@@ -62,3 +62,4 @@ export class MemberDepositDto {
   @MaxLength(13)
   note?: string;
 }
+

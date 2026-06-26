@@ -9,6 +9,9 @@ import type { Express, Request, Response, NextFunction } from 'express';
 
 import { QUEUE_NAMES } from './queue.constants';
 
+const ENABLE_BULL_BOARD_QUEUES =
+  process.env.NODE_ENV !== 'production' || process.env.ENABLE_BULL_BOARD === 'true';
+
 // ── Basic-auth middleware ─────────────────────────────────────────────────────
 // Constant-time string comparison prevents timing attacks on the credential check.
 
@@ -121,21 +124,23 @@ class BullBoardService implements OnModuleInit {
 // QueueModule — BullMQ queue instances are lightweight and share-safe.
 
 @Module({
-  imports: [
-    BullModule.registerQueue(
-      { name: QUEUE_NAMES.KYC_REVIEW },
-      { name: QUEUE_NAMES.KYC_REVIEW_DLQ },
-      { name: QUEUE_NAMES.EMAIL },
-      { name: QUEUE_NAMES.SMS },
-      { name: QUEUE_NAMES.AUDIT_LOG },
-      { name: QUEUE_NAMES.MPESA_CALLBACK },
-      { name: QUEUE_NAMES.MPESA_CALLBACK_DLQ },
-      { name: QUEUE_NAMES.MPESA_DISBURSEMENT },
-      { name: QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ },
-      { name: QUEUE_NAMES.DOCUMENT_CLEANUP },
-      { name: QUEUE_NAMES.LOAN_DISBURSE },
-    ),
-  ],
-  providers: [BullBoardService],
+  imports: ENABLE_BULL_BOARD_QUEUES
+    ? [
+        BullModule.registerQueue(
+          { name: QUEUE_NAMES.KYC_REVIEW },
+          { name: QUEUE_NAMES.KYC_REVIEW_DLQ },
+          { name: QUEUE_NAMES.EMAIL },
+          { name: QUEUE_NAMES.SMS },
+          { name: QUEUE_NAMES.AUDIT_LOG },
+          { name: QUEUE_NAMES.MPESA_CALLBACK },
+          { name: QUEUE_NAMES.MPESA_CALLBACK_DLQ },
+          { name: QUEUE_NAMES.MPESA_DISBURSEMENT },
+          { name: QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ },
+          { name: QUEUE_NAMES.DOCUMENT_CLEANUP },
+          { name: QUEUE_NAMES.LOAN_DISBURSE },
+        ),
+      ]
+    : [],
+  providers: ENABLE_BULL_BOARD_QUEUES ? [BullBoardService] : [],
 })
 export class BullBoardModule {}

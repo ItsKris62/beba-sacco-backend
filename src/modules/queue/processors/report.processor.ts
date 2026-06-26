@@ -46,7 +46,7 @@ export class ReportProcessor extends WorkerHost {
     if (!job) return;
     const payload = job.data;
     await this.reports.markFailed(payload.jobId, payload.tenantId, error.message);
-    await this.dlq.add('failed', payload, { attempts: 1, removeOnComplete: 1000, removeOnFail: false });
+    await this.dlq.add('failed', payload, { attempts: 1, removeOnComplete: { age: 604800, count: 50 }, removeOnFail: { age: 2592000, count: 50 } });
     this.logger.error(`Report job ${payload.jobId} failed: ${error.message}`, error.stack);
   }
 }

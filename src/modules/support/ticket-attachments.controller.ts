@@ -1,4 +1,5 @@
 import { Controller, Post, Param, ParseUUIDPipe, Body } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupportService } from './support.service';
@@ -6,6 +7,9 @@ import { AuthActor } from './support-ticket.types';
 import { RequestPresignDto } from './dto/support.dto';
 import type { Tenant } from '@prisma/client';
 
+@ApiTags('Support Attachments')
+@ApiBearerAuth()
+@ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
 @Controller('support/tickets/:ticketId/attachments')
 export class TicketAttachmentsController {
   constructor(private readonly supportService: SupportService) {}

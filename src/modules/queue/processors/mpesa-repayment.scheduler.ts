@@ -103,11 +103,23 @@ export class MpesaRepaymentScheduler implements OnApplicationShutdown {
 
     this.isRunning = true;
     const startedAt = Date.now();
+    let runLockKey: string | null = null;
+    let runLockAcquired = false;
 
     // Derive EAT "today" from the current moment (UTC+3 = Africa/Nairobi)
     const nowEat = new Date(Date.now() + EAT_OFFSET_MS);
     const pad = (n: number) => String(n).padStart(2, '0');
     const todayEat = `${nowEat.getUTCFullYear()}-${pad(nowEat.getUTCMonth() + 1)}-${pad(nowEat.getUTCDate())}`;
+
+    runLockKey = `mpesa:repayment-scheduler:run:${todayEat}`;
+    runLockAcquired = await this.redis.set(runLockKey, String(Date.now()), 2 * 60 * 60, true);
+    if (!runLockAcquired) {
+      this.logger.warn(
+        `[Repayment Scheduler] Run lock already exists for ${todayEat} - skipping overlapping invocation`,
+      );
+      this.isRunning = false;
+      return;
+    }
 
     this.logger.log(`[Repayment Scheduler] Starting run for EAT date ${todayEat}`);
 
@@ -132,6 +144,9 @@ export class MpesaRepaymentScheduler implements OnApplicationShutdown {
     } finally {
       metrics.durationMs = Date.now() - startedAt;
       this.lastMetrics = metrics;
+      if (runLockAcquired && runLockKey) {
+        await this.redis.del(runLockKey).catch(() => {});
+      }
       this.isRunning = false;
 
       this.logger.log(
@@ -212,6 +227,24 @@ export class MpesaRepaymentScheduler implements OnApplicationShutdown {
       return;
     }
 
+    // Build idempotent jobId before touching rate-limit counters.
+    // Format: stk-repay-{loanId}-{YYYYMMDD}
+    // The date suffix ensures a new job is created each day for the same loan,
+    // while preventing duplicate enqueues within the same day (Layer 1).
+    const dateSuffix = todayEat.replace(/-/g, '');
+    const jobId = `stk-repay-${loanId}-${dateSuffix}`;
+
+    const existingJob = await this.repaymentQueue.getJob(jobId);
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (['waiting', 'active', 'delayed', 'prioritized', 'paused'].includes(state)) {
+        metrics.jobsSkipped++;
+        this.logger.log(
+          `[Repayment Scheduler] jobId ${jobId} already ${state} - skipping redundant enqueue`,
+        );
+        return;
+      }
+    }
     // ── Redis rate-limit check (INCR + EXPIRE) ────────────────────────────
     // Key: stk:limit:{memberId} – shared with MpesaService.initiateDeposit()
     // so member-initiated pushes count toward the same daily cap.
@@ -229,12 +262,6 @@ export class MpesaRepaymentScheduler implements OnApplicationShutdown {
       return;
     }
 
-    // ── Build idempotent jobId ─────────────────────────────────────────────
-    // Format: stk-repay-{loanId}-{YYYYMMDD}
-    // The date suffix ensures a new job is created each day for the same loan,
-    // while preventing duplicate enqueues within the same day (Layer 1).
-    const dateSuffix = todayEat.replace(/-/g, '');
-    const jobId = `stk-repay-${loanId}-${dateSuffix}`;
 
     // ── Build STK Push payload ─────────────────────────────────────────────
     const amount = Math.ceil(
@@ -268,7 +295,7 @@ export class MpesaRepaymentScheduler implements OnApplicationShutdown {
           // This prevents the DLQ accumulating stale repayment jobs across days.
           attempts: 1,
           removeOnComplete: { count: 500 },
-          removeOnFail: false,
+          removeOnFail: { age: 86400, count: 50 },
         },
       );
 
@@ -349,3 +376,4 @@ export class MpesaRepaymentScheduler implements OnApplicationShutdown {
     return this.lastMetrics;
   }
 }
+

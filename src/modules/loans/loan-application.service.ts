@@ -184,7 +184,7 @@ export class LoanApplicationService {
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
         removeOnComplete: 500,
-        removeOnFail: false,
+        removeOnFail: { age: 86400, count: 50 },
       })
       .catch((e: unknown) =>
         this.logger.error(
@@ -237,7 +237,7 @@ export class LoanApplicationService {
     // Check accounts
     const accounts = await this.prisma.account.findMany({
       where: { memberId, tenantId, isActive: true },
-      select: { accountType: true, balance: true, lockedBalance: true },
+      select: { accountType: true, balance: true, lockedBalance: true, frozenSavings: true },
     });
 
     const hasFosa = accounts.some((a) => a.accountType === 'FOSA');
@@ -249,10 +249,10 @@ export class LoanApplicationService {
 
     const fosaBalance = accounts
       .filter((a) => a.accountType === 'FOSA')
-      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString()).minus(new Decimal(a.lockedBalance?.toString() ?? '0'))), new Decimal(0));
+      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString()).minus(new Decimal(a.lockedBalance?.toString() ?? '0')).minus(new Decimal(a.frozenSavings?.toString() ?? '0'))), new Decimal(0));
     const bosaBalance = accounts
       .filter((a) => a.accountType === 'BOSA')
-      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString()).minus(new Decimal(a.lockedBalance?.toString() ?? '0'))), new Decimal(0));
+      .reduce((sum, a) => sum.plus(new Decimal(a.balance.toString()).minus(new Decimal(a.lockedBalance?.toString() ?? '0')).minus(new Decimal(a.frozenSavings?.toString() ?? '0'))), new Decimal(0));
 
     // Check blacklist (placeholder — MemberBlacklist model in schema additions)
     // TODO: Uncomment after migrating schema additions
@@ -353,7 +353,7 @@ export class LoanApplicationService {
     // Check FOSA
     const fosaAccount = await this.prisma.account.findFirst({
       where: { memberId: guarantorMemberId, tenantId, accountType: 'FOSA', isActive: true },
-      select: { id: true, balance: true, lockedBalance: true },
+      select: { id: true, balance: true, lockedBalance: true, frozenSavings: true },
     });
     if (!fosaAccount) {
       return { eligible: false, reason: 'Guarantor has no active FOSA account' };
@@ -361,7 +361,8 @@ export class LoanApplicationService {
 
     const fosaBalance = new Decimal(fosaAccount.balance.toString());
     const lockedBalance = new Decimal(fosaAccount.lockedBalance?.toString() ?? '0');
-    const availableBalance = fosaBalance.minus(lockedBalance);
+    const frozenSavings = new Decimal(fosaAccount.frozenSavings?.toString() ?? '0');
+    const availableBalance = fosaBalance.minus(lockedBalance).minus(frozenSavings);
 
     if (availableBalance.lessThan(proposedAmount)) {
       return {
@@ -561,7 +562,7 @@ export class LoanApplicationService {
 
         const accounts = await tx.account.findMany({
           where: { memberId, tenantId, isActive: true },
-          select: { accountType: true, balance: true, lockedBalance: true },
+          select: { accountType: true, balance: true, lockedBalance: true, frozenSavings: true },
         });
 
         const fosaBalance = this.sumAvailableSavings(accounts, AccountType.FOSA);
@@ -758,7 +759,7 @@ export class LoanApplicationService {
           .add(
             'guarantor-expiry-check',
             { tenantId, loanId: txResult.loan.id, guarantorId: guarantor.guarantorId },
-            { delay: 72 * 60 * 60 * 1000, attempts: 3, removeOnComplete: 1000, removeOnFail: false },
+            { delay: 72 * 60 * 60 * 1000, attempts: 3, removeOnComplete: 1000, removeOnFail: { age: 86400, count: 50 } },
           )
           .catch((e: unknown) => this.logger.error('Failed to enqueue guarantor expiry', e));
 
@@ -815,6 +816,7 @@ export class LoanApplicationService {
       accountType: AccountType;
       balance: { toString(): string };
       lockedBalance: { toString(): string } | null;
+      frozenSavings: { toString(): string } | null;
     }>,
     accountType?: AccountType,
   ): Decimal {
@@ -823,7 +825,8 @@ export class LoanApplicationService {
       .reduce((sum, account) => {
         const balance = new Decimal(account.balance.toString());
         const lockedBalance = new Decimal(account.lockedBalance?.toString() ?? '0');
-        return sum.plus(balance.minus(lockedBalance));
+        const frozenSavings = new Decimal(account.frozenSavings?.toString() ?? '0');
+        return sum.plus(balance.minus(lockedBalance).minus(frozenSavings));
       }, new Decimal(0));
   }
 
@@ -893,14 +896,14 @@ export class LoanApplicationService {
 
     const fosaAccount = await tx.account.findFirst({
       where: { memberId: guarantorMemberId, tenantId, accountType, isActive: true },
-      select: { id: true, balance: true, lockedBalance: true },
+      select: { id: true, balance: true, lockedBalance: true, frozenSavings: true },
     });
     if (!fosaAccount) {
       return { eligible: false, reason: `Guarantor has no active ${accountType} account` };
     }
 
     const availableBalance = new Decimal(fosaAccount.balance.toString()).minus(
-      new Decimal(fosaAccount.lockedBalance?.toString() ?? '0'),
+      new Decimal(fosaAccount.lockedBalance?.toString() ?? '0').plus(new Decimal(fosaAccount.frozenSavings?.toString() ?? '0')),
     );
     if (availableBalance.lessThan(proposedAmount)) {
       return {
@@ -1180,7 +1183,7 @@ export class LoanApplicationService {
         .add(
           'guarantor-expiry-check',
           { tenantId, loanId, guarantorId: createdGuarantor.id },
-          { delay: consentExpiryHours * 60 * 60 * 1000, attempts: 3, removeOnComplete: 1000, removeOnFail: false },
+          { delay: consentExpiryHours * 60 * 60 * 1000, attempts: 3, removeOnComplete: 1000, removeOnFail: { age: 86400, count: 50 } },
         )
         .catch((e: unknown) => this.logger.error('Failed to enqueue guarantor expiry', e));
     }
@@ -1485,7 +1488,7 @@ export class LoanApplicationService {
           attempts: 3,
           backoff: { type: 'exponential', delay: 5000 },
           removeOnComplete: 1000,
-          removeOnFail: false,
+          removeOnFail: { age: 86400, count: 50 },
         },
       );
 
@@ -1901,3 +1904,4 @@ export class LoanApplicationService {
     return numerator.div(denominator);
   }
 }
+

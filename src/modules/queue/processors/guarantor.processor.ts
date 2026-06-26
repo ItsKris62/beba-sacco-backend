@@ -51,7 +51,7 @@ export class GuarantorProcessor extends WorkerHost {
     await this.dlq.add('failed', job.data, {
       attempts: 1,
       removeOnComplete: 1000,
-      removeOnFail: false,
+      removeOnFail: { age: 86400, count: 50 },
     });
     this.logger.error(`LoanGuarantor validation failed job=${job.id}: ${error.message}`, error.stack);
   }

@@ -19,36 +19,52 @@ export class ImportProcessor extends WorkerHost {
   }
 
   async process(job: Job<ImportJobPayload>): Promise<void> {
-    const { importLogId, tenantId, wardId, actorId, dryRun, rows } = job.data;
+    const { importJobId, tenantId } = job.data;
+
+    const importLog = await this.prisma.dataImportLog.findFirst({
+      where: { id: importJobId, tenantId },
+      select: {
+        id: true,
+        batchId: true,
+        initiatedBy: true,
+        dryRun: true,
+        errorDetails: true,
+      },
+    });
+
+    if (!importLog) {
+      throw new Error(`Import log ${importJobId} not found`);
+    }
+
+    const rows = importLog.errorDetails as never[];
+    if (!Array.isArray(rows)) {
+      throw new Error(`Import log ${importJobId} has no persisted validated rows`);
+    }
+
+    const firstStage = await this.prisma.stage.findFirst({
+      where: { tenantId },
+      select: { wardId: true },
+    });
+    const wardId = firstStage?.wardId ?? '';
 
     this.logger.log(
-      `Processing import job ${job.id}: importLogId=${importLogId}, rows=${rows.length}, dryRun=${dryRun}`,
+      `Processing import job ${job.id}: importJobId=${importJobId}, rows=${rows.length}, dryRun=${importLog.dryRun}`,
     );
 
     // Mark as PROCESSING
     await this.prisma.dataImportLog.update({
-      where: { id: importLogId },
+      where: { id: importJobId },
       data: { status: 'PROCESSING', startedAt: new Date() },
     });
 
     try {
-      // Get the batchId from the import log
-      const importLog = await this.prisma.dataImportLog.findUnique({
-        where: { id: importLogId },
-        select: { batchId: true },
-      });
-
-      if (!importLog) {
-        throw new Error(`Import log ${importLogId} not found`);
-      }
-
       const report = await this.executionService.executeImport({
-        importLogId,
+        importLogId: importJobId,
         batchId: importLog.batchId,
         tenantId,
         wardId,
-        actorId,
-        dryRun,
+        actorId: importLog.initiatedBy,
+        dryRun: importLog.dryRun,
         rows,
       });
 
@@ -62,7 +78,7 @@ export class ImportProcessor extends WorkerHost {
 
       // Update import log with results
       await this.prisma.dataImportLog.update({
-        where: { id: importLogId },
+        where: { id: importJobId },
         data: {
           status: finalStatus,
           successCount: report.successCount,
@@ -83,7 +99,7 @@ export class ImportProcessor extends WorkerHost {
       this.logger.error(`Import job ${job.id} failed: ${errMsg}`);
 
       await this.prisma.dataImportLog.update({
-        where: { id: importLogId },
+        where: { id: importJobId },
         data: {
           status: 'FAILED',
           completedAt: new Date(),
@@ -95,3 +111,4 @@ export class ImportProcessor extends WorkerHost {
     }
   }
 }
+
