@@ -17,6 +17,14 @@ export class StkExpiryScheduler implements OnApplicationBootstrap {
       return;
     }
 
+    // Check if the repeatable job is already scheduled to avoid duplicates on restarts
+    const repeatables = await this.stkExpiryQueue.getRepeatableJobs();
+    const exists = repeatables.some((job) => job.id === 'stk-expiry-scheduler');
+    if (exists) {
+      this.logger.log('STK expiry scheduler already registered, skipping job creation');
+      return;
+    }
+
     await this.stkExpiryQueue.add(
       'stk-expiry-sweep',
       {},
@@ -30,4 +38,5 @@ export class StkExpiryScheduler implements OnApplicationBootstrap {
 
     this.logger.log('Scheduled STK expiry sweep every 5 minutes');
   }
+
 }
