@@ -1,10 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsOptional, IsString, IsUrl, MinLength } from 'class-validator';
+import { IsArray, IsBoolean, IsOptional, IsString, IsUrl, MaxLength, MinLength } from 'class-validator';
 
 export class CreateTicketMessageDto {
   @ApiProperty({ example: 'Thanks, I have attached the receipt.' })
   @IsString()
   @MinLength(1)
+  @MaxLength(2000)
   content!: string;
 
   @ApiPropertyOptional({
@@ -16,4 +17,11 @@ export class CreateTicketMessageDto {
   @IsArray()
   @IsUrl({}, { each: true })
   attachments?: string[];
+
+  @ApiPropertyOptional({ description: 'Reopen a closed ticket while posting this message', example: true })
+  @IsOptional()
+  @IsBoolean()
+  reopen?: boolean;
 }
+
+

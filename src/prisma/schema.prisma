@@ -407,6 +407,9 @@ model Tenant {
   auditChainHead        AuditChainHead?
   auditArchiveManifests AuditArchiveManifest[]
   members               Member[]
+  supportTickets        SupportTicket[]
+  ticketMessages        TicketMessage[]
+  ticketAttachments     TicketAttachment[]
   accounts              Account[]
   loanProducts          LoanProduct[]
   loans                 Loan[]
@@ -485,6 +488,8 @@ model User {
   member           Member?
   stageAssignments StageAssignment[]
   requestedReports ReportJob[]
+  assignedSupportTickets SupportTicket[] @relation("AssignedSupportTickets")
+  sentTicketMessages     TicketMessage[]
 
   // Accounting – journal entry relations
   createdJournalEntries  JournalEntry[] @relation("JournalEntryCreator")
@@ -826,6 +831,7 @@ model Loan {
   guarantors     LoanGuarantor[]
   approvalChains LoanApprovalChain[]
   loanRepayments LoanRepayment[]
+  supportTickets SupportTicket[]
 
   @@unique([tenantId, loanNumber])
   @@index([tenantId, memberId])
@@ -965,6 +971,8 @@ model MpesaTransaction {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  supportTickets SupportTicket[]
+
   @@index([tenantId])
   @@index([tenantId, memberId])
   @@index([tenantId, loanId])
@@ -1003,6 +1011,7 @@ model LoanApprovalChain {
 model SupportTicket {
   id       String @id @default(uuid())
   tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   memberId String
   member   Member @relation(fields: [memberId], references: [id])
 
@@ -1013,18 +1022,25 @@ model SupportTicket {
   category    TicketCategory @default(GENERAL)
 
   relatedLoanId String?
+  relatedLoan   Loan? @relation(fields: [relatedLoanId], references: [id], onDelete: SetNull)
   relatedTxId   String?
+  relatedMpesaTx MpesaTransaction? @relation(fields: [relatedTxId], references: [id], onDelete: SetNull)
   assignedTo    String?
+  assignedToUser User? @relation("AssignedSupportTickets", fields: [assignedTo], references: [id], onDelete: SetNull)
   incidentId    String?
   incident      Incident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
   resolutionDueAt DateTime?
 
-  messages  TicketMessage[]
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
+  messages    TicketMessage[]
+  attachments TicketAttachment[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
 
   @@index([tenantId, memberId])
   @@index([tenantId, status])
+  @@index([tenantId, status, updatedAt])
+  @@index([tenantId, assignedTo, status])
+  @@index([tenantId, category, status])
   @@index([tenantId, incidentId])
   @@index([tenantId, resolutionDueAt])
   @@schema("public")
@@ -1066,18 +1082,43 @@ model InAppNotification {
 }
 
 model TicketMessage {
-  id       String        @id @default(uuid())
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   ticketId String
   ticket   SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
   senderId    String
-  senderRole  String
+  sender      User     @relation(fields: [senderId], references: [id])
+  senderRole  UserRole
   content     String   @db.Text
   attachments String[]
 
-  createdAt DateTime @default(now())
+  ticketAttachments TicketAttachment[]
+  createdAt         DateTime @default(now())
 
   @@index([ticketId])
+  @@index([tenantId, ticketId, createdAt])
+  @@schema("public")
+}
+
+model TicketAttachment {
+  id        String @id @default(uuid())
+  tenantId  String
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ticketId  String
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  messageId String?
+  message   TicketMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  fileName  String
+  fileKey   String
+  mimeType  String
+  size      Int
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, ticketId])
+  @@index([tenantId, messageId])
   @@schema("public")
 }
 

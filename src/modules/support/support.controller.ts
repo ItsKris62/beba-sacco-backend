@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import {
   ApiBearerAuth,
   ApiHeader,
@@ -9,7 +10,7 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
-import { TicketCategory, TicketPriority, TicketStatus, UserRole } from '@prisma/client';
+import { TicketStatus, UserRole } from '@prisma/client';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -18,6 +19,7 @@ import { AuthActor } from './support-ticket.types';
 import type { Tenant } from '@prisma/client';
 import { CreateSupportTicketDto } from './dto/create-support-ticket.dto';
 import { CreateTicketMessageDto } from './dto/create-ticket-message.dto';
+import { ListSupportTicketsDto } from './dto/support.dto';
 import { UpdateSupportTicketDto } from './dto/update-support-ticket.dto';
 import { SupportService } from './support.service';
 
@@ -30,6 +32,7 @@ export class SupportController {
   constructor(private readonly support: SupportService) {}
 
   @Post('tickets')
+  @Throttle({ default: { ttl: 3_600_000, limit: 5 } })
   @Roles(UserRole.MEMBER)
   @ApiOperation({
     summary: 'Create a support ticket',
@@ -101,13 +104,10 @@ export class SupportController {
   list(
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
-    @Query('status') status?: string,
-    @Query('priority') priority?: TicketPriority,
-    @Query('category') category?: TicketCategory,
-    @Query('search') search?: string,
+    @Query() query: ListSupportTicketsDto,
   ) {
     const authActor: AuthActor = { userId: actor.id, role: actor.role };
-    return this.support.listTickets(tenant.id, authActor, { status, priority, category, search });
+    return this.support.listTickets(tenant.id, authActor, query);
   }
 
   @Get('metrics')
@@ -164,6 +164,7 @@ export class SupportController {
   }
 
   @Post('tickets/:id/messages')
+  @Throttle({ default: { ttl: 3_600_000, limit: 20 } })
   @Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({
     summary: 'Add a ticket message',
@@ -229,4 +230,7 @@ export class SupportController {
     return this.support.updateTicket(id, dto, tenant.id, authActor);
   }
 }
+
+
+
 

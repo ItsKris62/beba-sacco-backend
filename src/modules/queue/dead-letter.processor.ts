@@ -14,7 +14,7 @@ import { QUEUE_NAMES } from './queue.constants';
 @Injectable()
 export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DeadLetterAlertProcessor.name);
-  private redisClient!: Redis;
+  private redisClient?: Redis;
   private dlqGauge: Gauge<string>;
   private alertedQueues = new Set<string>();
 
@@ -60,19 +60,17 @@ export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const rawHost = this.configService.get<string>('app.redis.host', 'localhost');
-    this.redisClient = new Redis({
-      host: rawHost.replace(/^https?:\/\//, ''),
-      port: this.configService.get<number>('app.redis.port', 6379),
-      password: this.configService.get<string>('app.redis.password') || undefined,
-      tls: this.configService.get<boolean>('app.redis.tls') ? { rejectUnauthorized: false } : undefined,
-      maxRetriesPerRequest: null,
-      enableReadyCheck: false,
-    });
+    this.logger.warn(
+      'DLQ monitor disabled: Bull Redis is not configured. Set BULL_REDIS_URL or BULL_REDIS_HOST; refusing to use app Redis for BullMQ metrics.',
+    );
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)
   async monitorDlq() {
+    if (!this.redisClient) {
+      return;
+    }
+
     const dlqQueues = Object.values(QUEUE_NAMES).filter((q) => q.toUpperCase().endsWith('DLQ'));
     for (const queue of dlqQueues) {
       try {

@@ -60,6 +60,9 @@ export const QUEUE_NAMES = {
   // Phase 1 – KYC document review async pipeline
   KYC_REVIEW: 'kyc.review',
   KYC_REVIEW_DLQ: 'kyc.review.dlq',
+  // Support async processing
+  SUPPORT_NOTIFICATIONS: 'support.notifications',
+  SUPPORT_WORKFLOWS: 'support.workflows',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -433,4 +436,36 @@ export interface CanaryAnalysisJobPayload {
 
 
 
+
+
+export type SupportNotificationJobType =
+  | 'TICKET_CREATED'
+  | 'TICKET_REPLIED'
+  | 'TICKET_ASSIGNED'
+  | 'TICKET_RESOLVED'
+  | 'TICKET_CLOSED'
+  | 'TICKET_SLA_BREACH'
+  | 'TICKET_AUTO_CLOSED';
+
+export interface SupportNotificationJobPayload {
+  ticketId: string;
+  tenantId: string;
+  memberId?: string;
+  category?: string;
+  priority?: string;
+  senderId?: string;
+  senderRole?: string;
+  isReopen?: boolean;
+  previousStatus?: string;
+  newStatus?: string;
+  assigneeId?: string;
+  resolutionNote?: string;
+}
+
+export const SUPPORT_NOTIFICATION_JOB_OPTIONS = {
+  attempts: 3,
+  backoff: { type: 'exponential' as const, delay: 1000 },
+  removeOnComplete: true,
+  removeOnFail: false,
+};
 

@@ -12,6 +12,7 @@ export class CreateSupportTicketDto {
   @ApiProperty({ example: 'I made a repayment yesterday but my loan balance has not changed.' })
   @IsString()
   @MinLength(10)
+  @MaxLength(2000)
   description!: string;
 
   @ApiPropertyOptional({ enum: TicketPriority, default: TicketPriority.MEDIUM, example: TicketPriority.MEDIUM })
@@ -34,3 +35,5 @@ export class CreateSupportTicketDto {
   @IsUUID()
   relatedTxId?: string;
 }
+
+

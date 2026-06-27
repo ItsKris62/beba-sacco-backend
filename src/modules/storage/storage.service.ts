@@ -21,8 +21,11 @@ import { v4 as uuidv4 } from 'uuid';
 const ALLOWED_CONTENT_TYPES = new Set([
   'image/jpeg',
   'image/png',
+  'image/gif',
   'image/webp',
   'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'text/csv',
 ]);
 
@@ -221,6 +224,19 @@ export class StorageService {
     };
   }
 
+  async fileExists(key: string): Promise<boolean> {
+    try {
+      await this.headFile(key);
+      return true;
+    } catch (error) {
+      const statusCode = (error as { $metadata?: { httpStatusCode?: number }; name?: string }).$metadata?.httpStatusCode;
+      const name = (error as { name?: string }).name;
+      if (statusCode === 404 || name === 'NotFound' || name === 'NoSuchKey') {
+        return false;
+      }
+      throw error;
+    }
+  }
   /**
    * Stream object bytes from storage without writing to local disk.
    * Used by secure document confirmation to compute server-side checksums.
@@ -267,3 +283,4 @@ export class StorageService {
     );
   }
 }
+

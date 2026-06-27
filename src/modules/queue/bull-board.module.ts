@@ -95,6 +95,11 @@ class BullBoardService implements OnModuleInit {
     serverAdapter.setBasePath('/admin/queues');
 
     createBullBoard({
+      options: {
+        uiConfig: {
+          pollingInterval: { showSetting: true, forceInterval: 60000 },
+        },
+      },
       queues: [
         new BullMQAdapter(this.kycReviewQueue),
         new BullMQAdapter(this.kycReviewDlq),
@@ -112,7 +117,15 @@ class BullBoardService implements OnModuleInit {
     });
 
     const app = this.httpAdapterHost.httpAdapter.getInstance() as Express;
-    app.use('/admin/queues', basicAuth(boardUser, boardPass), serverAdapter.getRouter());
+    app.use(
+      '/admin/queues',
+      basicAuth(boardUser, boardPass),
+      (_req: Request, res: Response, next: NextFunction): void => {
+        res.setHeader('Cache-Control', 'private, max-age=60');
+        next();
+      },
+      serverAdapter.getRouter(),
+    );
 
     this.logger.log('Bull Board mounted at /admin/queues');
   }

@@ -1,4 +1,4 @@
-import { DynamicModule, Module, Provider, Type } from '@nestjs/common';
+import { DynamicModule, Inject, Injectable, Logger, Module, OnModuleInit, Optional, Provider, Type } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QUEUE_NAMES } from './queue.constants';
@@ -48,6 +48,8 @@ import { RepaymentReminderProcessor } from '../notifications/processors/repaymen
 import { GuarantorRecoveryProcessor } from '../notifications/processors/guarantor-recovery.processor';
 
 export type QueueModuleMode = 'web' | 'worker';
+
+const QUEUE_MODULE_MODE = 'QUEUE_MODULE_MODE';
 
 export interface QueueModuleOptions {
   mode?: QueueModuleMode;
@@ -131,6 +133,52 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
 
   return providers;
 }
+function redisEndpointFromUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}:${parsed.port || '6379'}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeHost(host?: string): string | undefined {
+  return host?.replace(/^https?:\/\//, '');
+}
+
+@Injectable()
+class QueueStartupDiagnostics implements OnModuleInit {
+  private readonly logger = new Logger(QueueStartupDiagnostics.name);
+
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() @Inject(QUEUE_MODULE_MODE) private readonly mode?: QueueModuleMode,
+  ) {}
+
+  onModuleInit(): void {
+    const moduleMode = this.mode ?? 'web';
+    const runtimeMode = moduleMode === 'worker' || isWorkerRuntime() ? 'worker' : 'web';
+    const processorCount = getQueueProcessorProviders({ mode: moduleMode }).length;
+    const bullHost = normalizeHost(this.configService.get<string>('app.bullRedis.host'));
+    const appHost = normalizeHost(this.configService.get<string>('app.redis.host'));
+    const bullEndpoint =
+      redisEndpointFromUrl(this.configService.get<string>('app.bullRedis.url')) ??
+      (bullHost
+        ? `${bullHost}:${this.configService.get<number>('app.bullRedis.port', 6379)}`
+        : undefined);
+    const appEndpoint =
+      redisEndpointFromUrl(this.configService.get<string>('app.redis.url')) ??
+      (appHost ? `${appHost}:${this.configService.get<number>('app.redis.port', 6379)}` : undefined);
+
+    this.logger.log(
+      `BullMQ startup: runtime=${runtimeMode} moduleMode=${moduleMode} ` +
+        `bullRedis=${bullEndpoint ?? '[not configured]'} appRedis=${appEndpoint ?? '[not configured]'} ` +
+        `sameRedis=${Boolean(bullEndpoint && appEndpoint && bullEndpoint === appEndpoint)} ` +
+        `registeredProcessors=${processorCount}`,
+    );
+  }
+}
 
 /**
  * Queue Module – BullMQ + dedicated Redis
@@ -154,6 +202,21 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
+        if (process.env.NODE_ENV === 'test') {
+          return {
+            connection: {
+              host: process.env.TEST_BULL_REDIS_HOST || '127.0.0.1',
+              port: Number(process.env.TEST_BULL_REDIS_PORT || 1),
+              maxRetriesPerRequest: null,
+              enableOfflineQueue: false,
+              connectTimeout: 50,
+              retryStrategy: () => null,
+            },
+            defaultJobOptions: DEFAULT_JOB_OPTIONS,
+            streams: STREAM_OPTIONS,
+          };
+        }
+
         const bullRedisUrl = configService.get<string>('app.bullRedis.url');
         const rawBullHost = configService.get<string>('app.bullRedis.host');
         const bullPassword = configService.get<string>('app.bullRedis.password');
@@ -267,6 +330,9 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
       // Phase 1 – KYC async review pipeline
       { name: QUEUE_NAMES.KYC_REVIEW },
       { name: QUEUE_NAMES.KYC_REVIEW_DLQ },
+      // Support async processing
+      { name: QUEUE_NAMES.SUPPORT_NOTIFICATIONS },
+      { name: QUEUE_NAMES.SUPPORT_WORKFLOWS },
     ),
     MpesaModule,
     LoansModule,
@@ -278,6 +344,8 @@ export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Ty
     SmsModule,
   ],
   providers: [
+    { provide: QUEUE_MODULE_MODE, useValue: 'web' },
+    QueueStartupDiagnostics,
     // PlunkService is @Global but QueueModule is loaded before CommonServicesModule
     // resolves globally for processors — re-provide here to be explicit.
     PlunkService,
@@ -293,10 +361,15 @@ export class QueueModule {
 
     return {
       module: QueueModule,
-      providers,
+      providers: [
+        { provide: QUEUE_MODULE_MODE, useValue: options.mode ?? 'web' },
+        ...providers,
+      ],
       exports: [BullModule, ...providers],
     };
   }
 }
+
+
 
 

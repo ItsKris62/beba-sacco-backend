@@ -13,9 +13,11 @@ import { SlaProcessor } from './processors/sla.processor';
 import { AutoCloseTicketsProcessor } from './processors/auto-close-tickets.processor';
 import { StorageModule } from '../storage/storage.module';
 import { AuthModule } from '../auth/auth.module';
+import { QUEUE_NAMES } from '../queue/queue.constants';
 import { isWorkerRuntime } from '../queue/worker-runtime';
+import { SupportNotificationsProcessor } from './processors/support-notifications.processor';
 
-const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTicketsProcessor] : [];
+const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTicketsProcessor, SupportNotificationsProcessor] : [];
 
 @Module({
   imports: [
@@ -24,8 +26,8 @@ const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTic
     AuthModule,
     forwardRef(() => NotificationsModule),
     BullModule.registerQueue(
-      { name: 'support-sla' },
-      { name: 'support-auto-close' }
+      { name: QUEUE_NAMES.SUPPORT_NOTIFICATIONS },
+      { name: QUEUE_NAMES.SUPPORT_WORKFLOWS }
     ),
   ],
   controllers: [
@@ -43,21 +45,20 @@ const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTic
 })
 export class SupportModule implements OnModuleInit {
   constructor(
-    @InjectQueue('support-sla') private readonly slaQueue: Queue,
-    @InjectQueue('support-auto-close') private readonly autoCloseQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.SUPPORT_WORKFLOWS) private readonly workflowQueue: Queue,
   ) {}
 
   async onModuleInit() {
     if (!isWorkerRuntime()) return;
 
-    await this.slaQueue.add('check-sla', {}, {
+    await this.workflowQueue.add('check-sla', {}, {
       jobId: 'check-sla:system:every-5-minutes',
       repeat: { pattern: '*/5 * * * *' }, // Every 5 mins
       removeOnComplete: true,
       removeOnFail: true,
     });
 
-    await this.autoCloseQueue.add('auto-close', {}, {
+    await this.workflowQueue.add('auto-close', {}, {
       jobId: 'auto-close:system:hourly',
       repeat: { pattern: '0 * * * *' }, // Hourly
       removeOnComplete: true,
@@ -65,5 +66,7 @@ export class SupportModule implements OnModuleInit {
     });
   }
 }
+
+
 
 

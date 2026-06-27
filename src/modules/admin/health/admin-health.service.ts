@@ -6,7 +6,8 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { RedisService } from '../../../common/services/redis.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 
-const HEALTH_CACHE_TTL = 10; // seconds — avoid hammering services on every poll
+const HEALTH_CACHE_TTL = 60; // seconds - avoid hammering services on every poll
+const QUEUE_STATS_CACHE_TTL_MS = 60_000;
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
@@ -96,6 +97,7 @@ const WARN_ACTION_PATTERNS = [
 @Injectable()
 export class AdminHealthService {
   private readonly logger = new Logger(AdminHealthService.name);
+  private backgroundJobsCache?: { expiresAt: number; value: BackgroundJobStatus[] };
 
   constructor(
     private readonly prisma: PrismaService,
@@ -368,6 +370,10 @@ export class AdminHealthService {
   // ─── Background Jobs ──────────────────────────────────────────────────────
 
   async getBackgroundJobs(): Promise<BackgroundJobStatus[]> {
+    if (this.backgroundJobsCache && this.backgroundJobsCache.expiresAt > Date.now()) {
+      return this.backgroundJobsCache.value;
+    }
+
     const configuredQueues: Array<[Queue | undefined, string, string]> = [
       [this.emailQueue,         QUEUE_NAMES.EMAIL,              'Email Notifications'],
       [this.auditQueue,         QUEUE_NAMES.AUDIT_LOG,          'Audit Log Writer'],
@@ -410,7 +416,7 @@ export class AdminHealthService {
       }),
     );
 
-    return results.map((r: PromiseSettledResult<BackgroundJobStatus>, i: number): BackgroundJobStatus => {
+    const statuses = results.map((r: PromiseSettledResult<BackgroundJobStatus>, i: number): BackgroundJobStatus => {
       if (r.status === 'fulfilled') return r.value;
       this.logger.warn(`Queue stats failed for ${queues[i][1]}: ${(r as PromiseRejectedResult).reason}`);
       return {
@@ -425,6 +431,12 @@ export class AdminHealthService {
         status: 'idle' as const,
       };
     });
+
+    this.backgroundJobsCache = {
+      expiresAt: Date.now() + QUEUE_STATS_CACHE_TTL_MS,
+      value: statuses,
+    };
+    return statuses;
   }
 
   // ─── Blocked IPs ──────────────────────────────────────────────────────────

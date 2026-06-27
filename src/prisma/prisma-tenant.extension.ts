@@ -46,6 +46,9 @@ export const TENANT_SCOPED_MODELS = [
   'GroupWelfareCollection',
   'DataImportLog',
   'KYCRequirement',
+  'SupportTicket',
+  'TicketMessage',
+  'TicketAttachment',
   'Incident',
   'InAppNotification',
 ] as const;
@@ -201,3 +204,4 @@ interface PrismaClientLike {
   $use: (middleware: Prisma.Middleware) => void;
   $extends: (extension: typeof prismaTenantExtension) => unknown;
 }
+

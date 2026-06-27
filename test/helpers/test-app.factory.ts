@@ -18,6 +18,7 @@ import { getQueueToken } from '@nestjs/bullmq';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { BullExplorer } = require('@nestjs/bullmq/dist/bull.explorer');
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { SchedulerRegistry } from '@nestjs/schedule';
 import request from 'supertest';
 import { AppModule } from '../../src/app.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
@@ -57,6 +58,7 @@ export interface TestAppContext {
 
 export class TestAppFactory {
   static async create(): Promise<TestAppContext> {
+    this.configureTestEnvironment();
     const mockRedis = this.createMockRedis();
     const mockQueue = {
       add: jest.fn().mockResolvedValue({ id: 'test-job' }),
@@ -94,6 +96,7 @@ export class TestAppFactory {
     jest.spyOn(BullExplorer.prototype, 'registerWorkers').mockImplementation(() => {});
 
     await app.init();
+    this.disableScheduledJobs(app);
 
     const prisma = app.get(PrismaService);
     const redis = app.get(RedisService);
@@ -124,6 +127,25 @@ export class TestAppFactory {
     };
   }
 
+  private static configureTestEnvironment(): void {
+    process.env.NODE_ENV = 'test';
+    process.env.WORKER_MODE = 'false';
+    process.env.NODE_ROLE = 'web';
+
+    // Never let E2E tests consume the application Upstash command quota through BullMQ.
+    process.env.BULL_REDIS_URL = '';
+    process.env.BULL_REDIS_HOST = process.env.TEST_BULL_REDIS_HOST || '127.0.0.1';
+    process.env.BULL_REDIS_PORT = process.env.TEST_BULL_REDIS_PORT || '1';
+    process.env.BULL_REDIS_PASSWORD = '';
+    process.env.BULL_REDIS_TLS = 'false';
+  }
+
+  private static disableScheduledJobs(app: INestApplication): void {
+    const scheduler = app.get(SchedulerRegistry, { strict: false });
+    for (const name of scheduler.getCronJobs().keys()) {
+      scheduler.deleteCronJob(name);
+    }
+  }
   private static async cleanDatabase(prisma: PrismaService): Promise<void> {
     const tables = [
       'Document',
@@ -459,3 +481,5 @@ export class TestAppFactory {
     };
   }
 }
+
+
