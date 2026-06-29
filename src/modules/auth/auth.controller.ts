@@ -277,12 +277,12 @@ export class AuthController {
     summary: 'Request email or SMS OTP for password reset',
     description:
       'Accepts method EMAIL or SMS plus a validated email/E.164 phone identifier. ' +
-      'If a matching active member exists, a 6-digit OTP is sent through the selected channel. ' +
+      'If a matching active account exists, a 6-digit OTP is sent through the selected channel. ' +
       'Always returns 200 to prevent user enumeration.',
   })
   @ApiResponse({
     status: 200,
-    description: 'If the contact matches a member, an OTP has been sent.',
+    description: 'If the contact matches an account, an OTP has been sent.',
   })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   async requestPasswordResetSms(

@@ -830,9 +830,9 @@ export class AuthService {
    *
    * Security design:
    * - Always returns success to prevent user enumeration.
-   * - Resolves member by normalized email or full E.164 phone identifier.
+   * - Resolves active users by normalized email or full E.164 phone identifier.
    * - Stores a 6-digit OTP in Redis keyed by the identifier (30 min TTL, max 3 attempts).
-   * - Enqueues delivery through the selected channel only when a matching active member exists.
+   * - Enqueues delivery through the selected channel only when a matching active account exists.
    */
   async requestPasswordResetSms(
     dto: PasswordResetRequestDto,
@@ -842,7 +842,7 @@ export class AuthService {
     const identifier = this.normalizePasswordResetIdentifier(dto.method, dto.identifier);
     await this.assertPasswordResetRequestAllowed(identifier, ipAddress);
 
-    const user = await this.findMemberUserByPasswordResetIdentifier(
+    const user = await this.findUserByPasswordResetIdentifier(
       dto.method,
       identifier,
       tenantId,
@@ -917,7 +917,7 @@ export class AuthService {
     ipAddress?: string,
   ): Promise<void> {
     const identifier = this.normalizePasswordResetIdentifier(dto.method, dto.identifier);
-    const user = await this.findMemberUserByPasswordResetIdentifier(
+    const user = await this.findUserByPasswordResetIdentifier(
       dto.method,
       identifier,
       tenantId,
@@ -1139,7 +1139,7 @@ export class AuthService {
     }
   }
 
-  private async findMemberUserByPasswordResetIdentifier(
+  private async findUserByPasswordResetIdentifier(
     method: PasswordResetMethod,
     identifier: string,
     tenantId: string,
@@ -1166,9 +1166,7 @@ export class AuthService {
     return this.prisma.user.findFirst({
       where: {
         tenantId,
-        role: UserRole.MEMBER,
         isActive: true,
-        member: { is: { isActive: true } },
         ...where,
       },
       select: {
