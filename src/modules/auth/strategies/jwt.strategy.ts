@@ -2,7 +2,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
-import { UserRole } from '@prisma/client';
+import { UserRole, AccountStatus } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { JwtBlocklistService } from '../jwt-blocklist.service';
 
@@ -32,7 +32,7 @@ export interface AuthenticatedUser {
   phone: string | null;
   role: UserRole;
   tenantId: string;
-  isActive: boolean;
+  accountStatus: AccountStatus;
   mustChangePassword: boolean;
 }
 
@@ -78,7 +78,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         phone: true,
         role: true,
         tenantId: true,
-        isActive: true,
+        accountStatus: true,
         mustChangePassword: true,
       },
     });
@@ -91,7 +91,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('Token tenant mismatch');
     }
 
-    if (!user.isActive) {
+    if (user.accountStatus !== AccountStatus.ACTIVE) {
       throw new UnauthorizedException('Account has been deactivated');
     }
 

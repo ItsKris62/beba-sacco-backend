@@ -11,7 +11,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { TenantStatus, UserRole } from '@prisma/client';
+import { TenantStatus, UserRole, AccountStatus } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import * as argon2 from 'argon2';
@@ -199,7 +199,7 @@ export class AuthService {
           phoneNumber: true,
           passwordHash: true,
           role: true,
-          isActive: true,
+          accountStatus: true,
           emailVerified: true,
           firstName: true,
           lastName: true,
@@ -224,7 +224,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    if (!user.isActive) {
+    if (user.accountStatus !== AccountStatus.ACTIVE) {
       await this.writeAuditSafe({
         tenantId,
         userId: user.id,
@@ -458,13 +458,13 @@ export class AuthService {
           phoneNumber: true,
           role: true,
           tenantId: true,
-          isActive: true,
+          accountStatus: true,
           refreshToken: true,
         },
       }),
     );
 
-    if (!user || !user.isActive || !user.refreshToken) {
+    if (!user || user.accountStatus !== AccountStatus.ACTIVE || !user.refreshToken) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -633,7 +633,7 @@ export class AuthService {
         firstName: true,
         role: true,
         tenantId: true,
-        isActive: true,
+        accountStatus: true,
       },
     });
 
@@ -649,7 +649,7 @@ export class AuthService {
     });
 
     // Silently exit if user not found or inactive — no error to prevent enumeration
-    if (!user || !user.isActive) {
+    if (!user || user.accountStatus !== AccountStatus.ACTIVE) {
       return;
     }
 
@@ -742,13 +742,13 @@ export class AuthService {
         email: true,
         role: true,
         tenantId: true,
-        isActive: true,
+        accountStatus: true,
         passwordResetToken: true,
         passwordResetExpiry: true,
       },
     });
 
-    if (!user || !user.isActive) {
+    if (!user || user.accountStatus !== AccountStatus.ACTIVE) {
       throw new BadRequestException('Reset link is invalid or has expired');
     }
 
@@ -1098,12 +1098,12 @@ export class AuthService {
         lastName: true,
         role: true,
         tenantId: true,
-        isActive: true,
+        accountStatus: true,
         passwordHash: true,
       },
     });
 
-    if (!user || !user.isActive) return null;
+    if (!user || user.accountStatus !== AccountStatus.ACTIVE) return null;
 
     let valid: boolean;
     try {
@@ -1166,7 +1166,7 @@ export class AuthService {
     return this.prisma.user.findFirst({
       where: {
         tenantId,
-        isActive: true,
+        accountStatus: AccountStatus.ACTIVE,
         ...where,
       },
       select: {

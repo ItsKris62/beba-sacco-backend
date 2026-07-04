@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { AccountType, KycStatus, UserRole } from '@prisma/client';
+import { AccountType, KycStatus, UserRole, AccountStatus } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -42,7 +42,7 @@ export class GuarantorLookupService {
         nationalId: normalizedId,
         isActive: true,
         deletedAt: null,
-        user: { isActive: true, status: 'APPROVED', role: UserRole.MEMBER },
+        user: { accountStatus: AccountStatus.ACTIVE, role: UserRole.MEMBER },
       },
       select: {
         id: true,
@@ -126,8 +126,7 @@ export class GuarantorLookupService {
         isActive: true,
         deletedAt: null,
         user: {
-          isActive: true,
-          status: 'APPROVED',
+          accountStatus: AccountStatus.ACTIVE,
           role: UserRole.MEMBER,
           OR: [
             { firstName: { contains: normalized, mode: 'insensitive' } },

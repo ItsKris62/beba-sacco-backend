@@ -18,6 +18,7 @@ import {
   UserRole,
   AccountType,
   Prisma,
+  AccountStatus,
 } from '@prisma/client';
 import { canTransition } from './loan-state-machine';
 import { v4 as uuidv4 } from 'uuid';
@@ -305,13 +306,13 @@ export class LoanApplicationService {
         id: true,
         kycStatus: true,
         isBlacklisted: true,
-        user: { select: { firstName: true, lastName: true, role: true, isActive: true, status: true } },
+        user: { select: { firstName: true, lastName: true, role: true, accountStatus: true } },
       },
     });
     if (!guarantor) {
       return { eligible: false, reason: 'Guarantor not found or inactive' };
     }
-    if (guarantor.user.role !== UserRole.MEMBER || !guarantor.user.isActive || guarantor.user.status !== 'APPROVED') {
+    if (guarantor.user.role !== UserRole.MEMBER || guarantor.user.accountStatus !== AccountStatus.ACTIVE) {
       return { eligible: false, reason: 'Guarantor must be an active approved member' };
     }
     if (guarantor.kycStatus !== 'APPROVED') {
@@ -849,13 +850,13 @@ export class LoanApplicationService {
         id: true,
         kycStatus: true,
         isBlacklisted: true,
-        user: { select: { role: true, isActive: true, status: true } },
+        user: { select: { role: true, accountStatus: true } },
       },
     });
     if (!guarantor) {
       return { eligible: false, reason: 'Guarantor not found or inactive' };
     }
-    if (guarantor.user.role !== UserRole.MEMBER || !guarantor.user.isActive || guarantor.user.status !== 'APPROVED') {
+    if (guarantor.user.role !== UserRole.MEMBER || guarantor.user.accountStatus !== AccountStatus.ACTIVE) {
       return { eligible: false, reason: 'Guarantor must be an active approved member' };
     }
     if (guarantor.kycStatus !== 'APPROVED') {

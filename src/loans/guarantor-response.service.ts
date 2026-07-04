@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { AccountType, GuarantorStatus, KycStatus, LoanStatus, Prisma, UserRole } from '@prisma/client';
+import { AccountType, GuarantorStatus, KycStatus, LoanStatus, Prisma, UserRole, AccountStatus } from '@prisma/client';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Request } from 'express';
@@ -262,7 +262,7 @@ export class GuarantorResponseService {
 
   private async assertGuarantorCanAccept(tx: Prisma.TransactionClient, tenantId: string, memberId: string): Promise<void> {
     const member = await tx.member.findFirst({
-      where: { id: memberId, tenantId, isActive: true, user: { isActive: true, status: 'APPROVED' } },
+      where: { id: memberId, tenantId, isActive: true, user: { accountStatus: AccountStatus.ACTIVE } },
       select: { kycStatus: true },
     });
     if (!member) throw new BadRequestException('GUARANTOR_NOT_ACTIVE: guarantor must be an active SACCO member');
@@ -385,7 +385,7 @@ export class GuarantorResponseService {
     const officers = await this.prisma.user.findMany({
       where: {
         tenantId,
-        isActive: true,
+        accountStatus: AccountStatus.ACTIVE,
         role: { in: [UserRole.LOAN_OFFICER, UserRole.MANAGER, UserRole.TENANT_ADMIN] },
       },
       select: { id: true, phone: true, phoneNumber: true },

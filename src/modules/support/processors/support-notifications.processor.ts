@@ -1,7 +1,7 @@
 import { Inject, forwardRef } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
-import { UserRole } from '@prisma/client';
+import { UserRole, AccountStatus } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { InAppNotificationService } from '../../notifications/in-app-notification.service';
 import {
@@ -45,7 +45,7 @@ export class SupportNotificationsProcessor extends WorkerHost {
       where: {
         tenantId: payload.tenantId,
         role: { in: [UserRole.LOAN_OFFICER, UserRole.MANAGER] },
-        isActive: true,
+        accountStatus: AccountStatus.ACTIVE,
       },
       select: { id: true },
     });
@@ -131,7 +131,7 @@ export class SupportNotificationsProcessor extends WorkerHost {
       where: {
         tenantId: payload.tenantId,
         role: { in: [UserRole.MANAGER, UserRole.TENANT_ADMIN] },
-        isActive: true,
+        accountStatus: AccountStatus.ACTIVE,
       },
       select: { id: true },
     });

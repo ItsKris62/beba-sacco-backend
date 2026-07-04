@@ -51,7 +51,6 @@ const USER_SELECT = {
   lastName: true,
   phone: true,
   role: true,
-  role: true,
   accountStatus: true,
   mustChangePassword: true,
   lastLoginAt: true,

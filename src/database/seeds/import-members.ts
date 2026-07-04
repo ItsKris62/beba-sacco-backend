@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import { isAbsolute, resolve } from 'path';
 import { randomInt } from 'crypto';
 import * as argon2 from 'argon2';
-import { PrismaClient, UserRole, UserStatus, StagePosition } from '@prisma/client';
+import { PrismaClient, UserRole, AccountStatus, StagePosition } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { CsvParserService } from '../../modules/data-import/csv-parser.service';
 import { generateImportEmail } from '../../modules/data-import/utils/name-parser';
@@ -232,7 +232,7 @@ async function createMemberUser(params: {
         legacyMemberNo: row.legacyNo ?? undefined,
         importBatchId: batchId,
         wardId,
-        status: UserStatus.APPROVED,
+        accountStatus: AccountStatus.ACTIVE,
         mustChangePassword: true,
         createdById: actorId,
         approvedById: actorId,

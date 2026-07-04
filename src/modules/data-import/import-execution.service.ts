@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomInt } from 'crypto';
-import { Prisma, StagePosition, UserRole, UserStatus } from '@prisma/client';
+import { Prisma, StagePosition, UserRole, AccountStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { SmsService } from '../sms/sms.service';
@@ -211,7 +211,7 @@ export class ImportExecutionService {
           legacyMemberNo: row.legacyNo ?? undefined,
           importBatchId: batchId,
           wardId,
-          status: UserStatus.APPROVED,
+          accountStatus: AccountStatus.ACTIVE,
           mustChangePassword: true,
           createdById: actorId,
           approvedById: actorId,

@@ -4,7 +4,7 @@
  * Generates compliance certificate. Idempotent via memberId.
  */
 import { Injectable, Logger, ConflictException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, AccountStatus } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -130,7 +130,7 @@ export class DataErasureService {
         firstName: anonymizedId,
         lastName: 'ERASED',
         phone: null,
-        isActive: false,
+        accountStatus: AccountStatus.SUSPENDED,
       },
     });
     erasedFields.push('user.firstName', 'user.lastName', 'user.phone');
