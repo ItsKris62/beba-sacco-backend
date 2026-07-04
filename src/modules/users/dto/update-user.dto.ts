@@ -42,8 +42,4 @@ export class UpdateUserDto {
   })
   role?: UserRole;
 
-  @ApiPropertyOptional({ example: true, description: 'Set false to reactivate a deactivated user' })
-  @IsOptional()
-  @IsBoolean()
-  isActive?: boolean;
 }

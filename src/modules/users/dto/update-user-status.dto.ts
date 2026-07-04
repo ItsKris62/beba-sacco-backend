@@ -1,15 +1,15 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional, IsString, IsUUID } from 'class-validator';
-import { UserStatus } from '@prisma/client';
+import { AccountStatus } from '@prisma/client';
 
 /**
  * DTO for PATCH /users/:id/status
  * Explicit approval workflow state machine.
  */
 export class UpdateUserStatusDto {
-  @ApiProperty({ enum: UserStatus, description: 'New status to assign' })
-  @IsEnum(UserStatus)
-  status!: UserStatus;
+  @ApiProperty({ enum: AccountStatus, description: 'New status to assign' })
+  @IsEnum(AccountStatus)
+  status!: AccountStatus;
 
   @ApiPropertyOptional({ description: 'Reason for rejection or contextual notes' })
   @IsOptional()

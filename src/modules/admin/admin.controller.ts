@@ -6,7 +6,7 @@ import {
   ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
   ApiResponse, ApiQuery, ApiHeader,
 } from '@nestjs/swagger';
-import { TransactionStatus, TransactionType, UserRole } from '@prisma/client';
+import { TransactionStatus, TransactionType, UserRole, AccountStatus } from '@prisma/client';
 import { Request } from 'express';
 import { AdminService } from './admin.service';
 import { UpdateKycDto } from './dto/update-kyc.dto';
@@ -53,17 +53,19 @@ export class AdminController {
   @ApiQuery({ name: 'search', required: false, description: 'Search by name, email, member number, or national ID' })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
-  @ApiQuery({ name: 'status', required: false, enum: ['active', 'inactive'] })
+  @ApiQuery({ name: 'accountStatus', required: false, enum: AccountStatus })
+  @ApiQuery({ name: 'recentlyActive', required: false, type: Boolean })
   @ApiQuery({ name: 'role', required: false, enum: UserRole })
   getMembers(
     @CurrentTenant() tenant: Tenant,
     @Query('search') search?: string,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
-    @Query('status') status?: 'active' | 'inactive',
+    @Query('accountStatus') accountStatus?: AccountStatus,
+    @Query('recentlyActive') recentlyActive?: boolean,
     @Query('role') role?: UserRole,
   ) {
-    return this.adminService.getMembers(tenant.id, { search, page, limit, status, role });
+    return this.adminService.getMembers(tenant.id, { search, page, limit, accountStatus, recentlyActive, role });
   }
 
   // ─── PENDING KYC QUEUE ───────────────────────────────────────

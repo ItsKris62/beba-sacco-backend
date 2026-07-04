@@ -7,7 +7,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { randomInt } from 'crypto';
 import * as argon2 from 'argon2';
-import { UserRole, UserStatus } from '@prisma/client';
+import { UserRole, AccountStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -51,8 +51,8 @@ const USER_SELECT = {
   lastName: true,
   phone: true,
   role: true,
-  status: true,
-  isActive: true,
+  role: true,
+  accountStatus: true,
   mustChangePassword: true,
   lastLoginAt: true,
   emailVerified: true,
@@ -138,8 +138,7 @@ export class UsersService {
         lastName: dto.lastName,
         phone: dto.phone,
         role: dto.role,
-        status: UserStatus.APPROVED,
-        isActive: true,
+        accountStatus: AccountStatus.ACTIVE,
         mustChangePassword: true,
         createdById: actor.id,
       },
@@ -152,7 +151,7 @@ export class UsersService {
       action: 'USER.CREATED',
       entityType: 'User',
       entityId: user.id,
-      newValue: { email: user.email, role: user.role, status: user.status, createdById: actor.id },
+      newValue: { email: user.email, role: user.role, accountStatus: user.accountStatus, createdById: actor.id },
       metadata: { ipAddress },
       ipAddress,
     });
@@ -164,7 +163,7 @@ export class UsersService {
 
   async findAll(
     tenantId: string,
-    opts: { page?: number; limit?: number; search?: string; role?: UserRole; status?: UserStatus } = {},
+    opts: { page?: number; limit?: number; search?: string; role?: UserRole; accountStatus?: AccountStatus } = {},
   ) {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
@@ -173,7 +172,7 @@ export class UsersService {
     const where = {
       tenantId,
       ...(opts.role && { role: opts.role }),
-      ...(opts.status && { status: opts.status }),
+      ...(opts.accountStatus && { accountStatus: opts.accountStatus }),
       ...(opts.search && {
         OR: [
           { firstName: { contains: opts.search, mode: 'insensitive' as const } },
@@ -229,7 +228,7 @@ export class UsersService {
   ) {
     const target = await this.prisma.user.findFirst({
       where: { id, tenantId },
-      select: { id: true, role: true, status: true, email: true },
+      select: { id: true, role: true, accountStatus: true, email: true },
     });
     if (!target) throw new NotFoundException('User not found');
 
@@ -255,7 +254,6 @@ export class UsersService {
         ...(dto.lastName !== undefined && { lastName: dto.lastName }),
         ...(dto.phone !== undefined && { phone: dto.phone }),
         ...(dto.role !== undefined && { role: dto.role }),
-        ...(dto.isActive !== undefined && { isActive: dto.isActive }),
       },
       select: USER_SELECT,
     });
@@ -266,8 +264,8 @@ export class UsersService {
       action: dto.role !== undefined ? 'ROLE_CHANGED' : 'USER.UPDATED',
       entityType: 'User',
       entityId: id,
-      oldValue: { role: target.role, isActive: true /* approximate */ },
-      newValue: { role: updated.role, isActive: updated.isActive },
+      oldValue: { role: target.role },
+      newValue: { role: updated.role },
       metadata: { changes: dto, actorRole: actor.role, ipAddress },
       ipAddress,
     });
@@ -297,21 +295,21 @@ export class UsersService {
   ) {
     const target = await this.prisma.user.findFirst({
       where: { id, tenantId },
-      select: { id: true, status: true, email: true, role: true },
+      select: { id: true, accountStatus: true, email: true, role: true },
     });
     if (!target) throw new NotFoundException('User not found');
 
-    const validTransitions: Record<UserStatus, UserStatus[]> = {
-      [UserStatus.PENDING]: [UserStatus.APPROVED, UserStatus.REJECTED],
-      [UserStatus.APPROVED]: [UserStatus.SUSPENDED],
-      [UserStatus.REJECTED]: [],
-      [UserStatus.SUSPENDED]: [UserStatus.APPROVED],
+    const validTransitions: Record<AccountStatus, AccountStatus[]> = {
+      [AccountStatus.PENDING]: [AccountStatus.ACTIVE, AccountStatus.REJECTED],
+      [AccountStatus.ACTIVE]: [AccountStatus.SUSPENDED],
+      [AccountStatus.REJECTED]: [],
+      [AccountStatus.SUSPENDED]: [AccountStatus.ACTIVE],
     };
 
-    const allowed = validTransitions[target.status];
-    if (!allowed.includes(dto.status)) {
+    const allowed = validTransitions[target.accountStatus];
+    if (!allowed.includes(dto.status as unknown as AccountStatus)) {
       throw new BadRequestException(
-        `Invalid status transition: ${target.status} → ${dto.status}. Allowed: [${allowed.join(', ')}]`,
+        `Invalid status transition: ${target.accountStatus} → ${dto.status}. Allowed: [${allowed.join(', ')}]`,
       );
     }
 
@@ -330,16 +328,14 @@ export class UsersService {
       }
     }
 
-    const oldStatus = target.status;
+    const oldStatus = target.accountStatus;
     const updated = await this.prisma.user.update({
       where: { id },
       data: {
-        status: dto.status,
+        accountStatus: dto.status as unknown as AccountStatus,
         approvedById: actor.id,
         approvedAt: new Date(),
         approvalReason: dto.reason ?? null,
-        // Auto-activate on approval, deactivate on rejection/suspension
-        isActive: dto.status === UserStatus.APPROVED,
       },
       select: USER_SELECT,
     });
@@ -350,8 +346,8 @@ export class UsersService {
       action: 'STATUS_CHANGED',
       entityType: 'User',
       entityId: id,
-      oldValue: { status: oldStatus },
-      newValue: { status: updated.status, approvedById: actor.id, approvedAt: updated.approvedAt, reason: dto.reason },
+      oldValue: { accountStatus: oldStatus },
+      newValue: { accountStatus: updated.accountStatus, approvedById: actor.id, approvedAt: updated.approvedAt, reason: dto.reason },
       metadata: { ipAddress, actorRole: actor.role },
       ipAddress,
     });
@@ -375,10 +371,10 @@ export class UsersService {
   ) {
     const target = await this.prisma.user.findFirst({
       where: { id, tenantId },
-      select: { id: true, isActive: true, role: true, status: true },
+      select: { id: true, accountStatus: true, role: true },
     });
     if (!target) throw new NotFoundException('User not found');
-    if (!target.isActive) throw new BadRequestException('User is already inactive');
+    if (target.accountStatus !== AccountStatus.ACTIVE) throw new BadRequestException('User is not active');
 
     if (id === actor.id) {
       throw new ForbiddenException('Cannot deactivate your own account');
@@ -391,7 +387,7 @@ export class UsersService {
 
     const updated = await this.prisma.user.update({
       where: { id },
-      data: { isActive: false, refreshToken: null },
+      data: { accountStatus: AccountStatus.SUSPENDED, refreshToken: null },
       select: USER_SELECT,
     });
 
@@ -401,8 +397,8 @@ export class UsersService {
       action: 'USER.DEACTIVATED',
       entityType: 'User',
       entityId: id,
-      oldValue: { isActive: true },
-      newValue: { isActive: false },
+      oldValue: { accountStatus: AccountStatus.ACTIVE },
+      newValue: { accountStatus: AccountStatus.SUSPENDED },
       metadata: { targetRole: target.role, ipAddress },
       ipAddress,
     });
@@ -566,7 +562,7 @@ export class UsersService {
     // 1. Send warning emails to accounts exactly 23 days old (7 days until deletion)
     const warningUsers = await this.prisma.user.findMany({
       where: {
-        status: UserStatus.PENDING,
+        accountStatus: AccountStatus.PENDING,
         createdAt: { gte: twentyFourDaysAgo, lt: twentyThreeDaysAgo },
       },
       select: { id: true, email: true, firstName: true },
@@ -588,7 +584,7 @@ export class UsersService {
     // 2. Delete accounts older than 30 days
     const staleUsers = await this.prisma.user.findMany({
       where: {
-        status: UserStatus.PENDING,
+        accountStatus: AccountStatus.PENDING,
         createdAt: { lt: thirtyDaysAgo },
       },
       select: { id: true, email: true, firstName: true, tenantId: true },

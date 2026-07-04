@@ -4,6 +4,7 @@ import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import {
   AccountType,
+  AccountStatus,
   DocumentStatus,
   DocumentType,
   KycStatus,
@@ -218,7 +219,8 @@ export class AdminService {
 
     const [
       totalMembers,
-      activeMembers,
+      totalActiveAccounts,
+      engagedUsers30d,
       pendingKyc,
       totalLoans,
       activeLoans,
@@ -228,7 +230,8 @@ export class AdminService {
       mpesa30d,
     ] = await this.prisma.$transaction([
       this.prisma.member.count({ where: { tenantId } }),
-      this.prisma.member.count({ where: { tenantId, isActive: true } }),
+      this.prisma.user.count({ where: { tenantId, accountStatus: AccountStatus.ACTIVE } }),
+      this.prisma.user.count({ where: { tenantId, lastLoginAt: { gte: minus30d } } }),
       this.prisma.member.count({ where: { tenantId, kycStatus: KycStatus.PENDING_REVIEW } }),
       this.prisma.loan.count({ where: { tenantId } }),
       this.prisma.loan.findMany({
@@ -270,11 +273,12 @@ export class AdminService {
     return {
       members: {
         total: totalMembers,
-        active: activeMembers,
-        inactive: totalMembers - activeMembers,
+        totalActiveAccounts,
+        engagedUsers30d,
         pendingKyc,
       },
       loans: {
+        total: totalLoans,
         active: activeLoans.length,
         totalOutstandingAmount: totalActiveLoanAmount.toNumber(),
         pendingApprovals: pendingLoans,
@@ -306,7 +310,8 @@ export class AdminService {
       search?: string;
       page?: number;
       limit?: number;
-      status?: 'active' | 'inactive';
+      accountStatus?: AccountStatus;
+      recentlyActive?: boolean;
       role?: UserRole;
     },
   ) {
@@ -316,8 +321,8 @@ export class AdminService {
 
     const where = {
       tenantId,
-      ...(opts.status === 'active' && { isActive: true }),
-      ...(opts.status === 'inactive' && { isActive: false }),
+      ...(opts.accountStatus && { user: { accountStatus: opts.accountStatus } }),
+      ...(opts.recentlyActive && { user: { lastLoginAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } } }),
       ...(opts.search && {
         OR: [
           { memberNumber: { contains: opts.search, mode: 'insensitive' as const } },
@@ -345,7 +350,7 @@ export class AdminService {
               email: true,
               phone: true,
               role: true,
-              isActive: true,
+              accountStatus: true,
               emailVerified: true,
               lastLoginAt: true,
             },

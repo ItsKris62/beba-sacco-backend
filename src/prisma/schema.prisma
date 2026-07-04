@@ -362,9 +362,9 @@ enum DocumentType {
 }
 
 // ─── User Account Lifecycle Status ───────────────────────────────────────────
-enum UserStatus {
+enum AccountStatus {
   PENDING // Awaiting staff approval (self-registered or admin-created)
-  APPROVED // Active and approved
+  ACTIVE // Active and approved
   REJECTED // Rejected by staff (terminal for this request; may re-apply)
   SUSPENDED // Account frozen (terminal until explicitly reactivated)
 
@@ -453,7 +453,6 @@ model User {
   firstName     String
   lastName      String
   phone         String?
-  isActive      Boolean @default(true)
   emailVerified Boolean @default(false)
 
   refreshToken       String?   @db.Text // argon2 hash of refresh JWT
@@ -470,7 +469,7 @@ model User {
   wardId      String? // FK to Ward – set on member approval
 
   // ─── User Lifecycle & Approval ────────────────────────────────────────────
-  status         UserStatus @default(PENDING) // PENDING | APPROVED | REJECTED | SUSPENDED
+  accountStatus  AccountStatus @default(PENDING) // PENDING | ACTIVE | REJECTED | SUSPENDED
   createdById    String? // userId of actor who created this account
   approvedById   String? // userId of actor who approved/rejected
   approvedAt     DateTime? // when approval decision was made
@@ -500,7 +499,7 @@ model User {
   @@index([tenantId])
   @@index([email])
   @@index([role])
-  @@index([status])
+  @@index([accountStatus])
   @@index([idNumber])
   @@index([importBatchId])
   @@schema("public")
