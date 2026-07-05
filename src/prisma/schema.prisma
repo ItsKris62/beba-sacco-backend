@@ -768,6 +768,11 @@ model Account {
   frozenSavings Decimal     @default(0) @db.Decimal(18, 4)
   isActive      Boolean     @default(true)
 
+  // Snapshotted from AccountTypePolicy at creation time (same pattern as
+  // Loan copying interestRate from LoanProduct at application time).
+  minimumBalance Decimal @default(0) @db.Decimal(18, 4)
+  allowsNegative Boolean @default(false)
+
   // Optimistic locking version for concurrent balance updates
   version Int @default(0)
 
@@ -779,6 +784,26 @@ model Account {
   @@unique([tenantId, accountNumber])
   @@index([tenantId, memberId])
   @@index([tenantId, memberId, accountType, isActive])
+  @@schema("public")
+}
+
+/// Tenant-configurable balance rules per account type (FOSA/BOSA).
+/// Resolved onto Account.minimumBalance/allowsNegative at account-creation time;
+/// editing a policy here does not retroactively change existing accounts.
+model AccountTypePolicy {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  accountType    AccountType
+  minimumBalance Decimal     @default(0) @db.Decimal(18, 4)
+  allowsNegative Boolean     @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, accountType])
+  @@index([tenantId])
   @@schema("public")
 }
 
@@ -951,6 +976,12 @@ model Transaction {
 
   processedBy String? // userId of teller or "SYSTEM"
 
+  // Pairs the two legs of an internal FOSA <-> BOSA transfer (self-relation,
+  // same convention as GLAccount.parentId/children below).
+  linkedTransactionId String?
+  linkedTransaction   Transaction?  @relation("TransferPair", fields: [linkedTransactionId], references: [id])
+  linkedTransactions  Transaction[] @relation("TransferPair")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -962,6 +993,7 @@ model Transaction {
   @@index([tenantId, status, createdAt])
   @@index([reference])
   @@index([createdAt])
+  @@index([linkedTransactionId])
   @@schema("public")
 }
 
@@ -2151,6 +2183,10 @@ enum JournalEntryType {
   FEE_REVERSAL
   MPESA_DEPOSIT
   INTEREST_ACCRUAL
+  DEPOSIT // Phase: LedgerService-posted cash/M-Pesa deposit
+  WITHDRAWAL // Phase: LedgerService-posted withdrawal
+  TRANSFER // Phase: internal FOSA <-> BOSA transfer
+  DIVIDEND_PAYOUT // Phase: annual BOSA dividend distribution
 
   @@schema("public")
 }

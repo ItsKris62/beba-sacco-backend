@@ -9,6 +9,8 @@ import {
 import { Decimal } from 'decimal.js';
 import {
   Prisma,
+  AccountType,
+  GLAccountType,
   JournalEntryStatus,
   JournalEntryType,
   MpesaTxType,
@@ -36,6 +38,64 @@ import { ExportGLQueryDto } from './dto/export-gl.dto';
  * TODO: Move to TenantSettings table for per-tenant configuration.
  */
 const APPROVAL_THRESHOLD = 100_000;
+
+/**
+ * Default SACCO chart of accounts, seeded for every tenant.
+ * Kept as the single source of truth — prisma/seed-gl-accounts.ts (CLI) calls
+ * AccountingService.seedDefaultChartOfAccounts() rather than duplicating this list.
+ */
+interface GLAccountSeed {
+  code: string;
+  name: string;
+  type: GLAccountType;
+  isSystemAccount: boolean;
+}
+
+const DEFAULT_GL_ACCOUNTS: GLAccountSeed[] = [
+  // ASSET accounts
+  { code: '1000', name: 'Cash at Bank - M-Pesa', type: 'ASSET', isSystemAccount: true },
+  { code: '1010', name: 'Cash at Bank - Commercial', type: 'ASSET', isSystemAccount: true },
+  { code: '1100', name: 'Accounts Receivable', type: 'ASSET', isSystemAccount: true },
+  { code: '1300', name: 'Loan Portfolio - Development', type: 'ASSET', isSystemAccount: true },
+  { code: '1301', name: 'Loan Portfolio - Jipange', type: 'ASSET', isSystemAccount: true },
+  { code: '1302', name: 'Loan Portfolio - Emergency', type: 'ASSET', isSystemAccount: true },
+  { code: '1400', name: 'Provision for Bad Debts', type: 'ASSET', isSystemAccount: true },
+
+  // LIABILITY accounts
+  { code: '2000', name: 'Member Savings', type: 'LIABILITY', isSystemAccount: true },
+  { code: '2100', name: 'Member Shares', type: 'LIABILITY', isSystemAccount: true },
+  { code: '2200', name: 'Accounts Payable', type: 'LIABILITY', isSystemAccount: true },
+  { code: '2300', name: 'Member Deposits - FOSA', type: 'LIABILITY', isSystemAccount: true },
+  { code: '2400', name: 'Member Deposits - BOSA', type: 'LIABILITY', isSystemAccount: true },
+
+  // EQUITY accounts
+  { code: '3000', name: 'Share Capital', type: 'EQUITY', isSystemAccount: true },
+  { code: '3100', name: 'Retained Earnings', type: 'EQUITY', isSystemAccount: true },
+  { code: '3200', name: 'Statutory Reserve', type: 'EQUITY', isSystemAccount: true },
+
+  // REVENUE accounts
+  { code: '4000', name: 'Interest Income - Loans', type: 'REVENUE', isSystemAccount: true },
+  { code: '4100', name: 'Fee Income', type: 'REVENUE', isSystemAccount: true },
+  { code: '4200', name: 'Penalty Income', type: 'REVENUE', isSystemAccount: true },
+  { code: '4300', name: 'Processing Fee Income', type: 'REVENUE', isSystemAccount: true },
+
+  // EXPENSE accounts
+  { code: '5000', name: 'Operating Expenses', type: 'EXPENSE', isSystemAccount: true },
+  { code: '5100', name: 'Staff Costs', type: 'EXPENSE', isSystemAccount: true },
+  { code: '5200', name: 'M-Pesa Transaction Fees', type: 'EXPENSE', isSystemAccount: true },
+  { code: '5300', name: 'Bad Debt Write-off', type: 'EXPENSE', isSystemAccount: true },
+  { code: '5400', name: 'Interest Expense', type: 'EXPENSE', isSystemAccount: true },
+];
+
+/** MVP default balance policy per account type, seeded for every new tenant. */
+const DEFAULT_ACCOUNT_TYPE_POLICIES: Array<{
+  accountType: AccountType;
+  minimumBalance: number;
+  allowsNegative: boolean;
+}> = [
+  { accountType: AccountType.FOSA, minimumBalance: 0, allowsNegative: false },
+  { accountType: AccountType.BOSA, minimumBalance: 0, allowsNegative: false },
+];
 
 /**
  * AccountingService
@@ -1190,6 +1250,68 @@ export class AccountingService {
       mpesaVolume,
       generatedAt: new Date().toISOString(),
     };
+  }
+
+  // ─── TENANT PROVISIONING (GL seeding) ──────────────────────────────────────────
+
+  /**
+   * Idempotently seed the default SACCO chart of accounts for a tenant.
+   * Matches existing rows by (tenantId, code) and leaves them untouched —
+   * safe to call repeatedly (e.g. re-run after adding a new default account).
+   */
+  async seedDefaultChartOfAccounts(tenantId: string): Promise<{ seeded: number }> {
+    for (const account of DEFAULT_GL_ACCOUNTS) {
+      await this.prisma.gLAccount.upsert({
+        where: { tenantId_code: { tenantId, code: account.code } },
+        update: {},
+        create: {
+          tenantId,
+          code: account.code,
+          name: account.name,
+          type: account.type,
+          isSystemAccount: account.isSystemAccount,
+          isActive: true,
+        },
+      });
+    }
+    return { seeded: DEFAULT_GL_ACCOUNTS.length };
+  }
+
+  /**
+   * Idempotently seed the default FOSA/BOSA balance policy for a tenant.
+   * MVP defaults: minimumBalance = 0, allowsNegative = false for both types.
+   * Existing policy rows are left untouched.
+   */
+  async seedDefaultAccountTypePolicies(tenantId: string): Promise<{ seeded: number }> {
+    for (const policy of DEFAULT_ACCOUNT_TYPE_POLICIES) {
+      await this.prisma.accountTypePolicy.upsert({
+        where: { tenantId_accountType: { tenantId, accountType: policy.accountType } },
+        update: {},
+        create: {
+          tenantId,
+          accountType: policy.accountType,
+          minimumBalance: policy.minimumBalance,
+          allowsNegative: policy.allowsNegative,
+        },
+      });
+    }
+    return { seeded: DEFAULT_ACCOUNT_TYPE_POLICIES.length };
+  }
+
+  /**
+   * Full accounting provisioning for a newly created tenant: chart of accounts
+   * + default account-type balance policies. Called by TenantsService.create()
+   * right after the Tenant row is inserted. Idempotent — safe to re-run for an
+   * existing tenant (e.g. from the CLI backfill script).
+   */
+  async provisionTenantAccounting(
+    tenantId: string,
+  ): Promise<{ glAccountsSeeded: number; policiesSeeded: number }> {
+    const [gl, policies] = await Promise.all([
+      this.seedDefaultChartOfAccounts(tenantId),
+      this.seedDefaultAccountTypePolicies(tenantId),
+    ]);
+    return { glAccountsSeeded: gl.seeded, policiesSeeded: policies.seeded };
   }
 
   // ─── HELPERS ──────────────────────────────────────────────────────────────────

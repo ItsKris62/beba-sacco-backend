@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsEmail, IsInt, IsOptional, IsString, IsUrl, Length, Min, Max, IsBoolean, ValidateNested } from 'class-validator';
+import { IsEmail, IsInt, IsOptional, IsString, IsUrl, Length, Min, ValidateNested } from 'class-validator';
+import { SecuritySettingsDto } from './security-settings.dto';
 
 export class UpdateTenantSettingsDto {
   @ApiPropertyOptional({
@@ -47,39 +48,4 @@ export class UpdateTenantSettingsDto {
   @ValidateNested()
   @Type(() => SecuritySettingsDto)
   security?: SecuritySettingsDto;
-}
-
-export class PasswordPolicyDto {
-  @IsOptional()
-  @IsInt()
-  @Min(8)
-  @Max(128)
-  minLength?: number;
-
-  @IsOptional()
-  @IsBoolean()
-  requireComplexity?: boolean;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(365)
-  expiryDays?: number;
-}
-
-export class SecuritySettingsDto {
-  @IsOptional()
-  @IsBoolean()
-  require2FA?: boolean;
-
-  @IsOptional()
-  @IsInt()
-  @Min(5)
-  @Max(10080)
-  sessionTimeoutMinutes?: number;
-
-  @IsOptional()
-  @ValidateNested()
-  @Type(() => PasswordPolicyDto)
-  passwordPolicy?: PasswordPolicyDto;
 }

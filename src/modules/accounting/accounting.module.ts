@@ -23,5 +23,6 @@ import { PrismaService } from '../../prisma/prisma.service';
   imports: [FinancialModule, AuditModule],
   controllers: [AccountingController],
   providers: [AccountingService, PrismaService],
+  exports: [AccountingService],
 })
 export class AccountingModule {}
