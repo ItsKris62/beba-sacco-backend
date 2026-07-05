@@ -1,25 +1,83 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { AuditService } from '../audit/audit.service';
 import { StorageService } from '../storage/storage.service';
+import { AccountingService } from '../accounting/accounting.service';
 import { UpdateTenantSettingsDto } from './dto/update-tenant-settings.dto';
 import { RequestLogoUploadUrlDto } from './dto/request-logo-upload-url.dto';
+import { CreateTenantDto } from './dto/create-tenant.dto';
 
 const PROFILE_FIELDS = ['name', 'contactEmail', 'contactPhone', 'address', 'logoUrl'] as const;
 type ProfileField = (typeof PROFILE_FIELDS)[number];
 
 @Injectable()
 export class TenantsService {
+  private readonly logger = new Logger(TenantsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
     private readonly storage: StorageService,
     private readonly config: ConfigService,
+    private readonly accounting: AccountingService,
   ) {}
+
+  /**
+   * Provision a brand-new tenant: creates the Tenant row, then seeds the
+   * default chart of accounts + FOSA/BOSA balance policies so the tenant is
+   * immediately ready to open member accounts and post ledger entries.
+   *
+   * GL/policy seeding runs after the Tenant row commits (separate idempotent
+   * calls, not one DB transaction) — if seeding fails partway, it is safe to
+   * re-run via accounting.provisionTenantAccounting(tenant.id) since both
+   * seed methods upsert on (tenantId, code) / (tenantId, accountType).
+   */
+  async create(dto: CreateTenantDto, actorId?: string) {
+    let tenant;
+    try {
+      tenant = await this.prisma.tenant.create({
+        data: {
+          name: dto.name,
+          slug: dto.slug,
+          schemaName: dto.schemaName,
+          contactEmail: dto.contactEmail,
+          contactPhone: dto.contactPhone,
+          address: dto.address,
+          logoUrl: dto.logoUrl,
+        },
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException('A tenant with this slug or schemaName already exists');
+      }
+      throw e;
+    }
+
+    const provisioning = await this.accounting.provisionTenantAccounting(tenant.id);
+    this.logger.log(
+      `Provisioned tenant ${tenant.slug} (${tenant.id}): ` +
+        `${provisioning.glAccountsSeeded} GL accounts, ${provisioning.policiesSeeded} account-type policies`,
+    );
+
+    this.audit
+      .create({
+        tenantId: tenant.id,
+        actorId,
+        action: 'TENANT.CREATED',
+        entityType: 'Tenant',
+        entityId: tenant.id,
+        newValue: { name: tenant.name, slug: tenant.slug, contactEmail: tenant.contactEmail },
+        metadata: provisioning,
+      })
+      .catch((e: unknown) => this.logger.error('Audit write failed for TENANT.CREATED', e));
+
+    return { ...tenant, provisioning };
+  }
 
   async getSettings(tenantId: string) {
     const tenant = await this.prisma.tenant.findUnique({

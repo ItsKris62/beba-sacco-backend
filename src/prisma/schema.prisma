@@ -411,6 +411,7 @@ model Tenant {
   ticketMessages        TicketMessage[]
   ticketAttachments     TicketAttachment[]
   accounts              Account[]
+  accountTypePolicies   AccountTypePolicy[]
   loanProducts          LoanProduct[]
   loans                 Loan[]
   transactions          Transaction[]
