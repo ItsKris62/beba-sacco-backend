@@ -6,6 +6,7 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -20,6 +21,7 @@ import { AuditService } from '../audit/audit.service';
 import { JwtBlocklistService } from './jwt-blocklist.service';
 import { tenantAsyncStorage } from '../../common/services/tenant-context.service';
 import { SessionService, DeviceInfo } from './session.service';
+import { TwoFactorService } from './two-factor.service';
 import { LoginDto, LoginResponseDto, LoginUserDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshTokenDto, RefreshTokenResponseDto } from './dto/refresh.dto';
@@ -35,6 +37,7 @@ import { SmsService } from '../sms/sms.service';
 import { AUDIT_ACTIONS } from '../audit/audit-actions';
 import { maskPhone } from '../mpesa/utils/mpesa.utils';
 import { RedisService } from '../../common/services/redis.service';
+import { PasswordPolicyService } from './password-policy.service';
 
 /** JWT payload shape for password-reset tokens (separate from access tokens) */
 interface PasswordResetPayload {
@@ -103,6 +106,8 @@ export class AuthService {
     private readonly otpService: OtpService,
     private readonly smsService: SmsService,
     private readonly redis: RedisService,
+    private readonly passwordPolicy: PasswordPolicyService,
+    private readonly twoFactorService: TwoFactorService,
   ) {}
 
   private enqueueEmail(payload: EmailJobPayload, ctx: string): void {
@@ -205,6 +210,9 @@ export class AuthService {
           lastName: true,
           tenantId: true,
           mustChangePassword: true,
+          lastPasswordChangeAt: true,
+          twoFactorEnabled: true,
+          totpEnrolledAt: true,
         },
       }),
     );
@@ -273,6 +281,73 @@ export class AuthService {
       );
     }
 
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
+    const require2FA = (tenant?.settings as any)?.security?.require2FA === true;
+
+    // Check password expiry before generating tokens
+    const expiryDays = (tenant?.settings as any)?.security?.passwordPolicy?.expiryDays;
+    if (typeof expiryDays === 'number' && expiryDays > 0) {
+      const passwordAgeMs = Date.now() - user.lastPasswordChangeAt.getTime();
+      const passwordAgeDays = passwordAgeMs / (1000 * 60 * 60 * 24);
+      if (passwordAgeDays > expiryDays && !user.mustChangePassword) {
+        user.mustChangePassword = true;
+        try {
+          await this.prisma.user.update({
+            where: { id: user.id },
+            data: { mustChangePassword: true },
+          });
+          await this.writeAuditSafe({
+            tenantId,
+            userId: user.id,
+            action: 'AUTH.PASSWORD_EXPIRED',
+            resource: 'User',
+            resourceId: user.id,
+            metadata: { ageDays: Math.floor(passwordAgeDays), expiryDays },
+            ipAddress,
+          });
+        } catch (err) {
+          this.logger.error(`Failed to update password expiry for user ${user.id}`, err);
+        }
+      }
+    }
+
+    if (user.twoFactorEnabled) {
+      if (!loginDto.totpToken && !loginDto.backupCode) {
+        throw new ForbiddenException({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: '2FA token required',
+          requires2FA: true,
+        });
+      }
+      if (loginDto.backupCode) {
+        await this.twoFactorService.verifyBackupCode(user.id, tenantId, loginDto.backupCode, ipAddress);
+      } else if (loginDto.totpToken) {
+        await this.twoFactorService.verifyToken(user.id, loginDto.totpToken, tenantId);
+      }
+    } else if (require2FA) {
+      const setupToken = this.jwtService.sign(
+        {
+          sub: user.id,
+          email: user.email,
+          phone: user.phone ?? user.phoneNumber ?? null,
+          role: user.role,
+          tenantId: user.tenantId,
+          scope: '2fa_setup',
+        },
+        {
+          secret: this.configService.getOrThrow<string>('app.jwt.secret'),
+          expiresIn: '15m',
+        },
+      );
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: '2FA setup required',
+        setupToken,
+      });
+    }
+
     const { accessToken, refreshToken } = this.generateTokens({
       id: user.id,
       email: user.email,
@@ -339,6 +414,8 @@ export class AuthService {
       throw new ConflictException('An account with this email already exists');
     }
 
+    await this.passwordPolicy.validatePassword(tenantId, registerDto.password);
+
     const passwordHash = await argon2.hash(registerDto.password, {
       type: argon2.argon2id,
       memoryCost: 65536, // 64 MiB
@@ -356,6 +433,7 @@ export class AuthService {
         role: UserRole.MEMBER,
         tenantId,
         mustChangePassword: false,
+        lastPasswordChangeAt: new Date(),
       },
       select: {
         id: true,
@@ -460,6 +538,7 @@ export class AuthService {
           tenantId: true,
           accountStatus: true,
           refreshToken: true,
+          lastPasswordChangeAt: true,
         },
       }),
     );
@@ -467,6 +546,9 @@ export class AuthService {
     if (!user || user.accountStatus !== AccountStatus.ACTIVE || !user.refreshToken) {
       throw new UnauthorizedException('Invalid refresh token');
     }
+
+    // Evaluate password expiry
+    await this.passwordPolicy.validatePasswordAge(user.tenantId, user.lastPasswordChangeAt);
 
     if (user.role !== UserRole.SUPER_ADMIN && user.tenantId !== tenantId) {
       throw new UnauthorizedException('Token/tenant mismatch');
@@ -785,6 +867,8 @@ export class AuthService {
       throw new BadRequestException('Reset link is invalid or has expired');
     }
 
+    await this.passwordPolicy.validatePassword(tenantId, dto.newPassword);
+
     // Step 6: Hash new password
     const newPasswordHash = await argon2.hash(dto.newPassword, {
       type: argon2.argon2id,
@@ -799,6 +883,7 @@ export class AuthService {
       data: {
         passwordHash: newPasswordHash,
         mustChangePassword: false,
+        lastPasswordChangeAt: new Date(),
         refreshToken: null, // Invalidate all existing sessions
         passwordResetToken: null, // Single-use: clear nonce
         passwordResetExpiry: null,
@@ -967,6 +1052,8 @@ export class AuthService {
       throw err;
     }
 
+    await this.passwordPolicy.validatePassword(tenantId, dto.newPassword);
+
     const newPasswordHash = await argon2.hash(dto.newPassword, {
       type: argon2.argon2id,
       memoryCost: 65536,
@@ -979,6 +1066,7 @@ export class AuthService {
       data: {
         passwordHash: newPasswordHash,
         mustChangePassword: false,
+        lastPasswordChangeAt: new Date(),
         refreshToken: null,
         passwordResetToken: null,
         passwordResetExpiry: null,
@@ -1044,6 +1132,8 @@ export class AuthService {
       throw new UnauthorizedException('Current password is incorrect');
     }
 
+    await this.passwordPolicy.validatePassword(tenantId, dto.newPassword);
+
     const newHash = await argon2.hash(dto.newPassword, {
       type: argon2.argon2id,
       memoryCost: 65536,
@@ -1057,6 +1147,7 @@ export class AuthService {
         data: {
           passwordHash: newHash,
           mustChangePassword: false,
+          lastPasswordChangeAt: new Date(),
           refreshToken: null,
         },
       }),

@@ -43,6 +43,7 @@ export class TenantsService {
       contactPhone: tenant.contactPhone,
       address: tenant.address,
       logoUrl: tenant.logoUrl,
+      security: settings.security as Record<string, unknown> | undefined,
     };
   }
 
@@ -87,6 +88,18 @@ export class TenantsService {
       ...(dto.maxConcurrentGuarantees !== undefined && {
         maxConcurrentGuarantees: dto.maxConcurrentGuarantees,
       }),
+      ...(dto.security !== undefined && {
+        security: {
+          ...(currentSettings.security as Record<string, unknown> || {}),
+          ...dto.security,
+          ...(dto.security.passwordPolicy !== undefined && {
+            passwordPolicy: {
+              ...((currentSettings.security as any)?.passwordPolicy || {}),
+              ...dto.security.passwordPolicy,
+            },
+          }),
+        },
+      }),
     };
 
     const profileUpdates: Partial<Record<ProfileField, string>> = {};
@@ -116,6 +129,7 @@ export class TenantsService {
         entityId: tenantId,
         oldValue: {
           maxConcurrentGuarantees: currentSettings.maxConcurrentGuarantees ?? 3,
+          security: currentSettings.security,
           name: existing.name,
           contactEmail: existing.contactEmail,
           contactPhone: existing.contactPhone,
@@ -124,6 +138,7 @@ export class TenantsService {
         },
         newValue: {
           maxConcurrentGuarantees: newSettings.maxConcurrentGuarantees ?? 3,
+          security: newSettings.security,
           ...profileUpdates,
         },
         metadata: { changedFields },

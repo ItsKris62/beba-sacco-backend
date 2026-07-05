@@ -44,6 +44,19 @@ export class SessionService {
     return createHash('sha256').update(raw).digest('hex');
   }
 
+  private async getSessionExpiryDate(tenantId: string): Promise<Date> {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    const settings = (tenant?.settings as any) || {};
+    const timeoutMinutes = settings.security?.sessionTimeoutMinutes;
+    if (typeof timeoutMinutes === 'number' && timeoutMinutes > 0) {
+      return new Date(Date.now() + timeoutMinutes * 60 * 1000);
+    }
+    return new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+  }
+
   async createSession(
     userId: string,
     deviceInfo: DeviceInfo,
@@ -52,7 +65,7 @@ export class SessionService {
   ): Promise<string> {
     const deviceId = this.generateDeviceId(deviceInfo);
     const fingerprint = `${deviceInfo.userAgent?.substring(0, 50) ?? 'unknown'} | ${deviceInfo.timezone ?? 'UTC'}`;
-    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+    const expiresAt = await this.getSessionExpiryDate(tenantId);
 
     const activeSessions = await this.prisma.refreshSession.count({
       where: { userId, isRevoked: false, expiresAt: { gt: new Date() } },

@@ -455,13 +455,20 @@ model User {
   phone         String?
   emailVerified Boolean @default(false)
 
-  refreshToken       String?   @db.Text // argon2 hash of refresh JWT
-  lastLoginAt        DateTime?
-  mustChangePassword Boolean   @default(false)
+  refreshToken         String?   @db.Text // argon2 hash of refresh JWT
+  lastLoginAt          DateTime?
+  mustChangePassword   Boolean   @default(false)
+  lastPasswordChangeAt DateTime  @default(now())
 
   // Password reset (stateless JWT + nonce pattern)
   passwordResetToken  String?   @db.Text // argon2 hash of one-time nonce
   passwordResetExpiry DateTime? // expiry enforced at DB level too
+
+  // ─── 2FA State (Sprint 4 Security) ──────────────────────────────────────────
+  twoFactorEnabled Boolean   @default(false)
+  totpSecret       String?   @db.Text // AES-256-GCM encrypted
+  backupCodes      String[]  // Array of argon2 hashes
+  totpEnrolledAt   DateTime?
 
   // Sprint 1 – Onboarding & Location fields (additive, nullable for backward compat)
   idNumber    String? @unique // Kenyan National ID (7–8 digits) – set on member approval

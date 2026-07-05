@@ -250,4 +250,22 @@ export class UsersController {
   ) {
     return this.usersService.generateTemporaryPassword(id, tenant.id, actor, req.ip);
   }
+  @Post(':id/disable-2fa')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Disable 2FA for a specific user',
+    description: 'Admin override to disable 2FA for a user who lost their device and backup codes.',
+  })
+  @ApiResponse({ status: 200, description: '2FA disabled successfully' })
+  @ApiResponse({ status: 403, description: 'Insufficient role' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  disable2fa(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.usersService.disableUser2fa(id, tenant.id, actor, req.ip);
+  }
 }

@@ -412,6 +412,7 @@ export class UsersService {
       where: { id },
       data: {
         mustChangePassword: true,
+        lastPasswordChangeAt: new Date(),
         refreshToken: null,
       },
     });
@@ -484,6 +485,7 @@ export class UsersService {
       data: {
         passwordHash,
         mustChangePassword: true,
+        lastPasswordChangeAt: new Date(),
         refreshToken: null,
       },
     });
@@ -595,6 +597,39 @@ export class UsersService {
   }
 
   // ─── PRIVATE HELPERS ─────────────────────────────────────────
+
+  async disableUser2fa(userId: string, tenantId: string, actor: { id: string }, ipAddress?: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId, tenantId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
+    if ((tenant?.settings as any)?.security?.require2FA === true) {
+      throw new ForbiddenException('Tenant policy requires 2FA. You cannot disable it.');
+    }
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        twoFactorEnabled: false,
+        totpSecret: null,
+        backupCodes: [],
+        totpEnrolledAt: null,
+      },
+    });
+
+    await this.auditSafe({
+      tenantId,
+      userId: actor.id,
+      action: 'ADMIN.USER.2FA_DISABLED',
+      resource: 'User',
+      resourceId: userId,
+      ipAddress,
+    });
+
+    return { success: true, message: '2FA has been disabled for this user' };
+  }
 
   /** Fire-and-forget audit write — never let an audit failure break the user flow. */
   private async auditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {

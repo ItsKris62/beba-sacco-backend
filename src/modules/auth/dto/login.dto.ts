@@ -37,6 +37,16 @@ export class LoginDto {
   @IsString()
   @MinLength(8)
   password!: string;
+
+  @ApiPropertyOptional({ example: '123456', description: 'TOTP token for 2FA' })
+  @IsString()
+  @ValidateIf((o: LoginDto) => !!o.totpToken)
+  totpToken?: string;
+
+  @ApiPropertyOptional({ example: 'abcdef12', description: 'Backup code for 2FA recovery' })
+  @IsString()
+  @ValidateIf((o: LoginDto) => !!o.backupCode)
+  backupCode?: string;
 }
 
 export class LoginUserDto {

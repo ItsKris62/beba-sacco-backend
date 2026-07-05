@@ -15,6 +15,11 @@ import { SessionService } from './session.service';
 import { SessionController } from './session.controller';
 import { OtpService } from './otp.service';
 import { SmsModule } from '../sms/sms.module';
+import { TwoFactorService } from './two-factor.service';
+import { EncryptionService } from '../zero-trust/encryption/encryption.service';
+import { TwoFactorController } from './two-factor.controller';
+import { TwoFactorSetupStrategy } from './strategies/jwt-2fa-setup.strategy';
+import { PasswordPolicyService } from './password-policy.service';
 
 /**
  * Auth Module
@@ -49,15 +54,19 @@ import { SmsModule } from '../sms/sms.module';
     SmsModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
-  controllers: [AuthController, SessionController],
+  controllers: [AuthController, SessionController, TwoFactorController],
   providers: [
     AuthService,
+    PasswordPolicyService,
     PrismaService,
     JwtStrategy,
     JwtBlocklistService,
     RedisService,
     SessionService,
     OtpService,
+    TwoFactorService,
+    EncryptionService,
+    TwoFactorSetupStrategy,
   ],
   exports: [AuthService, JwtModule, PassportModule, SessionService, JwtBlocklistService],
 })

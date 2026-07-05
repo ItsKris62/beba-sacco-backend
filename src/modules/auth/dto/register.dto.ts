@@ -20,9 +20,6 @@ export class RegisterDto {
   })
   @IsString()
   @MinLength(8)
-  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/, {
-    message: 'Password too weak: needs uppercase, lowercase, digit, and special char (@$!%*?&)',
-  })
   password!: string;
 
   @ApiProperty({ example: 'John' })

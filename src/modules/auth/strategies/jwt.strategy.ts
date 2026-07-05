@@ -20,6 +20,7 @@ export interface JwtPayload {
   jti: string;
   iat?: number;
   exp?: number;
+  scope?: string;
 }
 
 /**
@@ -64,6 +65,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
+    if (payload.scope === '2fa_setup') {
+      throw new UnauthorizedException('Token is restricted to 2FA setup');
+    }
+
     // Phase 2: Check blocklist for revoked tokens (phone theft / password change)
     const blocked = await this.blocklist.isBlocked(payload.jti);
     if (blocked) {
