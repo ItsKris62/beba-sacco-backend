@@ -1,19 +1,14 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptional, IsString, IsEnum, IsBoolean } from 'class-validator';
 import { UserRole } from '@prisma/client';
+import { ASSIGNABLE_ROLES } from './create-user.dto';
 
 /**
  * Roles that can be assigned via PATCH /users/:id.
  * SUPER_ADMIN is excluded — it is a platform-only role managed outside tenant context.
+ * Reuses ASSIGNABLE_ROLES from create-user.dto.ts so creation and update stay in sync.
  */
-const UPDATABLE_ROLES = [
-  UserRole.TENANT_ADMIN,
-  UserRole.MANAGER,
-  UserRole.TELLER,
-  UserRole.AUDITOR,
-  UserRole.MEMBER,
-  UserRole.CHAIRMAN,
-] as const;
+const UPDATABLE_ROLES = ASSIGNABLE_ROLES;
 
 export class UpdateUserDto {
   @ApiPropertyOptional({ example: 'Jane' })

@@ -38,7 +38,7 @@ export class UsersController {
     description:
       'Creates a user with a temporary password (mustChangePassword = true). ' +
       'TENANT_ADMIN can create any tenant-level role. ' +
-      'MANAGER can only create TELLER, AUDITOR, or MEMBER accounts. ' +
+      'MANAGER can create LOAN_OFFICER, ACCOUNTANT, TELLER, MEMBER, CHAIRMAN, or AUDITOR accounts. ' +
       'SUPER_ADMIN is never assignable via this endpoint. ' +
       'For MEMBER self-registration, use POST /auth/register instead.',
   })

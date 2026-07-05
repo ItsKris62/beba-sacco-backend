@@ -9,33 +9,13 @@ import { randomInt } from 'crypto';
 import * as argon2 from 'argon2';
 import { UserRole, AccountStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { canCreateUserWithRole, canManageRole } from '../../common/guards/rbac.guard';
 import { AuditService } from '../audit/audit.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
-
-/** Roles that can be created/managed within a tenant context. */
-const TENANT_MANAGEABLE_ROLES: UserRole[] = [
-  UserRole.TENANT_ADMIN,
-  UserRole.MANAGER,
-  UserRole.TELLER,
-  UserRole.AUDITOR,
-  UserRole.MEMBER,
-  UserRole.CHAIRMAN,
-];
-
-/**
- * Roles that a MANAGER is allowed to manage.
- * MANAGER cannot create or modify TENANT_ADMIN accounts — only TENANT_ADMIN can.
- */
-const MANAGER_MANAGEABLE_ROLES: UserRole[] = [
-  UserRole.TELLER,
-  UserRole.MEMBER,
-  UserRole.CHAIRMAN,
-  UserRole.AUDITOR,
-];
 
 const TEMP_PASSWORD_UPPER = 'ABCDEFGHJKMNPQRSTUVWXYZ';
 const TEMP_PASSWORD_LOWER = 'abcdefghjkmnpqrstuvwxyz';
@@ -105,13 +85,11 @@ export class UsersService {
       throw new ForbiddenException('SUPER_ADMIN cannot be assigned via this endpoint');
     }
 
-    // MANAGER cannot promote someone to TENANT_ADMIN
-    if (
-      actor.role === UserRole.MANAGER &&
-      !MANAGER_MANAGEABLE_ROLES.includes(dto.role)
-    ) {
+    // Role hierarchy enforcement — DTO validation only confirms dto.role is an
+    // assignable role in general; it does not know the actor. That check happens here.
+    if (!canCreateUserWithRole(actor.role, dto.role)) {
       throw new ForbiddenException(
-        `MANAGER cannot create accounts with role ${dto.role}`,
+        `${actor.role} cannot create accounts with role ${dto.role}`,
       );
     }
 
@@ -236,14 +214,14 @@ export class UsersService {
       throw new ForbiddenException('SUPER_ADMIN cannot be assigned via this endpoint');
     }
 
-    // MANAGER cannot elevate a user to TENANT_ADMIN, nor modify an existing TENANT_ADMIN
-    if (actor.role === UserRole.MANAGER) {
-      if (target.role === UserRole.TENANT_ADMIN) {
-        throw new ForbiddenException('MANAGER cannot modify a TENANT_ADMIN account');
-      }
-      if (dto.role !== undefined && !MANAGER_MANAGEABLE_ROLES.includes(dto.role)) {
-        throw new ForbiddenException(`MANAGER cannot assign role ${dto.role}`);
-      }
+    // Actor must be permitted to manage the target's current role...
+    if (!canManageRole(actor.role, target.role)) {
+      throw new ForbiddenException(`${actor.role} cannot modify a ${target.role} account`);
+    }
+
+    // ...and, if reassigning, permitted to assign the new role too
+    if (dto.role !== undefined && !canManageRole(actor.role, dto.role)) {
+      throw new ForbiddenException(`${actor.role} cannot assign role ${dto.role}`);
     }
 
     const updated = await this.prisma.user.update({
@@ -379,9 +357,8 @@ export class UsersService {
       throw new ForbiddenException('Cannot deactivate your own account');
     }
 
-    // MANAGER cannot deactivate a TENANT_ADMIN
-    if (actor.role === UserRole.MANAGER && target.role === UserRole.TENANT_ADMIN) {
-      throw new ForbiddenException('MANAGER cannot deactivate a TENANT_ADMIN account');
+    if (!canManageRole(actor.role, target.role)) {
+      throw new ForbiddenException(`${actor.role} cannot deactivate a ${target.role} account`);
     }
 
     const updated = await this.prisma.user.update({
@@ -425,12 +402,9 @@ export class UsersService {
       );
     }
 
-    if (
-      actor.role === UserRole.MANAGER &&
-      !MANAGER_MANAGEABLE_ROLES.includes(target.role)
-    ) {
+    if (!canManageRole(actor.role, target.role)) {
       throw new ForbiddenException(
-        `MANAGER cannot force a password reset for a ${target.role} account`,
+        `${actor.role} cannot force a password reset for a ${target.role} account`,
       );
     }
 
@@ -491,12 +465,9 @@ export class UsersService {
       );
     }
 
-    if (
-      actor.role === UserRole.MANAGER &&
-      !MANAGER_MANAGEABLE_ROLES.includes(target.role)
-    ) {
+    if (!canManageRole(actor.role, target.role)) {
       throw new ForbiddenException(
-        `MANAGER cannot generate a temporary password for a ${target.role} account`,
+        `${actor.role} cannot generate a temporary password for a ${target.role} account`,
       );
     }
 

@@ -355,6 +355,101 @@ describe('🔐 RBAC Refactor E2E Tests', () => {
       expect(res.status).toBe(403);
     });
 
+    it('TENANT_ADMIN can create LOAN_OFFICER → 201 or validation error (not 403)', async () => {
+      testGuard.setRole(UserRole.TENANT_ADMIN);
+      const res = await request(app.getHttpServer())
+        .post('/users')
+        .set('Authorization', 'Bearer test-token')
+        .set('X-Tenant-ID', 'test-tenant-id')
+        .send({
+          email: 'loanofficer1@example.com',
+          password: 'TempPass123!',
+          firstName: 'Test',
+          lastName: 'LoanOfficer',
+          role: UserRole.LOAN_OFFICER,
+        });
+
+      expect([201, 400, 409]).toContain(res.status);
+    });
+
+    it('TENANT_ADMIN can create ACCOUNTANT → 201 or validation error (not 403)', async () => {
+      testGuard.setRole(UserRole.TENANT_ADMIN);
+      const res = await request(app.getHttpServer())
+        .post('/users')
+        .set('Authorization', 'Bearer test-token')
+        .set('X-Tenant-ID', 'test-tenant-id')
+        .send({
+          email: 'accountant1@example.com',
+          password: 'TempPass123!',
+          firstName: 'Test',
+          lastName: 'Accountant',
+          role: UserRole.ACCOUNTANT,
+        });
+
+      expect([201, 400, 409]).toContain(res.status);
+    });
+
+    it('MANAGER can create LOAN_OFFICER → 201 or validation error (not 403)', async () => {
+      testGuard.setRole(UserRole.MANAGER);
+      const res = await request(app.getHttpServer())
+        .post('/users')
+        .set('Authorization', 'Bearer test-token')
+        .set('X-Tenant-ID', 'test-tenant-id')
+        .send({
+          email: 'loanofficer2@example.com',
+          password: 'TempPass123!',
+          firstName: 'Test',
+          lastName: 'LoanOfficer',
+          role: UserRole.LOAN_OFFICER,
+        });
+
+      expect([201, 400, 409]).toContain(res.status);
+    });
+
+    it('MANAGER can create ACCOUNTANT → 201 or validation error (not 403)', async () => {
+      testGuard.setRole(UserRole.MANAGER);
+      const res = await request(app.getHttpServer())
+        .post('/users')
+        .set('Authorization', 'Bearer test-token')
+        .set('X-Tenant-ID', 'test-tenant-id')
+        .send({
+          email: 'accountant2@example.com',
+          password: 'TempPass123!',
+          firstName: 'Test',
+          lastName: 'Accountant',
+          role: UserRole.ACCOUNTANT,
+        });
+
+      expect([201, 400, 409]).toContain(res.status);
+    });
+
+    it('MANAGER can PATCH a role to LOAN_OFFICER without a DTO validation 400 (UPDATABLE_ROLES gap fix)', async () => {
+      testGuard.setRole(UserRole.MANAGER);
+      const res = await request(app.getHttpServer())
+        .patch('/users/00000000-0000-4000-8000-000000000000')
+        .set('Authorization', 'Bearer test-token')
+        .set('X-Tenant-ID', 'test-tenant-id')
+        .send({ role: UserRole.LOAN_OFFICER });
+
+      // The id doesn't exist, so 404 is the expected outcome here — the point of
+      // this test is that it's NOT a 400, which is what UPDATABLE_ROLES previously
+      // produced by rejecting LOAN_OFFICER before the request ever reached the service.
+      expect(res.status).not.toBe(400);
+      expect([403, 404]).toContain(res.status);
+    });
+
+    it('TENANT_ADMIN can PATCH a role to ACCOUNTANT without a DTO validation 400 (UPDATABLE_ROLES gap fix)', async () => {
+      testGuard.setRole(UserRole.TENANT_ADMIN);
+      const res = await request(app.getHttpServer())
+        .patch('/users/00000000-0000-4000-8000-000000000000')
+        .set('Authorization', 'Bearer test-token')
+        .set('X-Tenant-ID', 'test-tenant-id')
+        .send({ role: UserRole.ACCOUNTANT });
+
+      expect(res.status).not.toBe(400);
+      expect([403, 404]).toContain(res.status);
+    });
+
     it('SUPER_ADMIN cannot be created via API → 403', async () => {
       testGuard.setRole(UserRole.TENANT_ADMIN);
       const res = await request(app.getHttpServer())
@@ -370,27 +465,6 @@ describe('🔐 RBAC Refactor E2E Tests', () => {
         });
 
       expect(res.status).toBe(403);
-    });
-  });
-
-  // ─── 5. LOAN_OFFICER Removal Verification ─────────────────────────────────
-
-  describe('LOAN_OFFICER Complete Removal', () => {
-    it('UserRole enum does not contain LOAN_OFFICER', () => {
-      const roles = Object.values(UserRole);
-      expect(roles).not.toContain('LOAN_OFFICER');
-    });
-
-    it('UserRole enum contains exactly 7 roles', () => {
-      const roles = Object.values(UserRole);
-      expect(roles).toHaveLength(7);
-      expect(roles).toContain(UserRole.SUPER_ADMIN);
-      expect(roles).toContain(UserRole.TENANT_ADMIN);
-      expect(roles).toContain(UserRole.MANAGER);
-      expect(roles).toContain(UserRole.TELLER);
-      expect(roles).toContain(UserRole.MEMBER);
-      expect(roles).toContain(UserRole.CHAIRMAN);
-      expect(roles).toContain(UserRole.AUDITOR);
     });
   });
 });

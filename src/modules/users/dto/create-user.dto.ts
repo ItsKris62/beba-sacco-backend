@@ -3,16 +3,19 @@ import { IsEmail, IsEnum, IsOptional, IsString, Matches, MinLength } from 'class
 import { UserRole } from '@prisma/client';
 
 /**
- * Roles that can be assigned via POST /users (admin channel).
+ * Roles that can be assigned via POST /users (admin channel) and PATCH /users/:id.
  * MEMBER is created via /auth/register; SUPER_ADMIN is platform-only.
+ * Shared with update-user.dto.ts so the two endpoints can never drift apart.
  */
-const ASSIGNABLE_ROLES = [
+export const ASSIGNABLE_ROLES = [
   UserRole.TENANT_ADMIN,
   UserRole.MANAGER,
+  UserRole.LOAN_OFFICER,
   UserRole.TELLER,
   UserRole.AUDITOR,
   UserRole.MEMBER,
   UserRole.CHAIRMAN,
+  UserRole.ACCOUNTANT,
 ] as const;
 
 export class CreateUserDto {

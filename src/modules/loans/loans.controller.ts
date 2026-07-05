@@ -17,6 +17,7 @@ import { InviteGuarantorsDto } from './dto/invite-guarantors.dto';
 import { GuarantorResponseDto } from './dto/guarantor-response.dto';
 import { RejectLoanDto } from './dto/reject-loan.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -54,6 +55,16 @@ export class LoansController {
     @Query('includeInactive') includeInactive?: boolean,
   ) {
     return this.loans.findAllProducts(tenant.id, includeInactive === true || String(includeInactive) === 'true');
+  }
+
+  @Get('products/public')
+  @Public()
+  @ApiOperation({
+    summary: 'List active loan products (public, unauthenticated)',
+    description: 'Read-only feed for the public marketing site and loan calculator. Always excludes inactive products regardless of query params.',
+  })
+  findPublicProducts(@CurrentTenant() tenant: Tenant) {
+    return this.loans.findAllProducts(tenant.id, false);
   }
 
   @Get('products/:id')
