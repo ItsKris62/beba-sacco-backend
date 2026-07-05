@@ -20,7 +20,7 @@ services:
     plan: starter
     region: oregon
     autoDeploy: true
-    buildCommand: npm install && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    buildCommand: npm install --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
     preDeployCommand: npx prisma migrate deploy --schema=src/prisma/schema.prisma
     startCommand: npm run start:prod
     healthCheckPath: /api/health/ping
@@ -156,7 +156,7 @@ services:
     plan: starter
     region: oregon
     autoDeploy: true
-    buildCommand: npm install && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    buildCommand: npm install --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
     startCommand: npm run start:worker:prod
     envVars:
       - key: NODE_ENV
