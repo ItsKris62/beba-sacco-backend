@@ -12,7 +12,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { TenantStatus, UserRole, AccountStatus } from '@prisma/client';
+import { TenantStatus, UserRole, AccountStatus, PinPurpose } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import * as argon2 from 'argon2';
@@ -30,6 +30,9 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { PasswordResetMethod, PasswordResetRequestDto } from './dto/password-reset-request.dto';
 import { PasswordResetVerifyDto } from './dto/password-reset-verify.dto';
+import { VerifyPinDto } from './dto/verify-pin.dto';
+import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
+import { ResetPasswordConfirmDto } from './dto/reset-password-confirm.dto';
 import type { JwtPayload } from './strategies/jwt.strategy';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 import { OtpService } from './otp.service';
@@ -38,6 +41,7 @@ import { AUDIT_ACTIONS } from '../audit/audit-actions';
 import { maskPhone } from '../mpesa/utils/mpesa.utils';
 import { RedisService } from '../../common/services/redis.service';
 import { PasswordPolicyService } from './password-policy.service';
+import { PinService } from '../pin/pin.service';
 
 /** JWT payload shape for password-reset tokens (separate from access tokens) */
 interface PasswordResetPayload {
@@ -108,6 +112,7 @@ export class AuthService {
     private readonly redis: RedisService,
     private readonly passwordPolicy: PasswordPolicyService,
     private readonly twoFactorService: TwoFactorService,
+    private readonly pinService: PinService,
   ) {}
 
   private enqueueEmail(payload: EmailJobPayload, ctx: string): void {
@@ -210,6 +215,7 @@ export class AuthService {
           lastName: true,
           tenantId: true,
           mustChangePassword: true,
+          pinLoginRequired: true,
           lastPasswordChangeAt: true,
           twoFactorEnabled: true,
           totpEnrolledAt: true,
@@ -244,6 +250,21 @@ export class AuthService {
       });
       this.trackFailedAttemptAsync(tenantId, user.email ?? 'unknown', ipAddress);
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    if (user.pinLoginRequired) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: 'AUTH.LOGIN.FAILED',
+        resource: 'User',
+        resourceId: user.id,
+        metadata: { reason: 'pin_login_required' },
+        ipAddress,
+      });
+      throw new UnauthorizedException(
+        'This account has not been activated yet. Verify your PIN via POST /auth/verify-pin first.',
+      );
     }
 
     if (!(await this.verifyPassword(user.passwordHash, loginDto.password))) {
@@ -387,6 +408,114 @@ export class AuthService {
       migrateRefreshToken: true,
       requiresPasswordChange: user.mustChangePassword,
       user: this.toUserDto(user),
+    };
+  }
+
+  // ─────────────────────────── VERIFY PIN (first login / onboarding) ───────────────────────────
+
+  /**
+   * Verify a first-login PIN and issue a full session, exactly like login().
+   * mustChangePassword remains true — the existing JwtAuthGuard enforcement forces
+   * the client straight to PATCH /auth/change-password, which clears both
+   * mustChangePassword and pinLoginRequired once a real password is set.
+   */
+  async verifyPin(dto: VerifyPinDto, tenantId: string, ipAddress?: string): Promise<LoginResponseDto> {
+    await this.assertTenantAcceptsLogin(tenantId);
+
+    const normalizedPhone = dto.phone.trim().replace(/^\+/, '');
+
+    const candidate = await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.findFirst({
+        where: {
+          AND: [
+            { OR: [{ phone: normalizedPhone }, { phoneNumber: normalizedPhone }] },
+            { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] },
+          ],
+        },
+        select: {
+          id: true,
+          email: true,
+          phone: true,
+          phoneNumber: true,
+          role: true,
+          accountStatus: true,
+          firstName: true,
+          lastName: true,
+          tenantId: true,
+          mustChangePassword: true,
+        },
+      }),
+    );
+
+    if (!candidate || candidate.accountStatus !== AccountStatus.ACTIVE) {
+      await this.writeAuditSafe({
+        tenantId,
+        action: 'AUTH.PIN_LOGIN.FAILED',
+        resource: 'User',
+        metadata: {
+          reason: candidate ? 'account_inactive' : 'user_not_found',
+          phone: maskPhone(normalizedPhone),
+        },
+        ipAddress,
+      });
+      this.trackFailedAttemptAsync(tenantId, normalizedPhone, ipAddress);
+      throw new UnauthorizedException('Invalid phone number or PIN');
+    }
+
+    const valid = await this.pinService.validatePin(
+      candidate.id,
+      candidate.tenantId,
+      PinPurpose.FIRST_LOGIN,
+      dto.pin,
+    );
+
+    if (!valid) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: candidate.id,
+        action: 'AUTH.PIN_LOGIN.FAILED',
+        resource: 'User',
+        resourceId: candidate.id,
+        metadata: { reason: 'invalid_or_expired_pin' },
+        ipAddress,
+      });
+      this.trackFailedAttemptAsync(tenantId, normalizedPhone, ipAddress);
+      throw new UnauthorizedException('Invalid or expired PIN');
+    }
+
+    const { accessToken, refreshToken } = this.generateTokens({
+      id: candidate.id,
+      email: candidate.email,
+      phone: candidate.phone ?? candidate.phoneNumber ?? null,
+      role: candidate.role,
+      tenantId: candidate.tenantId,
+    });
+
+    const refreshHash = await argon2.hash(refreshToken);
+
+    await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.update({
+        where: { id: candidate.id },
+        data: { refreshToken: refreshHash, lastLoginAt: new Date() },
+      }),
+    );
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: candidate.id,
+      action: 'AUTH.PIN_LOGIN',
+      resource: 'User',
+      resourceId: candidate.id,
+      metadata: { email: candidate.email, role: candidate.role },
+      ipAddress,
+    });
+
+    return {
+      accessToken,
+      refreshToken,
+      migrateRefreshToken: true,
+      requiresPasswordChange: candidate.mustChangePassword,
+      user: this.toUserDto(candidate),
     };
   }
 
@@ -1095,6 +1224,138 @@ export class AuthService {
     this.logger.log(`Password reset successful for ${user.email} via ${dto.method}`);
   }
 
+  // ─────────────────────────── PUBLIC PIN PASSWORD RESET ───────────────────────────
+  //
+  // Distinct from the legacy /auth/forgot-password + /auth/reset-password (email-link JWT)
+  // and the unified /auth/password-reset/request + /verify (email/SMS OTP via OtpService)
+  // flows above. This one runs on the new tenant-scoped, hashed, DB-audited PinService
+  // (PinPurpose.PASSWORD_RESET) and is phone-only, matching the PIN-onboarding flow.
+
+  /**
+   * Request a password-reset PIN via SMS. Always resolves generically (no user
+   * enumeration) — a PIN is only actually issued if a matching ACTIVE account
+   * exists in this exact tenant.
+   */
+  async requestPasswordResetPin(
+    dto: RequestPasswordResetDto,
+    tenantId: string,
+    ipAddress?: string,
+    userAgent?: string,
+  ): Promise<void> {
+    const identifier = this.normalizePasswordResetIdentifier(PasswordResetMethod.SMS, dto.phone);
+
+    const ipHash = this.hashIdentifier(ipAddress ?? 'unknown-ip');
+    const phoneHash = this.hashIdentifier(identifier);
+    await this.pinService.assertIssuanceRateLimit(`pwd-reset:${ipHash}:${phoneHash}`, 3, 3600);
+
+    const user = await this.findUserByPasswordResetIdentifier(
+      PasswordResetMethod.SMS,
+      identifier,
+      tenantId,
+    );
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: user?.id,
+      action: 'AUTH.PIN_PASSWORD_RESET_REQUESTED',
+      resource: 'User',
+      resourceId: user?.id,
+      metadata: { found: !!user, identifierHash: phoneHash, contact: maskPhone(identifier) },
+      ipAddress,
+      userAgent,
+    });
+
+    if (!user) return;
+
+    await this.pinService.generateAndIssuePin(user.id, tenantId, PinPurpose.PASSWORD_RESET, ipAddress);
+  }
+
+  /**
+   * Verify a password-reset PIN and set a new password. No tokens are issued —
+   * the client must call POST /auth/login with the new password afterwards.
+   * Also clears pinLoginRequired, covering the "lost initial onboarding PIN" case.
+   */
+  async confirmPasswordResetPin(
+    dto: ResetPasswordConfirmDto,
+    tenantId: string,
+    ipAddress?: string,
+    userAgent?: string,
+  ): Promise<void> {
+    const identifier = this.normalizePasswordResetIdentifier(PasswordResetMethod.SMS, dto.phone);
+    const user = await this.findUserByPasswordResetIdentifier(
+      PasswordResetMethod.SMS,
+      identifier,
+      tenantId,
+    );
+
+    if (!user) {
+      await this.writeAuditSafe({
+        tenantId,
+        action: 'AUTH.PIN_PASSWORD_RESET.FAILED',
+        resource: 'User',
+        metadata: { reason: 'user_not_found', identifierHash: this.hashIdentifier(identifier) },
+        ipAddress,
+        userAgent,
+      });
+      throw new BadRequestException('Invalid or expired PIN');
+    }
+
+    const valid = await this.pinService.validatePin(
+      user.id,
+      tenantId,
+      PinPurpose.PASSWORD_RESET,
+      dto.pin,
+    );
+
+    if (!valid) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: 'AUTH.PIN_PASSWORD_RESET.FAILED',
+        resource: 'User',
+        resourceId: user.id,
+        metadata: { reason: 'invalid_or_expired_pin' },
+        ipAddress,
+        userAgent,
+      });
+      throw new BadRequestException('Invalid or expired PIN');
+    }
+
+    await this.passwordPolicy.validatePassword(tenantId, dto.newPassword);
+
+    const newHash = await argon2.hash(dto.newPassword, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 1,
+    });
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash: newHash,
+        mustChangePassword: false,
+        pinLoginRequired: false,
+        phoneVerified: true,
+        lastPasswordChangeAt: new Date(),
+        refreshToken: null,
+      },
+    });
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: user.id,
+      action: 'AUTH.PIN_PASSWORD_RESET',
+      resource: 'User',
+      resourceId: user.id,
+      metadata: { email: user.email },
+      ipAddress,
+      userAgent,
+    });
+
+    this.logger.log(`PIN password reset successful for ${user.email}`);
+  }
+
   // ─────────────────────────── CHANGE PASSWORD ───────────────────────────
 
   /**
@@ -1110,7 +1371,14 @@ export class AuthService {
     const user = await tenantAsyncStorage.run(undefined, () =>
       this.prisma.user.findFirst({
         where: { id: userId },
-        select: { id: true, passwordHash: true, email: true, role: true, tenantId: true },
+        select: {
+          id: true,
+          passwordHash: true,
+          email: true,
+          role: true,
+          tenantId: true,
+          pinLoginRequired: true,
+        },
       }),
     );
 
@@ -1118,18 +1386,25 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
-    const currentValid = await argon2.verify(user.passwordHash, dto.currentPassword);
-    if (!currentValid) {
-      await this.writeAuditSafe({
-        tenantId,
-        userId,
-        action: 'AUTH.CHANGE_PASSWORD.FAILED',
-        resource: 'User',
-        resourceId: userId,
-        metadata: { reason: 'invalid_current_password' },
-        ipAddress,
-      });
-      throw new UnauthorizedException('Current password is incorrect');
+    // Accounts still in the PIN-onboarding flow have no real password yet — PIN
+    // verification was the auth factor, so there is nothing to check here.
+    if (!user.pinLoginRequired) {
+      if (!dto.currentPassword) {
+        throw new BadRequestException('currentPassword is required');
+      }
+      const currentValid = await argon2.verify(user.passwordHash, dto.currentPassword);
+      if (!currentValid) {
+        await this.writeAuditSafe({
+          tenantId,
+          userId,
+          action: 'AUTH.CHANGE_PASSWORD.FAILED',
+          resource: 'User',
+          resourceId: userId,
+          metadata: { reason: 'invalid_current_password' },
+          ipAddress,
+        });
+        throw new UnauthorizedException('Current password is incorrect');
+      }
     }
 
     await this.passwordPolicy.validatePassword(tenantId, dto.newPassword);
@@ -1149,6 +1424,7 @@ export class AuthService {
           mustChangePassword: false,
           lastPasswordChangeAt: new Date(),
           refreshToken: null,
+          ...(user.pinLoginRequired && { pinLoginRequired: false, phoneVerified: true }),
         },
       }),
     );

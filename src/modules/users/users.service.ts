@@ -5,9 +5,9 @@ import {
 import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { randomInt } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import * as argon2 from 'argon2';
-import { UserRole, AccountStatus } from '@prisma/client';
+import { UserRole, AccountStatus, PinPurpose } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { canCreateUserWithRole, canManageRole } from '../../common/guards/rbac.guard';
 import { AuditService } from '../audit/audit.service';
@@ -16,6 +16,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
+import { PinService } from '../pin/pin.service';
 
 const TEMP_PASSWORD_UPPER = 'ABCDEFGHJKMNPQRSTUVWXYZ';
 const TEMP_PASSWORD_LOWER = 'abcdefghjkmnpqrstuvwxyz';
@@ -50,6 +51,7 @@ export class UsersService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly idempotency: IdempotencyService,
+    private readonly pinService: PinService,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
@@ -65,15 +67,15 @@ export class UsersService {
   // ─── CREATE (admin channel) ──────────────────────────────────
 
   /**
-   * Create a staff/member account with a temporary password.
-   * mustChangePassword is forced to true — user must change on first login.
+   * Create a staff/member account. No password is ever accepted from the admin —
+   * a temporary login PIN is generated server-side and sent to `dto.phone` via SMS.
+   * The user logs in with phone + PIN (POST /auth/verify-pin), then is forced to
+   * set a permanent password (mustChangePassword + pinLoginRequired both start true).
    *
    * Role restrictions:
    *   - SUPER_ADMIN cannot be assigned via this endpoint (platform-only role)
    *   - MANAGER cannot create TENANT_ADMIN accounts (role hierarchy)
    *   - TENANT_ADMIN can create any tenant-level role
-   *
-   * New users are created with status PENDING (explicit approval workflow).
    */
   async create(
     dto: CreateUserDto,
@@ -99,7 +101,11 @@ export class UsersService {
     });
     if (existing) throw new ConflictException('Email already registered');
 
-    const passwordHash = await argon2.hash(dto.password, {
+    // Unusable, never-communicated placeholder — the account has no real password
+    // until the user completes PIN verification + change-password. login() also
+    // hard-rejects pinLoginRequired accounts regardless of this hash (defense in depth).
+    const placeholderSecret = randomBytes(32).toString('hex');
+    const passwordHash = await argon2.hash(placeholderSecret, {
       type: argon2.argon2id,
       memoryCost: 65536,
       timeCost: 3,
@@ -117,10 +123,18 @@ export class UsersService {
         role: dto.role,
         accountStatus: AccountStatus.ACTIVE,
         mustChangePassword: true,
+        pinLoginRequired: true,
         createdById: actor.id,
       },
       select: USER_SELECT,
     });
+
+    const issued = await this.pinService.generateAndIssuePin(
+      user.id,
+      tenantId,
+      PinPurpose.FIRST_LOGIN,
+      ipAddress,
+    );
 
     await this.auditSafe({
       tenantId,
@@ -133,7 +147,12 @@ export class UsersService {
       ipAddress,
     });
 
-    return user;
+    return {
+      success: true,
+      message: 'User created. PIN sent to phone.',
+      expiresAt: issued.expiresAt,
+      user,
+    };
   }
 
   // ─── LIST ────────────────────────────────────────────────────
@@ -439,6 +458,100 @@ export class UsersService {
         'Password reset forced. All existing sessions have been invalidated. ' +
         'The user must log in and set a new password before accessing any resources.',
     };
+  }
+
+  // ─── ADMIN "REVEAL PIN" FALLBACK ─────────────────────────────
+
+  /**
+   * Admin fallback for "view and share the PIN directly" (e.g. SMS delivery
+   * failed). Never returns a previously-issued PIN — always revokes it and
+   * issues + sends a brand new one, so no plaintext PIN is ever retained at rest.
+   */
+  async revealPin(
+    id: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, role: true, pinLoginRequired: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    if (!target.pinLoginRequired) {
+      throw new BadRequestException(
+        'User has already completed PIN onboarding. Use force-password-reset instead.',
+      );
+    }
+
+    if (!canManageRole(actor.role, target.role)) {
+      throw new ForbiddenException(`${actor.role} cannot reveal a PIN for a ${target.role} account`);
+    }
+
+    // Reveal always triggers a fresh SMS (Option B) — same abuse cap as resend-pin.
+    await this.pinService.assertIssuanceRateLimit(`reveal-pin:admin:${actor.id}`, 5, 3600);
+
+    const issued = await this.pinService.regenerateAndRevealPin(
+      target.id,
+      tenantId,
+      actor.id,
+      PinPurpose.FIRST_LOGIN,
+      ipAddress,
+    );
+
+    return { pin: issued.pin, expiresAt: issued.expiresAt };
+  }
+
+  // ─── RESEND PIN ───────────────────────────────────────────────
+
+  /**
+   * Regenerate and re-send the first-login PIN (e.g. the original SMS never
+   * arrived or the PIN expired). Does not reveal the PIN to the caller.
+   */
+  async resendPin(
+    id: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, role: true, pinLoginRequired: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    if (!target.pinLoginRequired) {
+      throw new BadRequestException(
+        'User has already completed PIN onboarding. Use force-password-reset instead.',
+      );
+    }
+
+    if (!canManageRole(actor.role, target.role)) {
+      throw new ForbiddenException(`${actor.role} cannot resend a PIN for a ${target.role} account`);
+    }
+
+    // SMS costs money — cap regardless of how many different users this admin targets.
+    await this.pinService.assertIssuanceRateLimit(`resend-pin:admin:${actor.id}`, 5, 3600);
+
+    const issued = await this.pinService.generateAndIssuePin(
+      target.id,
+      tenantId,
+      PinPurpose.FIRST_LOGIN,
+      ipAddress,
+    );
+
+    await this.auditSafe({
+      tenantId,
+      actorId: actor.id,
+      action: 'USER.PIN_RESENT',
+      entityType: 'User',
+      entityId: target.id,
+      metadata: { expiresAt: issued.expiresAt, ipAddress },
+      ipAddress,
+    });
+
+    return { success: true, message: 'New PIN sent.' };
   }
 
   // ─── STALE ACCOUNT CLEANUP ───────────────────────────────────

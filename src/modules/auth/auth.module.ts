@@ -15,6 +15,7 @@ import { SessionService } from './session.service';
 import { SessionController } from './session.controller';
 import { OtpService } from './otp.service';
 import { SmsModule } from '../sms/sms.module';
+import { PinModule } from '../pin/pin.module';
 import { TwoFactorService } from './two-factor.service';
 import { EncryptionService } from '../zero-trust/encryption/encryption.service';
 import { TwoFactorController } from './two-factor.controller';
@@ -52,6 +53,7 @@ import { PasswordPolicyService } from './password-policy.service';
 
     AuditModule,
     SmsModule,
+    PinModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
   controllers: [AuthController, SessionController, TwoFactorController],

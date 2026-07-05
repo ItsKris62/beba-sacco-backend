@@ -29,7 +29,12 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       },
     };
     auditMock = { create: jest.fn().mockResolvedValue(undefined) };
-    service = new UsersService(prismaMock, auditMock, {} as any, { add: jest.fn() } as any);
+    const pinServiceMock = {
+      generateAndIssuePin: jest.fn(),
+      validatePin: jest.fn(),
+      regenerateAndRevealPin: jest.fn(),
+    } as any;
+    service = new UsersService(prismaMock, auditMock, {} as any, pinServiceMock, { add: jest.fn() } as any);
   });
 
   describe('update()', () => {

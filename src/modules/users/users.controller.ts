@@ -36,13 +36,14 @@ export class UsersController {
   @ApiOperation({
     summary: 'Create a staff or member account',
     description:
-      'Creates a user with a temporary password (mustChangePassword = true). ' +
+      'Creates a user and sends a temporary login PIN via SMS (mustChangePassword = true, ' +
+      'pinLoginRequired = true). The response never contains the PIN. ' +
       'TENANT_ADMIN can create any tenant-level role. ' +
       'MANAGER can create LOAN_OFFICER, ACCOUNTANT, TELLER, MEMBER, CHAIRMAN, or AUDITOR accounts. ' +
       'SUPER_ADMIN is never assignable via this endpoint. ' +
       'For MEMBER self-registration, use POST /auth/register instead.',
   })
-  @ApiResponse({ status: 201, description: 'User created successfully' })
+  @ApiResponse({ status: 201, description: 'User created. PIN sent to phone.' })
   @ApiResponse({ status: 403, description: 'Insufficient role to create this account type' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
   create(
@@ -250,6 +251,66 @@ export class UsersController {
   ) {
     return this.usersService.generateTemporaryPassword(id, tenant.id, actor, req.ip);
   }
+  // ─── REVEAL PIN (ADMIN FALLBACK) ──────────────────────────────
+
+  @Post(':id/reveal-pin')
+  @ApiTags('Users - PIN Management')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Roles(UserRole.TENANT_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reveal the first-login PIN for a user (admin fallback)',
+    description:
+      'Only valid while the user has not yet completed PIN onboarding. ' +
+      'Never returns a previously-issued PIN — always revokes it and issues + SMS\'s a brand ' +
+      'new one, so no plaintext PIN is ever stored at rest. Recorded in the audit trail. ' +
+      'Rate-limited to 5 per hour per admin (SMS costs money), on top of the 5/min IP throttle.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'New PIN generated and returned once',
+    schema: { example: { pin: '482913', expiresAt: '2026-07-05T21:05:00.000Z' } },
+  })
+  @ApiResponse({ status: 400, description: 'User has already completed PIN onboarding' })
+  @ApiResponse({ status: 403, description: 'Insufficient role' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  @ApiResponse({ status: 429, description: 'Too many PIN requests — try again later' })
+  revealPin(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.usersService.revealPin(id, tenant.id, actor, req.ip);
+  }
+
+  // ─── RESEND PIN ───────────────────────────────────────────────
+
+  @Post(':id/resend-pin')
+  @ApiTags('Users - PIN Management')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Resend the first-login PIN via SMS',
+    description:
+      'Regenerates and re-sends the PIN (invalidating the previous one). ' +
+      'Use when the original SMS was not received or the PIN expired. Does not reveal the PIN. ' +
+      'Rate-limited to 5 per hour per admin (SMS costs money), on top of the 5/min IP throttle.',
+  })
+  @ApiResponse({ status: 200, description: 'New PIN sent' })
+  @ApiResponse({ status: 400, description: 'User has already completed PIN onboarding' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  @ApiResponse({ status: 429, description: 'Too many PIN requests — try again later' })
+  resendPin(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.usersService.resendPin(id, tenant.id, actor, req.ip);
+  }
+
   @Post(':id/disable-2fa')
   @Roles(UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN)
   @HttpCode(HttpStatus.OK)

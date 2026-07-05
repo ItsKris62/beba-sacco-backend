@@ -20,9 +20,9 @@ export class SmsProcessor extends WorkerHost {
   }
 
   async process(job: Job<SmsJobPayload>): Promise<void> {
-    const { phone, message } = job.data;
+    const { phone, message, type } = job.data;
     const masked = maskPhone(phone.replace(/^\+/, ''));
-    this.logger.log(`Processing SMS job ${job.id} to=${masked}`);
+    this.logger.log(`Processing SMS job ${job.id} type=${type} to=${masked}`);
 
     const sent = await this.smsService.sendSms(phone, message);
     if (!sent) {

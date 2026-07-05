@@ -30,6 +30,9 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { PasswordResetRequestDto } from './dto/password-reset-request.dto';
 import { PasswordResetVerifyDto } from './dto/password-reset-verify.dto';
+import { VerifyPinDto } from './dto/verify-pin.dto';
+import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
+import { ResetPasswordConfirmDto } from './dto/reset-password-confirm.dto';
 import type { AuthenticatedUser, JwtPayload } from './strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
@@ -52,6 +55,7 @@ interface TenantRequest extends Request {
  *
  * Rate limits:
  *  - POST /auth/login           → 5 attempts / 60 s / IP (brute-force protection)
+ *  - POST /auth/verify-pin      → 5 attempts / 60 s / IP (brute-force protection)
  *  - POST /auth/forgot-password → 3 attempts / 60 s / IP (prevent email flooding)
  *  - POST /auth/reset-password  → 5 attempts / 60 s / IP
  *  - POST /auth/register        → global (100/min)
@@ -161,6 +165,37 @@ export class AuthController {
       this.logger.error(`Login failed for tenant ${req?.tenant?.id}: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
+  }
+
+  // ─────────────────────────── VERIFY PIN ───────────────────────────
+
+  @Public()
+  @ApiTags('Auth - PIN Flow')
+  @Post('verify-pin')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ global: { limit: 5, ttl: 60_000 } }) // 5 attempts per minute per IP
+  @ApiOperation({
+    summary: 'Verify a first-login PIN and log in',
+    description:
+      'For accounts created via POST /users. Verifies the temporary PIN sent by SMS and, ' +
+      'on success, returns access + refresh tokens exactly like POST /auth/login. ' +
+      'requiresPasswordChange will be true — the client must immediately call ' +
+      'PATCH /auth/change-password to set a permanent password.',
+  })
+  @ApiResponse({ status: 200, type: LoginResponseDto })
+  @ApiResponse({ status: 401, description: 'Invalid phone number or PIN' })
+  @ApiResponse({ status: 429, description: 'Too many attempts' })
+  async verifyPin(
+    @Body() dto: VerifyPinDto,
+    @Req() req: TenantRequest,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
+    if (!req.tenant?.id) {
+      throw new BadRequestException('Missing X-Tenant-ID header');
+    }
+    const data = await this.authService.verifyPin(dto, req.tenant.id, req.ip);
+    this.setRefreshCookie(res, data.refreshToken);
+    return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
   }
 
   // ─────────────────────────── REGISTER ───────────────────────────
@@ -276,6 +311,9 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request email or SMS OTP for password reset',
     description:
+      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
+      'This endpoint remains for clients not yet migrated. ' +
       'Accepts method EMAIL or SMS plus a validated email/E.164 phone identifier. ' +
       'If a matching active account exists, a 6-digit OTP is sent through the selected channel. ' +
       'Always returns 200 to prevent user enumeration.',
@@ -303,6 +341,9 @@ export class AuthController {
   @ApiOperation({
     summary: 'Verify email/SMS OTP and set a new password',
     description:
+      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
+      'This endpoint remains for clients not yet migrated. ' +
       'Validates the OTP against Redis, hashes the new password with argon2id, ' +
       'updates the user record, clears the OTP, and invalidates existing sessions.',
   })
@@ -320,6 +361,78 @@ export class AuthController {
     };
   }
 
+  // ─────────────────────────── PUBLIC PIN PASSWORD RESET ───────────────────────────
+  //
+  // Phone-only, PIN-based reset on the new tenant-scoped/audited PinService. Also covers
+  // "lost my initial onboarding PIN" since it clears pinLoginRequired on success.
+  // Distinct from /auth/password-reset/request|verify above (email/SMS OTP, legacy OtpService)
+  // and from /auth/forgot-password + /auth/reset-password (email-link JWT token flow) —
+  // those paths were already taken, so this flow lives at its own paths.
+
+  @Public()
+  @ApiTags('Auth - PIN Flow')
+  @Post('request-password-reset')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ global: { limit: 3, ttl: 3_600_000 } }) // 3 requests per hour per IP
+  @ApiOperation({
+    summary: 'Request a password-reset PIN via SMS',
+    description:
+      'Accepts a phone number. If a matching ACTIVE account exists in this tenant, a PIN ' +
+      '(4-6 digits, 20-minute TTL) is sent via SMS. Always returns 200 to prevent phone ' +
+      'number enumeration. Rate-limited per IP (3/hour) and per IP+phone pair (3/hour).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'If the phone number is registered, a PIN has been sent.',
+  })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  async requestPasswordReset(
+    @Body() dto: RequestPasswordResetDto,
+    @Req() req: TenantRequest,
+  ): Promise<{ success: boolean; message: string }> {
+    await this.authService.requestPasswordResetPin(
+      dto,
+      req.tenant.id,
+      req.ip,
+      req.headers['user-agent'],
+    );
+    return {
+      success: true,
+      message: 'If the phone number is registered, a PIN has been sent.',
+    };
+  }
+
+  @Public()
+  @ApiTags('Auth - PIN Flow')
+  @Post('reset-password/confirm')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ global: { limit: 5, ttl: 60_000 } }) // 5 attempts per minute per IP
+  @ApiOperation({
+    summary: 'Verify the password-reset PIN and set a new password',
+    description:
+      'Validates the PIN, hashes newPassword with argon2id, updates the account, and ' +
+      'invalidates existing sessions. No tokens are issued — log in via POST /auth/login ' +
+      'afterwards. Also clears pinLoginRequired, covering a lost initial onboarding PIN.',
+  })
+  @ApiResponse({ status: 200, description: 'Password reset successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired PIN, or confirmPassword mismatch' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  async confirmPasswordReset(
+    @Body() dto: ResetPasswordConfirmDto,
+    @Req() req: TenantRequest,
+  ): Promise<{ success: boolean; message: string }> {
+    await this.authService.confirmPasswordResetPin(
+      dto,
+      req.tenant.id,
+      req.ip,
+      req.headers['user-agent'],
+    );
+    return {
+      success: true,
+      message: 'Password reset successfully. Please log in with your new password.',
+    };
+  }
+
   // ─────────────────────────── CHANGE PASSWORD ───────────────────────────
 
   @Patch('change-password')
@@ -330,11 +443,14 @@ export class AuthController {
   @ApiOperation({
     summary: 'Change password (authenticated)',
     description:
-      'Requires the current password for verification. ' +
-      'Clears mustChangePassword flag and invalidates all existing sessions. ' +
+      'Requires the current password for verification, UNLESS the account is still in the ' +
+      'PIN-onboarding flow (pinLoginRequired = true), in which case there is no existing ' +
+      'password to check. Clears mustChangePassword (and pinLoginRequired, if set) and ' +
+      'invalidates all existing sessions. ' +
       'Users with mustChangePassword=true must call this before accessing other endpoints.',
   })
   @ApiResponse({ status: 200, description: 'Password changed successfully' })
+  @ApiResponse({ status: 400, description: 'currentPassword required, or confirmPassword mismatch' })
   @ApiResponse({ status: 401, description: 'Current password is incorrect' })
   async changePassword(
     @Body() dto: ChangePasswordDto,
@@ -358,6 +474,9 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request a password reset email',
     description:
+      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
+      'This endpoint remains for clients not yet migrated. ' +
       'Sends a password reset link to the provided email address if an account exists. ' +
       'Always returns 200 to prevent user enumeration. ' +
       'The reset link expires in 15 minutes and is single-use.',
@@ -387,6 +506,9 @@ export class AuthController {
   @ApiOperation({
     summary: 'Reset password using the token from the reset email',
     description:
+      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
+      'This endpoint remains for clients not yet migrated. ' +
       'Verifies the signed JWT reset token, enforces single-use via nonce, ' +
       'sets the new password, and invalidates all existing sessions. ' +
       'The token expires in 15 minutes.',

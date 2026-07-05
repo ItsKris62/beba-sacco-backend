@@ -1,5 +1,5 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEmail, IsEnum, IsOptional, IsString, Matches, MinLength } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { IsEmail, IsEnum, IsString, Matches } from 'class-validator';
 import { UserRole } from '@prisma/client';
 
 /**
@@ -23,19 +23,6 @@ export class CreateUserDto {
   @IsEmail()
   email!: string;
 
-  @ApiProperty({
-    description:
-      'Temporary password — user will be forced to change on first login. ' +
-      'Min 8 chars, must include uppercase, lowercase, and a digit.',
-    example: 'Temp@2025',
-  })
-  @IsString()
-  @MinLength(8)
-  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, {
-    message: 'Password must contain at least one uppercase letter, one lowercase letter, and one digit',
-  })
-  password!: string;
-
   @ApiProperty({ example: 'Jane' })
   @IsString()
   firstName!: string;
@@ -44,10 +31,15 @@ export class CreateUserDto {
   @IsString()
   lastName!: string;
 
-  @ApiPropertyOptional({ example: '+254712345678' })
-  @IsOptional()
+  @ApiProperty({
+    example: '+254712345678',
+    description:
+      'Required — a temporary login PIN is sent to this number via SMS. ' +
+      'The user logs in with phone + PIN and is then forced to set a permanent password.',
+  })
   @IsString()
-  phone?: string;
+  @Matches(/^\+?[1-9]\d{7,14}$/, { message: 'Provide a valid phone number' })
+  phone!: string;
 
   @ApiProperty({
     enum: ASSIGNABLE_ROLES,

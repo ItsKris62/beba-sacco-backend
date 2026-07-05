@@ -423,6 +423,7 @@ model Tenant {
   kycRequirements       KYCRequirement[]
   glAccounts            GLAccount[]
   journalEntries        JournalEntry[]
+  pinVerifications      PinVerification[]
 
   @@index([slug])
   @@index([status])
@@ -459,6 +460,10 @@ model User {
   lastLoginAt          DateTime?
   mustChangePassword   Boolean   @default(false)
   lastPasswordChangeAt DateTime  @default(now())
+
+  // PIN/OTP onboarding & phone verification (temp-PIN login flow)
+  phoneVerified    Boolean @default(false)
+  pinLoginRequired Boolean @default(false) // true from admin creation until first successful PIN verification
 
   // Password reset (stateless JWT + nonce pattern)
   passwordResetToken  String?   @db.Text // argon2 hash of one-time nonce
@@ -502,6 +507,8 @@ model User {
   approvedJournalEntries JournalEntry[] @relation("JournalEntryApprover")
   rejectedJournalEntries JournalEntry[] @relation("JournalEntryRejector")
 
+  pinVerifications PinVerification[]
+
   @@unique([tenantId, email])
   @@index([tenantId])
   @@index([email])
@@ -509,6 +516,7 @@ model User {
   @@index([accountStatus])
   @@index([idNumber])
   @@index([importBatchId])
+  @@index([phone])
   @@schema("public")
 }
 
@@ -545,6 +553,40 @@ model AuditLog {
   @@index([action])
   @@index([entityType])
   @@index([timestamp])
+  @@schema("public")
+}
+
+enum PinPurpose {
+  FIRST_LOGIN
+  PASSWORD_RESET
+
+  @@schema("public")
+}
+
+// Durable audit trail for temp-PIN issuance/consumption (SASRA-style compliance).
+// Fast-path validation happens against Redis (see PinService); this table is the
+// source of truth for "who requested/revealed/consumed which PIN and when".
+model PinVerification {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  purpose PinPurpose
+  codeHash String // sha256(pin) — plaintext is never persisted
+  length   Int // 4-6, resolved from tenant.settings.security.pinLength at issuance
+
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  revokedAt     DateTime? // set when superseded by a newer PIN (resend / admin reveal)
+  attempts      Int       @default(0)
+  requestedByIp String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, purpose])
+  @@index([tenantId, expiresAt])
   @@schema("public")
 }
 
