@@ -3,7 +3,6 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
-import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtBlocklistService } from './jwt-blocklist.service';
@@ -12,13 +11,11 @@ import { RedisService } from '../../common/services/redis.service';
 import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { SessionService } from './session.service';
-import { SessionController } from './session.controller';
 import { OtpService } from './otp.service';
 import { SmsModule } from '../sms/sms.module';
 import { PinModule } from '../pin/pin.module';
 import { TwoFactorService } from './two-factor.service';
 import { EncryptionService } from '../zero-trust/encryption/encryption.service';
-import { TwoFactorController } from './two-factor.controller';
 import { TwoFactorSetupStrategy } from './strategies/jwt-2fa-setup.strategy';
 import { PasswordPolicyService } from './password-policy.service';
 
@@ -56,7 +53,6 @@ import { PasswordPolicyService } from './password-policy.service';
     PinModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
   ],
-  controllers: [AuthController, SessionController, TwoFactorController],
   providers: [
     AuthService,
     PasswordPolicyService,
@@ -70,6 +66,6 @@ import { PasswordPolicyService } from './password-policy.service';
     EncryptionService,
     TwoFactorSetupStrategy,
   ],
-  exports: [AuthService, JwtModule, PassportModule, SessionService, JwtBlocklistService],
+  exports: [AuthService, JwtModule, PassportModule, SessionService, JwtBlocklistService, TwoFactorService, OtpService, PasswordPolicyService],
 })
 export class AuthModule {}

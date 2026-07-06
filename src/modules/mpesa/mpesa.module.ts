@@ -1,10 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
-import { MpesaController } from './mpesa.controller';
-import { MpesaWebhookController } from './mpesa-webhook.controller';
 import { MpesaService } from './mpesa.service';
 import { DarajaClientService } from './daraja-client.service';
-import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
 import { MpesaB2cTimeoutProcessor } from './processors/mpesa-b2c-timeout.processor';
 import { StkExpiryScheduler } from './jobs/stk-expiry.scheduler';
@@ -68,12 +65,10 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
       { name: QUEUE_NAMES.MPESA_CALLBACK_DLQ },
     ),
   ],
-  controllers: [MpesaController, MpesaWebhookController],
   providers: [
     DarajaClientService,
     MpesaService,
     MpesaTenantResolverService,
-    MpesaIpGuard,
     ...MPESA_WORKER_PROVIDERS,
     // PrismaService is @Global via PrismaModule, but listed explicitly so
     // this module is self-documenting about its dependencies.

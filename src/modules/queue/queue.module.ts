@@ -111,10 +111,9 @@ export function shouldRegisterQueueProcessors(options: QueueModuleOptions = {}):
     return true;
   }
 
-  // Render/Docker deployment: run the HTTP service with WORKER_MODE unset/false,
-  // and create a separate worker service with WORKER_MODE=true. Web instances can
-  // enqueue jobs, but only worker instances register @Processor classes.
-  return isWorkerRuntime();
+  // Web-mode processor providers are a local fallback only. In a dedicated
+  // worker runtime, QueueModule.forRoot({ mode: 'worker' }) supplies processors.
+  return !isWorkerRuntime();
 }
 
 export function getQueueProcessorProviders(options: QueueModuleOptions = {}): Type<unknown>[] {

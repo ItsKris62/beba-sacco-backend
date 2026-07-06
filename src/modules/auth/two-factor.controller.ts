@@ -2,12 +2,10 @@ import { Controller, Post, Body, UseGuards, Req, HttpCode, ForbiddenException, U
 import { TwoFactorService } from './two-factor.service';
 import { JwtAuthGuard } from '../../common/guards/jwt.guard';
 import { TwoFactorSetupGuard } from './guards/two-factor-setup.guard';
-import { ThrottlerGuard } from '@nestjs/throttler';
 import { PrismaService } from '../../prisma/prisma.service';
 import * as argon2 from 'argon2';
 
 @Controller('api/v1/auth/2fa')
-@UseGuards(ThrottlerGuard)
 export class TwoFactorController {
   constructor(
     private readonly twoFactorService: TwoFactorService,

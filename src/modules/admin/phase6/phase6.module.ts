@@ -27,9 +27,6 @@ import { MultiRegionService } from '../../tenants/multi-region/multi-region.serv
 // Canary
 import { CanaryService } from '../../deploy/canary/canary.service';
 
-// Controller
-import { Phase6AdminController } from './phase6-admin.controller';
-
 // Storage
 import { StorageModule } from '../../storage/storage.module';
 
@@ -64,7 +61,6 @@ const PHASE6_WORKER_PROVIDERS = isWorkerRuntime() ? [AnalyticsStreamProcessor] :
       { name: QUEUE_NAMES.CANARY_ANALYSIS },
     ),
   ],
-  controllers: [Phase6AdminController],
   providers: [
     PrismaService,
     // Analytics

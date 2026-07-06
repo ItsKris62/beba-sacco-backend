@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { AccountingController } from './accounting.controller';
 import { AccountingService } from './accounting.service';
 import { LedgerService } from './ledger.service';
 import { FinancialModule } from '../financial/financial.module';
@@ -24,7 +23,6 @@ import { PrismaService } from '../../prisma/prisma.service';
  */
 @Module({
   imports: [FinancialModule, AuditModule],
-  controllers: [AccountingController],
   providers: [AccountingService, LedgerService, PrismaService],
   exports: [AccountingService, LedgerService],
 })

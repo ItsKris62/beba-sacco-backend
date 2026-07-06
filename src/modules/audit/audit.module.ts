@@ -5,7 +5,6 @@ import { AuditEventService } from './audit-event.service';
 import { AuditChainService } from './audit.chain.service';
 import { AuditMaskerService } from './audit.masker.service';
 import { PrismaAuditMiddlewareService } from './prisma-audit-middleware.service';
-import { AdminAuditController, AuditController } from './audit.controller';
 import { SasraValidatorService } from './sasra-validator.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -25,7 +24,6 @@ const AUDIT_WORKER_PROVIDERS = isWorkerRuntime() ? [AuditRetentionProcessor] : [
       { name: QUEUE_NAMES.AUDIT_PERSIST_DLQ },
     ),
   ],
-  controllers: [AuditController, AdminAuditController],
   providers: [
     AuditService,
     AuditEventService,

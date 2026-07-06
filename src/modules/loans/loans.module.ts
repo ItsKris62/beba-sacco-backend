@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
-import { LoansController } from './loans.controller';
 import { LoansService } from './loans.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
@@ -26,7 +25,6 @@ import { AccountingModule } from '../accounting/accounting.module';
       { name: QUEUE_NAMES.GUARANTOR_RECOVERY },
     ),
   ],
-  controllers: [LoansController],
   providers: [LoansService, LoanRepaymentService, LoanRecoveryService, PrismaService, RedisService, IdempotencyService, DisbursementGateService, ProductRuleService, RepaymentReminderService],
   exports: [LoansService, LoanRepaymentService, LoanRecoveryService, DisbursementGateService, ProductRuleService],
 })

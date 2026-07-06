@@ -14,15 +14,6 @@ import { CbkReturnService } from './cbk/cbk-return.service';
 import { NotificationsService } from './notifications/notifications.service';
 import { ApiGatewayService } from './gateway/api-gateway.service';
 
-// Controllers
-import {
-  CrbController,
-  AmlController,
-  CompliancePhase5Controller,
-  ApiGatewayController,
-  MonitoringController,
-} from './integrations.controller';
-
 // Dependencies
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { CommonServicesModule } from '../../common/services/common-services.module';
@@ -65,13 +56,6 @@ import { CommonServicesModule } from '../../common/services/common-services.modu
     CbkReturnService,
     NotificationsService,
     ApiGatewayService,
-  ],
-  controllers: [
-    CrbController,
-    AmlController,
-    CompliancePhase5Controller,
-    ApiGatewayController,
-    MonitoringController,
   ],
   exports: [
     OutboxService,

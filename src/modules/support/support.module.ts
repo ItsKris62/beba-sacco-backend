@@ -3,16 +3,12 @@ import { BullModule, InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { NotificationsModule } from '../notifications/notifications.module';
-import { SupportController } from './support.controller';
-import { IncidentsController } from './incidents.controller';
-import { TicketAttachmentsController } from './ticket-attachments.controller';
 import { SupportService } from './support.service';
 import { IncidentService } from './incident.service';
 import { SupportRealtimeGateway } from './support-realtime.gateway';
 import { SlaProcessor } from './processors/sla.processor';
 import { AutoCloseTicketsProcessor } from './processors/auto-close-tickets.processor';
 import { StorageModule } from '../storage/storage.module';
-import { AuthModule } from '../auth/auth.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { isWorkerRuntime } from '../queue/worker-runtime';
 import { SupportNotificationsProcessor } from './processors/support-notifications.processor';
@@ -23,17 +19,11 @@ const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTic
   imports: [
     PrismaModule,
     StorageModule,
-    AuthModule,
     forwardRef(() => NotificationsModule),
     BullModule.registerQueue(
       { name: QUEUE_NAMES.SUPPORT_NOTIFICATIONS },
       { name: QUEUE_NAMES.SUPPORT_WORKFLOWS }
     ),
-  ],
-  controllers: [
-    SupportController,
-    IncidentsController,
-    TicketAttachmentsController
   ],
   providers: [
     SupportService,

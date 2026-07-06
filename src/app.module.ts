@@ -25,19 +25,19 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { SentryInterceptor } from './common/sentry/sentry.interceptor';
 
 // Feature Modules
-import { AuthModule } from './modules/auth/auth.module';
+import { AuthHttpModule } from './modules/auth/auth-http.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
 import { MembersModule } from './modules/members/members.module';
 import { AccountsModule } from './modules/accounts/accounts.module';
-import { LoansModule } from './modules/loans/loans.module';
+import { LoansHttpModule } from './modules/loans/loans-http.module';
 import { LoanApplicationModule } from './modules/loans/loan-application.module';
-import { MpesaModule } from './modules/mpesa/mpesa.module';
-import { AuditModule } from './modules/audit/audit.module';
+import { MpesaHttpModule } from './modules/mpesa/mpesa-http.module';
+import { AuditHttpModule } from './modules/audit/audit-http.module';
 import { QueueModule } from './modules/queue/queue.module';
 import { BullBoardModule } from './modules/queue/bull-board.module';
 import { StorageModule } from './modules/storage/storage.module';
-import { DocumentsModule } from './modules/documents/documents.module';
+import { DocumentsHttpModule } from './modules/documents/documents-http.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { HealthModule } from './modules/health/health.module';
 import { AdminModule } from './modules/admin/admin.module';
@@ -45,13 +45,13 @@ import { MetricsModule } from './modules/metrics/metrics.module';
 import { FinancialModule } from './modules/financial/financial.module';
 import { ComplianceModule } from './modules/compliance/compliance.module';
 import { FraudModule } from './modules/fraud/fraud.module';
-import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { WebhooksHttpModule } from './modules/webhooks/webhooks-http.module';
 // Phase 5
-import { IntegrationsModule } from './modules/integrations/integrations.module';
+import { IntegrationsHttpModule } from './modules/integrations/integrations-http.module';
 import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
 import { ApiVersionInterceptor } from './common/interceptors/api-version.interceptor';
 // Phase 6
-import { Phase6Module } from './modules/admin/phase6/phase6.module';
+import { Phase6HttpModule } from './modules/admin/phase6/phase6-http.module';
 // Phase 7
 import { Phase7Module } from './modules/admin/phase7/phase7.module';
 // Sprint 1
@@ -59,17 +59,17 @@ import { LocationsModule } from './modules/locations/locations.module';
 import { ApplicationsModule } from './modules/applications/applications.module';
 import { StagesModule } from './modules/stages/stages.module';
 // Sprint 2
-import { DataImportModule } from './modules/data-import/data-import.module';
+import { DataImportHttpModule } from './modules/data-import/data-import-http.module';
 // Sprint 3 – domain modules
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { StatementsModule } from './modules/statements/statements.module';
-import { ReportsModule } from './modules/reports/reports.module';
+import { ReportsHttpModule } from './modules/reports/reports-http.module';
 // Tier 2 – Accounting
-import { AccountingModule } from './modules/accounting/accounting.module';
+import { AccountingHttpModule } from './modules/accounting/accounting-http.module';
 // KYC async processing
 import { KycModule } from './modules/kyc/kyc.module';
-import { SupportModule } from './modules/support/support.module';
-import { NotificationsModule } from './modules/notifications/notifications.module';
+import { SupportHttpModule } from './modules/support/support-http.module';
+import { NotificationsHttpModule } from './modules/notifications/notifications-http.module';
 
 // Prisma
 import { PrismaModule } from './prisma/prisma.module';
@@ -127,19 +127,19 @@ import { AuditService } from './modules/audit/audit.service';
     ]),
 
     // ── Feature Modules ────────────────────────────────────────
-    AuthModule,
+    AuthHttpModule,
     TenantsModule,
     UsersModule,
     MembersModule,
     AccountsModule,
-    LoansModule,
+    LoansHttpModule,
     LoanApplicationModule, // ✅ Registers LoanAdminController + exports LoanApplicationService
-    MpesaModule,
-    AuditModule,     // Must be imported so AuditService is resolvable by AuditInterceptor
+    MpesaHttpModule,
+    AuditHttpModule,     // Must be imported so AuditService is resolvable by AuditInterceptor
     QueueModule,
     BullBoardModule,  // must come after QueueModule so the shared BullMQ root connection is ready
     StorageModule,
-    DocumentsModule,
+    DocumentsHttpModule,
     AnalyticsModule,
     HealthModule,
     AdminModule,
@@ -148,11 +148,11 @@ import { AuditService } from './modules/audit/audit.service';
     FinancialModule,
     ComplianceModule,
     FraudModule,
-    WebhooksModule,
+    WebhooksHttpModule,
     // Phase 5
-    IntegrationsModule,
+    IntegrationsHttpModule,
     // Phase 6
-    Phase6Module,
+    Phase6HttpModule,
     // Phase 7
     Phase7Module,
     // Sprint 1 – Onboarding, Locations, Stages
@@ -160,15 +160,15 @@ import { AuditService } from './modules/audit/audit.service';
     ApplicationsModule,
     StagesModule,
     // Sprint 2 – Legacy Data Import
-    DataImportModule,
+    DataImportHttpModule,
     // Sprint 3 – Dashboard, Statements, Session & ODPC Compliance
     DashboardModule,
     StatementsModule,
-    ReportsModule,
-    AccountingModule,
+    ReportsHttpModule,
+    AccountingHttpModule,
     KycModule,
-    SupportModule,
-    NotificationsModule,
+    SupportHttpModule,
+    NotificationsHttpModule,
   ],
 
   providers: [
