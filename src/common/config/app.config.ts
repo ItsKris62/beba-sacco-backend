@@ -128,6 +128,11 @@ export default registerAs('app', () => ({
     emailVerificationEnforced: process.env.FEATURE_EMAIL_VERIFICATION_ENFORCED ?? 'true',
     advancedFinancialJobs:
       process.env.FEATURE_ADVANCED_FINANCIAL_JOBS ?? process.env.PHASE_4_ENABLED ?? 'false',
+    // Legacy email-link (/auth/forgot-password + /auth/reset-password) and legacy
+    // email/SMS OTP (/auth/password-reset/request + /verify) flows. Superseded by the
+    // PIN-based flow (/auth/request-password-reset + /auth/reset-password/confirm).
+    // Off by default — flip to 'true' only if an un-migrated client still needs them.
+    legacyAuthEndpointsEnabled: process.env.FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED ?? 'false',
   },
 
   // Multi-Tenancy

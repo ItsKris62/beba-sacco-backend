@@ -834,6 +834,7 @@ export class AuthService {
     tenantId: string,
     ipAddress?: string,
   ): Promise<void> {
+    this.assertLegacyAuthEndpointsEnabled();
     const normalizedEmail = dto.email.toLowerCase();
 
     const user = await this.prisma.user.findFirst({
@@ -930,6 +931,7 @@ export class AuthService {
    * 7. Clear nonce hash + invalidate all sessions after successful reset
    */
   async resetPassword(dto: ResetPasswordDto, tenantId: string, ipAddress?: string): Promise<void> {
+    this.assertLegacyAuthEndpointsEnabled();
     // Step 1: Verify JWT signature and expiry
     let payload: PasswordResetPayload;
     try {
@@ -1053,6 +1055,7 @@ export class AuthService {
     tenantId: string,
     ipAddress?: string,
   ): Promise<void> {
+    this.assertLegacyAuthEndpointsEnabled();
     const identifier = this.normalizePasswordResetIdentifier(dto.method, dto.identifier);
     await this.assertPasswordResetRequestAllowed(identifier, ipAddress);
 
@@ -1130,6 +1133,7 @@ export class AuthService {
     tenantId: string,
     ipAddress?: string,
   ): Promise<void> {
+    this.assertLegacyAuthEndpointsEnabled();
     const identifier = this.normalizePasswordResetIdentifier(dto.method, dto.identifier);
     const user = await this.findUserByPasswordResetIdentifier(
       dto.method,
@@ -1597,6 +1601,24 @@ export class AuthService {
     return `${localPart.slice(0, 2)}***@${domain}`;
   }
 
+
+  /**
+   * Legacy email-link and legacy email/SMS-OTP reset flows are superseded by the
+   * PIN-based flow (/auth/request-password-reset + /auth/reset-password/confirm).
+   * Disabled by default via FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED — callers get a
+   * 410 Gone pointing at the replacement endpoints.
+   */
+  private assertLegacyAuthEndpointsEnabled(): void {
+    const enabled =
+      this.configService.get<string>('app.features.legacyAuthEndpointsEnabled') === 'true';
+    if (!enabled) {
+      throw new HttpException(
+        'This endpoint has been retired. Use POST /auth/request-password-reset and ' +
+          'POST /auth/reset-password/confirm instead.',
+        HttpStatus.GONE,
+      );
+    }
+  }
 
   private async assertTenantAcceptsLogin(tenantId: string): Promise<void> {
     const tenant = await this.prisma.tenant.findUnique({

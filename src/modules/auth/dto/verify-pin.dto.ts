@@ -13,10 +13,11 @@ export class VerifyPinDto {
   phone!: string;
 
   @ApiProperty({
-    example: '123456',
-    description: '4-6 digit temporary PIN received via SMS',
+    example: 'Kx7@mPq2',
+    description: '8-character temporary access code received via SMS (letters, digits, and symbols)',
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
-  @Matches(/^\d{4,6}$/, { message: 'pin must be 4 to 6 digits' })
+  @Matches(/^[A-Za-z0-9@#$!]{8}$/, { message: 'code must be exactly 8 characters' })
   pin!: string;
 }

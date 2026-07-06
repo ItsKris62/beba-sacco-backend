@@ -311,9 +311,9 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request email or SMS OTP for password reset',
     description:
-      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '**Deprecated.** Returns 410 Gone unless FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED=true. ' +
+      'Use the PIN-based flow endpoints ' +
       '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
-      'This endpoint remains for clients not yet migrated. ' +
       'Accepts method EMAIL or SMS plus a validated email/E.164 phone identifier. ' +
       'If a matching active account exists, a 6-digit OTP is sent through the selected channel. ' +
       'Always returns 200 to prevent user enumeration.',
@@ -322,6 +322,7 @@ export class AuthController {
     status: 200,
     description: 'If the contact matches an account, an OTP has been sent.',
   })
+  @ApiResponse({ status: 410, description: 'Endpoint retired — use the PIN-based flow' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   async requestPasswordResetSms(
     @Body() dto: PasswordResetRequestDto,
@@ -341,14 +342,15 @@ export class AuthController {
   @ApiOperation({
     summary: 'Verify email/SMS OTP and set a new password',
     description:
-      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '**Deprecated.** Returns 410 Gone unless FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED=true. ' +
+      'Use the PIN-based flow endpoints ' +
       '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
-      'This endpoint remains for clients not yet migrated. ' +
       'Validates the OTP against Redis, hashes the new password with argon2id, ' +
       'updates the user record, clears the OTP, and invalidates existing sessions.',
   })
   @ApiResponse({ status: 200, description: 'Password reset successfully' })
   @ApiResponse({ status: 400, description: 'Invalid OTP, identifier, or password' })
+  @ApiResponse({ status: 410, description: 'Endpoint retired — use the PIN-based flow' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   async verifyPasswordResetSms(
     @Body() dto: PasswordResetVerifyDto,
@@ -377,9 +379,10 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request a password-reset PIN via SMS',
     description:
-      'Accepts a phone number. If a matching ACTIVE account exists in this tenant, a PIN ' +
-      '(4-6 digits, 20-minute TTL) is sent via SMS. Always returns 200 to prevent phone ' +
-      'number enumeration. Rate-limited per IP (3/hour) and per IP+phone pair (3/hour).',
+      'Accepts a phone number. If a matching ACTIVE account exists in this tenant, an ' +
+      '8-character code (letters, digits, and symbols; 20-minute TTL) is sent via SMS. ' +
+      'Always returns 200 to prevent phone number enumeration. ' +
+      'Rate-limited per IP (3/hour) and per IP+phone pair (3/hour).',
   })
   @ApiResponse({
     status: 200,
@@ -474,9 +477,9 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request a password reset email',
     description:
-      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '**Deprecated.** Returns 410 Gone unless FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED=true. ' +
+      'Use the PIN-based flow endpoints ' +
       '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
-      'This endpoint remains for clients not yet migrated. ' +
       'Sends a password reset link to the provided email address if an account exists. ' +
       'Always returns 200 to prevent user enumeration. ' +
       'The reset link expires in 15 minutes and is single-use.',
@@ -485,6 +488,7 @@ export class AuthController {
     status: 200,
     description: 'If the email is registered, a reset link has been sent.',
   })
+  @ApiResponse({ status: 410, description: 'Endpoint retired — use the PIN-based flow' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   async forgotPassword(
     @Body() dto: ForgotPasswordDto,
@@ -506,15 +510,16 @@ export class AuthController {
   @ApiOperation({
     summary: 'Reset password using the token from the reset email',
     description:
-      '**Legacy email-based flow.** For the new web app, use the PIN-based flow endpoints ' +
+      '**Deprecated.** Returns 410 Gone unless FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED=true. ' +
+      'Use the PIN-based flow endpoints ' +
       '(POST /auth/request-password-reset + POST /auth/reset-password/confirm) instead. ' +
-      'This endpoint remains for clients not yet migrated. ' +
       'Verifies the signed JWT reset token, enforces single-use via nonce, ' +
       'sets the new password, and invalidates all existing sessions. ' +
       'The token expires in 15 minutes.',
   })
   @ApiResponse({ status: 200, description: 'Password reset successfully' })
   @ApiResponse({ status: 400, description: 'Reset link is invalid or has expired' })
+  @ApiResponse({ status: 410, description: 'Endpoint retired — use the PIN-based flow' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   async resetPassword(
     @Body() dto: ResetPasswordDto,

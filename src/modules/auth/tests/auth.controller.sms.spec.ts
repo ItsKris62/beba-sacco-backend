@@ -76,6 +76,7 @@ describe('AuthController SMS password reset endpoints', () => {
   let smsService: MockSmsService;
   let auditService: MockAuditService;
   let redisService: MockRedisService;
+  let configGet: jest.Mock<string | undefined, [string]>;
 
   const activeMemberUser = {
     id: USER_ID,
@@ -118,6 +119,9 @@ describe('AuthController SMS password reset endpoints', () => {
     redisService = {
       incr: jest.fn().mockResolvedValue(1),
     };
+    configGet = jest.fn((key: string) =>
+      key === 'app.features.legacyAuthEndpointsEnabled' ? 'true' : undefined,
+    );
 
     jest.mocked(argon2.hash).mockResolvedValue(HASHED_PASSWORD);
 
@@ -136,7 +140,7 @@ describe('AuthController SMS password reset endpoints', () => {
         AuthService,
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: { sign: jest.fn(), verify: jest.fn(), decode: jest.fn() } },
-        { provide: ConfigService, useValue: { get: jest.fn(), getOrThrow: jest.fn() } },
+        { provide: ConfigService, useValue: { get: configGet, getOrThrow: jest.fn() } },
         { provide: AuditService, useValue: auditService },
         { provide: JwtBlocklistService, useValue: { add: jest.fn() } },
         { provide: SessionService, useValue: {} },
@@ -321,6 +325,24 @@ describe('AuthController SMS password reset endpoints', () => {
       await postVerify({ ...validVerifyBody, otp: '999999' }).expect(400);
 
       expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('legacy endpoint deprecation', () => {
+    it('returns 410 for both endpoints when FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED is not set', async () => {
+      configGet.mockImplementation(() => undefined);
+      prisma.user.findFirst.mockResolvedValue(activeMemberUser);
+
+      await postRequest().expect(410);
+      await postVerify({
+        method: 'SMS',
+        identifier: TEST_PHONE,
+        otp: TEST_OTP,
+        newPassword: NEW_PASSWORD,
+      }).expect(410);
+
+      expect(otpService.generate).not.toHaveBeenCalled();
+      expect(otpService.validate).not.toHaveBeenCalled();
     });
   });
 });

@@ -29,9 +29,13 @@ export class ResetPasswordConfirmDto {
   @Matches(/^\+?[1-9]\d{7,14}$/, { message: 'Provide a valid phone number' })
   phone!: string;
 
-  @ApiProperty({ example: '123456', description: '4-6 digit PIN received via SMS' })
+  @ApiProperty({
+    example: 'Kx7@mPq2',
+    description: '8-character temporary code received via SMS (letters, digits, and symbols)',
+  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
-  @Matches(/^\d{4,6}$/, { message: 'pin must be 4 to 6 digits' })
+  @Matches(/^[A-Za-z0-9@#$!]{8}$/, { message: 'code must be exactly 8 characters' })
   pin!: string;
 
   @ApiProperty({

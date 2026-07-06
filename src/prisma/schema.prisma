@@ -577,7 +577,7 @@ model PinVerification {
 
   purpose PinPurpose
   codeHash String // sha256(pin) — plaintext is never persisted
-  length   Int // 4-6, resolved from tenant.settings.security.pinLength at issuance
+  length   Int // fixed at 8 (alphanumeric + symbol code) — see PinService.CODE_LENGTH
 
   expiresAt     DateTime
   consumedAt    DateTime?

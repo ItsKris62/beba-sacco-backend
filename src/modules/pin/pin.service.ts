@@ -8,11 +8,17 @@ import { SmsService } from '../sms/sms.service';
 import { SmsJobPayload } from '../queue/queue.constants';
 import { maskPhone } from '../mpesa/utils/mpesa.utils';
 
-const DEFAULT_PIN_LENGTH = 6;
-const MIN_PIN_LENGTH = 4;
-const MAX_PIN_LENGTH = 6;
+const CODE_LENGTH = 8;
 const MAX_ATTEMPTS = 5;
 const KEY_PREFIX = 'pin';
+
+// Excludes visually ambiguous characters (I/l/O/0/1) so codes read unambiguously
+// over SMS. Matches the charset used by UsersService.generateTempPassword().
+const CODE_UPPER = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+const CODE_LOWER = 'abcdefghjkmnpqrstuvwxyz';
+const CODE_DIGITS = '23456789';
+const CODE_SYMBOLS = '@#$!';
+const CODE_ALL = CODE_UPPER + CODE_LOWER + CODE_DIGITS + CODE_SYMBOLS;
 
 // Business requirement: PIN expires in exactly 20 minutes, for both onboarding and reset.
 const PIN_TTL_SECONDS: Record<PinPurpose, number> = {
@@ -62,8 +68,7 @@ export class PinService {
       throw new Error(`Cannot issue PIN — user ${userId} has no phone number on file`);
     }
 
-    const length = await this.resolvePinLength(tenantId);
-    const pin = this.generateNumericPin(length);
+    const pin = this.generateCode(CODE_LENGTH);
     const codeHash = this.hashPin(pin);
     const ttlSeconds = PIN_TTL_SECONDS[purpose];
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
@@ -76,7 +81,7 @@ export class PinService {
         userId,
         purpose,
         codeHash,
-        length,
+        length: CODE_LENGTH,
         expiresAt,
         requestedByIp,
       },
@@ -176,26 +181,33 @@ export class PinService {
     }
   }
 
-  private async resolvePinLength(tenantId: string): Promise<number> {
-    const tenant = await this.prisma.tenant.findUnique({
-      where: { id: tenantId },
-      select: { settings: true },
-    });
-    const configured = (tenant?.settings as any)?.security?.pinLength;
-    if (
-      typeof configured === 'number' &&
-      configured >= MIN_PIN_LENGTH &&
-      configured <= MAX_PIN_LENGTH
-    ) {
-      return configured;
+  /**
+   * Generate an 8-character code guaranteed to contain at least one uppercase
+   * letter, one lowercase letter, one digit, and one symbol, then shuffle so
+   * the category order isn't predictable.
+   */
+  private generateCode(length: number): string {
+    const chars = [
+      this.pickChar(CODE_UPPER),
+      this.pickChar(CODE_LOWER),
+      this.pickChar(CODE_DIGITS),
+      this.pickChar(CODE_SYMBOLS),
+    ];
+
+    while (chars.length < length) {
+      chars.push(this.pickChar(CODE_ALL));
     }
-    return DEFAULT_PIN_LENGTH;
+
+    for (let i = chars.length - 1; i > 0; i -= 1) {
+      const j = randomInt(i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+
+    return chars.join('');
   }
 
-  private generateNumericPin(length: number): string {
-    const min = 10 ** (length - 1);
-    const max = 10 ** length;
-    return String(randomInt(min, max));
+  private pickChar(chars: string): string {
+    return chars[randomInt(chars.length)];
   }
 
   private hashPin(pin: string): string {
@@ -223,10 +235,10 @@ export class PinService {
     const expiresInMinutes = Math.round(ttlSeconds / 60);
     const message =
       purpose === PinPurpose.FIRST_LOGIN
-        ? `Hello ${firstName}, your Beba SACCO temporary access PIN is ${pin}. ` +
+        ? `Hello ${firstName}, your Beba SACCO temporary access code is ${pin}. ` +
           `It expires in ${expiresInMinutes} minutes. Do not share this with anyone.`
-        : `Your Beba SACCO password reset PIN is ${pin}. It expires in ${expiresInMinutes} minutes. ` +
-          'Do not share this PIN with anyone.';
+        : `Your Beba SACCO password reset code is ${pin}. It expires in ${expiresInMinutes} minutes. ` +
+          'Do not share this code with anyone.';
 
     const type: SmsJobPayload['type'] =
       purpose === PinPurpose.FIRST_LOGIN ? 'FIRST_LOGIN_PIN' : 'PASSWORD_RESET_OTP';
