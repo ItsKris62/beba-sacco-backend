@@ -4,7 +4,7 @@ import {
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { LoanStatus, InterestType, TransactionStatus, TransactionType } from '@prisma/client';
+import { AccountType, LoanStatus, InterestType, TransactionStatus, TransactionType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -14,10 +14,12 @@ import { maskPhone } from '../mpesa/utils/mpesa.utils';
 import { MpesaTriggerSource } from '@prisma/client';
 import { LoansService } from '../loans/loans.service';
 import { StorageService } from '../storage/storage.service';
+import { AccountsService } from '../accounts/accounts.service';
 import { GuarantorResponseDto } from '../loans/dto/guarantor-response.dto';
 import { MemberLoanApplyDto } from './dto/member-loan-apply.dto';
 import { UploadUrlResponseDto } from './dto/upload-url.dto';
 import { QUEUE_NAMES, MpesaDisbursementJobPayload } from '../queue/queue.constants';
+import { InternalTransferDto } from './dto/internal-transfer.dto';
 
 /**
  * Member Portal Service
@@ -35,6 +37,7 @@ export class MemberPortalService {
     private readonly mpesaService: MpesaService,
     private readonly loansService: LoansService,
     private readonly storage: StorageService,
+    private readonly accountsService: AccountsService,
     @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
     private readonly disbursementQueue: Queue<MpesaDisbursementJobPayload>,
   ) {}
@@ -705,6 +708,69 @@ export class MemberPortalService {
       status: mappedStatus,
       amount: mpesaTx.amount ? new Decimal(mpesaTx.amount.toString()).toString() : undefined,
       completedAt: mappedStatus === 'SUCCESS' ? mpesaTx.updatedAt : null,
+    };
+  }
+
+  // ─── INTERNAL TRANSFER (FOSA ↔ BOSA) ──────────────────────────
+
+  /**
+   * Transfer funds between the member's own FOSA and BOSA accounts.
+   * Resolves account IDs from the account types in the DTO, then delegates
+   * to AccountsService.transfer() → LedgerService.postInternalTransfer().
+   */
+  async internalTransfer(
+    userId: string,
+    tenantId: string,
+    dto: InternalTransferDto,
+    ipAddress?: string,
+  ) {
+    const member = await this.resolveMember(userId, tenantId);
+
+    // Find the member's active FOSA and BOSA accounts
+    const accounts = await this.prisma.account.findMany({
+      where: {
+        tenantId,
+        memberId: member.id,
+        accountType: { in: [AccountType.FOSA, AccountType.BOSA] },
+        isActive: true,
+      },
+      select: { id: true, accountType: true, accountNumber: true },
+    });
+
+    const sourceAccount = accounts.find((a) => a.accountType === dto.fromAccountType);
+    const destAccount = accounts.find((a) => a.accountType === dto.toAccountType);
+
+    if (!sourceAccount) {
+      throw new NotFoundException(
+        `No active ${dto.fromAccountType} account found for this member`,
+      );
+    }
+    if (!destAccount) {
+      throw new NotFoundException(
+        `No active ${dto.toAccountType} account found for this member`,
+      );
+    }
+
+    // Delegate to AccountsService.transfer() which uses LedgerService.postInternalTransfer()
+    const result = await this.accountsService.transfer(
+      sourceAccount.id,
+      {
+        destinationAccountId: destAccount.id,
+        amount: dto.amount,
+        description: dto.narration ?? `Internal transfer ${dto.fromAccountType} → ${dto.toAccountType}`,
+      },
+      tenantId,
+      userId,
+      ipAddress,
+    );
+
+    return {
+      message: `Successfully transferred KES ${dto.amount} from ${sourceAccount.accountNumber} to ${destAccount.accountNumber}`,
+      fromAccount: sourceAccount.accountNumber,
+      toAccount: destAccount.accountNumber,
+      amount: dto.amount,
+      newSourceBalance: result.newSourceBalance,
+      newDestinationBalance: result.newDestinationBalance,
     };
   }
 

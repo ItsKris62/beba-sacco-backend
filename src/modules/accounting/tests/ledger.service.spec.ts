@@ -394,6 +394,71 @@ describe('LedgerService', () => {
     });
   });
 
+  // ── postAccountSourcedRepaymentLegEntry() ────────────────────────────────────
+
+  describe('postAccountSourcedRepaymentLegEntry()', () => {
+    it.each([
+      ['PENALTY', PENALTY_INCOME_GL],
+      ['INTEREST', INTEREST_INCOME_GL],
+      ['PRINCIPAL', LOAN_RECEIVABLE_GL],
+    ] as const)('posts the %s leg: debits FOSA_DEPOSITS (not CASH), credits the correct income/receivable GL account', async (leg, expectedCreditGl) => {
+      const tx = buildTx();
+      tx.journalEntry.create.mockResolvedValue({ id: `je-acct-${leg}-1` });
+
+      const result = await service.postAccountSourcedRepaymentLegEntry({
+        tx: tx as any,
+        tenantId: TENANT_ID,
+        reference: `REPAY-002-${leg}`,
+        leg,
+        amount: new Decimal(300),
+        accountType: AccountType.FOSA,
+        transactionId: 'txn-alloc-2',
+        actorId: ACTOR_ID,
+      });
+
+      expect(result.replayed).toBe(false);
+      expect(tx.journalEntry.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            postings: {
+              create: [expect.objectContaining({ debitAccountId: FOSA_GL.id, creditAccountId: expectedCreditGl.id, amount: '300' })],
+            },
+          }),
+        }),
+      );
+      // Deliberately does not touch any Account balance — the caller (LoansService.
+      // repay()) decrements it exactly once, separately, for the total amount.
+      expect(tx.account.updateMany).not.toHaveBeenCalled();
+      expect(tx.transaction.create).not.toHaveBeenCalled();
+    });
+
+    it('resolves BOSA_DEPOSITS as the debit code for a BOSA-sourced repayment', async () => {
+      const tx = buildTx();
+      tx.journalEntry.create.mockResolvedValue({ id: 'je-acct-bosa-1' });
+
+      await service.postAccountSourcedRepaymentLegEntry({
+        tx: tx as any,
+        tenantId: TENANT_ID,
+        reference: 'REPAY-003-PRINCIPAL',
+        leg: 'PRINCIPAL',
+        amount: new Decimal(500),
+        accountType: AccountType.BOSA,
+        transactionId: 'txn-alloc-3',
+        actorId: ACTOR_ID,
+      });
+
+      expect(tx.journalEntry.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            postings: {
+              create: [expect.objectContaining({ debitAccountId: BOSA_GL.id, creditAccountId: LOAN_RECEIVABLE_GL.id })],
+            },
+          }),
+        }),
+      );
+    });
+  });
+
   // ── postInternalTransfer() ───────────────────────────────────────────────────
 
   describe('postInternalTransfer()', () => {

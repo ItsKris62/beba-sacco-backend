@@ -43,6 +43,7 @@ import { MemberApplyLoanDto, MemberRequestGuarantorsDto } from '../loans/dto/mem
 import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
 import { MemberStkPushDto } from './dto/member-stk-push.dto';
 import { WithdrawMpesaDto } from './dto/withdraw-mpesa.dto';
+import { InternalTransferDto } from './dto/internal-transfer.dto';
 import { PatchProfileDto } from './dto/patch-profile.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
@@ -577,6 +578,34 @@ export class MemberPortalController {
       dto.phoneNumber,
       dto.amount,
       tenant.id,
+      req.ip,
+    );
+  }
+
+  @Post('accounts/transfer')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Transfer funds between own FOSA and BOSA accounts',
+    description:
+      'Moves money between the authenticated member\'s own FOSA and BOSA accounts. ' +
+      'Minimum transfer amount is KES 100. The source account must have sufficient ' +
+      'available balance (respecting the minimum balance floor).',
+  })
+  @ApiResponse({ status: 200, description: 'Transfer completed successfully' })
+  @ApiResponse({ status: 400, description: 'Insufficient funds, below minimum balance, or invalid transfer parameters' })
+  @ApiResponse({ status: 404, description: 'Source or destination account not found' })
+  @ApiResponse({ status: 429, description: 'Too many transfer requests — max 5 per minute' })
+  async internalTransfer(
+    @Body() dto: InternalTransferDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Req() req: Request,
+  ) {
+    return this.portal.internalTransfer(
+      user.id,
+      tenant.id,
+      dto,
       req.ip,
     );
   }

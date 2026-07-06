@@ -498,12 +498,72 @@ export class LedgerService {
     actorId: string;
     description?: string;
   }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
-    const { tx, tenantId, reference, leg, transactionId, actorId } = params;
+    return this.postGlOnlyLegEntry({
+      ...params,
+      debitCode: this.GL_CODES.CASH,
+      description: params.description ?? `Loan repayment — ${params.leg.toLowerCase()} allocation`,
+      approvalNotes: 'System-posted via LedgerService.postLoanRepaymentLegEntry()',
+    });
+  }
+
+  /**
+   * Post the GL side of one leg of a *manually recorded* (teller) loan repayment,
+   * where the money is deducted directly from the member's own FOSA/BOSA balance —
+   * unlike postLoanRepaymentLegEntry() (external M-Pesa/cash), the debit side here
+   * is the member's deposit-liability code, not CASH:
+   *   PENALTY:   debit FOSA/BOSA_DEPOSITS, credit PENALTY_INCOME
+   *   INTEREST:  debit FOSA/BOSA_DEPOSITS, credit INTEREST_INCOME
+   *   PRINCIPAL: debit FOSA/BOSA_DEPOSITS, credit LOAN_RECEIVABLE
+   *
+   * Deliberately does NOT itself touch Account.balance or applyBalanceChange() —
+   * LoansService.repay() decrements the FOSA balance exactly ONCE, for the total
+   * repayment amount, via its own existing FOR-UPDATE-locked logic; calling
+   * postEntry() here too would debit FOSA_DEPOSITS a second time for the same
+   * money. Summed across the (up to 3) legs, this method's debit total equals that
+   * one balance decrease — consistent books, no suspense account needed.
+   */
+  async postAccountSourcedRepaymentLegEntry(params: {
+    tx: PrismaTx;
+    tenantId: string;
+    reference: string;
+    leg: 'PENALTY' | 'INTEREST' | 'PRINCIPAL';
+    amount: Decimal;
+    accountType: AccountType;
+    transactionId: string;
+    actorId: string;
+    description?: string;
+  }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
+    return this.postGlOnlyLegEntry({
+      ...params,
+      debitCode: this.memberDepositsCode(params.accountType),
+      description: params.description ?? `Loan repayment (FOSA-sourced) — ${params.leg.toLowerCase()} allocation`,
+      approvalNotes: 'System-posted via LedgerService.postAccountSourcedRepaymentLegEntry()',
+    });
+  }
+
+  /**
+   * Shared implementation for both loan-repayment leg postings above: one
+   * GL-only JournalEntry/GLPosting pair, debiting `debitCode` and crediting the
+   * leg-appropriate income/receivable code. No Account or operational Transaction
+   * row is touched — see the two public methods' docs for why.
+   */
+  private async postGlOnlyLegEntry(params: {
+    tx: PrismaTx;
+    tenantId: string;
+    reference: string;
+    leg: 'PENALTY' | 'INTEREST' | 'PRINCIPAL';
+    amount: Decimal;
+    debitCode: string;
+    transactionId: string;
+    actorId: string;
+    description: string;
+    approvalNotes: string;
+  }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
+    const { tx, tenantId, reference, leg, debitCode, transactionId, actorId, description, approvalNotes } = params;
 
     const amount = params.amount.toDecimalPlaces(4);
     if (amount.lte(0)) throw new BadRequestException('Amount must be positive');
 
-    const description = params.description ?? `Loan repayment — ${leg.toLowerCase()} allocation`;
     const entryNumber = `JE-LEDGER-${reference}`;
 
     const existing = await tx.journalEntry.findFirst({ where: { tenantId, entryNumber } });
@@ -521,7 +581,7 @@ export class LedgerService {
     const { debitAccount, creditAccount } = await this.findGlAccountPair(
       tx,
       tenantId,
-      this.GL_CODES.CASH,
+      debitCode,
       creditCode,
     );
 
@@ -537,7 +597,7 @@ export class LedgerService {
         totalAmount: amount.toString(),
         createdById: actorId,
         approvedById: actorId,
-        approvalNotes: 'System-posted via LedgerService.postLoanRepaymentLegEntry()',
+        approvalNotes,
         postedAt: new Date(),
         postings: {
           create: [

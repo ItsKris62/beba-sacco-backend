@@ -122,8 +122,11 @@ describe('AdminAuditController', () => {
   });
 
   it('returns paginated admin audit logs with filters', async () => {
+    // SUPER_ADMIN sees cross-tenant data by default; tenantId here comes from the
+    // query param (not req.tenant) and crossTenant is always true for this role —
+    // see AdminAuditController.findAdminAuditLogs().
     await request(app.getHttpServer())
-      .get('/api/v1/admin/audit-logs?page=1&limit=20&action=LOAN.APPLY')
+      .get('/api/v1/admin/audit-logs?page=1&limit=20&action=LOAN.APPLY&tenantId=tenant-1')
       .set('x-test-role', 'SUPER_ADMIN')
       .expect(200)
       .expect(({ body }) => {
@@ -137,6 +140,7 @@ describe('AdminAuditController', () => {
         action: 'LOAN.APPLY',
         limit: 20,
         offset: 0,
+        crossTenant: true,
       }),
     );
   });

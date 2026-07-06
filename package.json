@@ -36,7 +36,8 @@
     "import:members": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/import-members.ts",
     "seed:loan": "ts-node -r tsconfig-paths/register prisma/seed-loan-workflow.ts",
     "sentry:sourcemaps": "sentry-cli sourcemaps inject --org veriwoks --project kolwa-beba-app ./dist && sentry-cli sourcemaps upload --org veriwoks --project kolwa-beba-app ./dist",
-    "bullmq:repeatables:clean": "node scripts/clean-stale-repeatables.js"
+    "bullmq:repeatables:clean": "node scripts/clean-stale-repeatables.js",
+    "backfill:accounts": "ts-node --transpile-only -r tsconfig-paths/register src/database/scripts/backfill-missing-accounts.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.490.0",

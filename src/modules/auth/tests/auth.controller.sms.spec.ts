@@ -5,7 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import { UserRole } from '@prisma/client';
+import { AccountStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { Request, Response, NextFunction } from 'express';
 import request = require('supertest');
@@ -20,10 +20,18 @@ import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { SmsService } from '../../sms/sms.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { RedisService } from '../../../common/services/redis.service';
+import { TwoFactorService } from '../two-factor.service';
+import { PasswordPolicyService } from '../password-policy.service';
+import { PinService } from '../../pin/pin.service';
 
 jest.mock('argon2', () => ({
   hash: jest.fn(),
 }));
+
+// See auth.service.spec.ts for why: TwoFactorService transitively imports otplib ->
+// @otplib/plugin-base32-scure -> @scure/base (ESM-only), which crashes Jest's default
+// (non-transforming) config the moment AuthService's real dependency chain loads.
+jest.mock('../two-factor.service', () => ({ TwoFactorService: jest.fn() }));
 
 const TENANT_ID = 'tenant-uuid-1234';
 const USER_ID = 'user-uuid-1234';
@@ -136,6 +144,15 @@ describe('AuthController SMS password reset endpoints', () => {
         { provide: OtpService, useValue: otpService },
         { provide: SmsService, useValue: smsService },
         { provide: RedisService, useValue: redisService },
+        { provide: TwoFactorService, useValue: { verifyToken: jest.fn(), verifyBackupCode: jest.fn() } },
+        {
+          provide: PasswordPolicyService,
+          useValue: {
+            validatePassword: jest.fn().mockResolvedValue(undefined),
+            validatePasswordAge: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        { provide: PinService, useValue: {} },
         { provide: APP_GUARD, useClass: ThrottlerGuard },
       ],
     }).compile();
@@ -176,8 +193,7 @@ describe('AuthController SMS password reset endpoints', () => {
         expect.objectContaining({
           where: expect.objectContaining({
             tenantId: TENANT_ID,
-            role: UserRole.MEMBER,
-            isActive: true,
+            accountStatus: AccountStatus.ACTIVE,
             OR: [
               { phone: TEST_PHONE },
               { phone: '254712345678' },

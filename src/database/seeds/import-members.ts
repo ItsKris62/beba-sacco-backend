@@ -8,6 +8,7 @@ import { CsvParserService } from '../../modules/data-import/csv-parser.service';
 import { generateImportEmail } from '../../modules/data-import/utils/name-parser';
 import { QUEUE_NAMES, SmsJobPayload } from '../../modules/queue/queue.constants';
 import type { ParsedCsvRow } from '../../modules/data-import/dto/import.dto';
+import { provisionMemberAccounts } from '../../modules/accounts/utils/provision-accounts.util';
 
 type Args = {
   file?: string;
@@ -251,6 +252,9 @@ async function createMemberUser(params: {
       },
       select: { id: true },
     });
+
+    // Auto-provision FOSA + BOSA accounts (idempotent, snapshots AccountTypePolicy)
+    await provisionMemberAccounts(tx, tenantId, member.id);
 
     await tx.stageAssignment.upsert({
       where: { userId_stageId: { userId: user.id, stageId: stage.id } },

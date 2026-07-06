@@ -20,9 +20,6 @@ import { TransferFundsDto } from './dto/transfer-funds.dto';
  *
  * TODO: Phase 3 – interest accrual engine (monthly BOSA interest)
  * TODO: Phase 4 – dividend distribution to BOSA accounts
- * TODO: snapshot minimumBalance/allowsNegative from AccountTypePolicy onto new
- *       Account rows in create() below — currently every new account gets the
- *       column defaults (0 / false) regardless of the tenant's configured policy.
  */
 @Injectable()
 export class AccountsService {
@@ -53,6 +50,13 @@ export class AccountsService {
       );
     }
 
+    // Snapshot AccountTypePolicy (minimumBalance / allowsNegative) at creation time.
+    // Falls back to schema defaults when no policy is configured for this tenant.
+    const policy = await this.prisma.accountTypePolicy.findUnique({
+      where: { tenantId_accountType: { tenantId, accountType: dto.accountType } },
+      select: { minimumBalance: true, allowsNegative: true },
+    });
+
     // Auto-generate account number: ACC-BOSA-000001 or ACC-FOSA-000001
     const counter = await this.prisma.tenantCounter.upsert({
       where: { tenantId },
@@ -68,6 +72,8 @@ export class AccountsService {
         accountNumber,
         accountType: dto.accountType,
         balance: 0,
+        minimumBalance: policy?.minimumBalance ?? 0,
+        allowsNegative: policy?.allowsNegative ?? false,
       },
     });
 

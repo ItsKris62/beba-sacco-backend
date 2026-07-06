@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { UserRole } from '@prisma/client';
+import { AccountStatus, UserRole } from '@prisma/client';
 import { JwtStrategy, JwtPayload } from '../strategies/jwt.strategy';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { JwtBlocklistService } from '../jwt-blocklist.service';
@@ -51,7 +51,7 @@ describe('JwtStrategy', () => {
       email: payload.email,
       role: payload.role,
       tenantId: payload.tenantId,
-      isActive: true,
+      accountStatus: AccountStatus.ACTIVE,
       mustChangePassword: false,
     };
     mockPrismaService.user.findUnique.mockResolvedValue(dbUser);
@@ -68,7 +68,7 @@ describe('JwtStrategy', () => {
   });
 
   it('throws UnauthorizedException when user is deactivated', async () => {
-    mockPrismaService.user.findUnique.mockResolvedValue({ ...payload, isActive: false });
+    mockPrismaService.user.findUnique.mockResolvedValue({ ...payload, accountStatus: AccountStatus.SUSPENDED });
 
     await expect(strategy.validate(payload)).rejects.toThrow(UnauthorizedException);
   });

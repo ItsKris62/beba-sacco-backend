@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
+import { getQueueToken } from '@nestjs/bullmq';
 import { LoanStatus } from '@prisma/client';
 import { MemberPortalService } from '../member-portal.service';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -7,6 +8,8 @@ import { AuditService } from '../../audit/audit.service';
 import { MpesaService } from '../../mpesa/mpesa.service';
 import { LoansService } from '../../loans/loans.service';
 import { StorageService } from '../../storage/storage.service';
+import { AccountsService } from '../../accounts/accounts.service';
+import { QUEUE_NAMES } from '../../queue/queue.constants';
 
 // ─── Stubs ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +33,8 @@ const mockAudit = { create: jest.fn().mockResolvedValue(undefined) };
 const mockMpesa = { initiateDeposit: jest.fn() };
 const mockLoans = { respondAsGuarantor: jest.fn(), apply: jest.fn() };
 const mockStorage = { getUploadUrl: jest.fn() };
+const mockAccounts = {};
+const mockDisbursementQueue = { add: jest.fn() };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -65,11 +70,11 @@ function buildLoanStub(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function buildScheduleRows(count: number, paymentDateFn: (i: number) => Date, status = 'PENDING') {
+function buildScheduleRows(count: number, dueDateFn: (i: number) => Date, status = 'PENDING') {
   return Array.from({ length: count }, (_, i) => ({
     dayNumber: i + 1,
     amountPaid: '4438.9149',
-    paymentDate: paymentDateFn(i),
+    dueDate: dueDateFn(i),
     status,
   }));
 }
@@ -90,6 +95,8 @@ describe('MemberPortalService.getLoanDetail()', () => {
         { provide: MpesaService, useValue: mockMpesa },
         { provide: LoansService, useValue: mockLoans },
         { provide: StorageService, useValue: mockStorage },
+        { provide: AccountsService, useValue: mockAccounts },
+        { provide: getQueueToken(QUEUE_NAMES.MPESA_DISBURSEMENT), useValue: mockDisbursementQueue },
       ],
     }).compile();
 
@@ -235,9 +242,9 @@ describe('MemberPortalService.getLoanDetail()', () => {
     expect(result.repaymentSchedule.every((e) => e.status === 'UPCOMING')).toBe(true);
   });
 
-  it('marks schedule entries as PAID when status is CONFIRMED', async () => {
-    const anyDate = new Date('2024-01-01'); // past, but status=CONFIRMED overrides
-    const scheduleRows = buildScheduleRows(2, () => anyDate, 'CONFIRMED');
+  it('marks schedule entries as PAID when status is PAID', async () => {
+    const anyDate = new Date('2024-01-01'); // past, but status=PAID overrides the date-based OVERDUE check
+    const scheduleRows = buildScheduleRows(2, () => anyDate, 'PAID');
 
     mockPrisma.member.findFirst.mockResolvedValueOnce(buildMemberStub());
     mockPrisma.loan.findFirst.mockResolvedValueOnce(buildLoanStub());

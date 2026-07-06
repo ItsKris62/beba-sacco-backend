@@ -7,6 +7,7 @@ import { SmsService } from '../sms/sms.service';
 import { generateImportEmail } from './utils/name-parser';
 import { applyKnownAliases } from './utils/fuzzy-matcher';
 import type { ValidatedRow, ImportReport } from './dto/import.dto';
+import { provisionMemberAccounts } from '../accounts/utils/provision-accounts.util';
 import * as argon2 from 'argon2';
 
 const BATCH_SIZE = 50;
@@ -228,6 +229,9 @@ export class ImportExecutionService {
           nationalId: row.idNumber ?? undefined,
         },
       });
+
+      // Auto-provision FOSA + BOSA accounts (idempotent, snapshots AccountTypePolicy)
+      await provisionMemberAccounts(tx, tenantId, member.id);
 
       await tx.stageAssignment.upsert({
         where: { userId_stageId: { userId: user.id, stageId: stage.id } },

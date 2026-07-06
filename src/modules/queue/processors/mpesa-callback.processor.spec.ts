@@ -69,8 +69,8 @@ function makePrisma(overrides: Partial<{
         findFirst: jest.fn().mockResolvedValue(null),
       },
       transaction: {
-        // postLedgerEntry calls findUnique to check for duplicate references (Layer 3)
-        findUnique: jest.fn().mockResolvedValue(null),
+        // postLedgerEntry calls findFirst to check for duplicate references (Layer 3)
+        findFirst: jest.fn().mockResolvedValue(null),
         create: overrides.transactionCreate ?? jest.fn().mockResolvedValue({ id: 'ledger-1' }),
       },
       auditLog: {

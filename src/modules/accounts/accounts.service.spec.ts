@@ -13,6 +13,7 @@ const ACTOR_ID = 'actor-uuid-1';
 const mockPrisma = {
   member: { findFirst: jest.fn() },
   account: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn() },
+  accountTypePolicy: { findUnique: jest.fn().mockResolvedValue(null) },
   tenantCounter: { upsert: jest.fn() },
   transaction: { findMany: jest.fn(), count: jest.fn() },
   $transaction: jest.fn(),
@@ -73,6 +74,41 @@ describe('AccountsService', () => {
       expect(mockPrisma.account.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ accountNumber: 'ACC-FOSA-000007', accountType: AccountType.FOSA, balance: 0 }),
+        }),
+      );
+    });
+
+    it('defaults minimumBalance/allowsNegative to 0/false when no AccountTypePolicy is configured', async () => {
+      mockPrisma.member.findFirst.mockResolvedValue({ id: 'member-1', memberNumber: 'M-001' });
+      mockPrisma.account.findFirst.mockResolvedValue(null);
+      mockPrisma.accountTypePolicy.findUnique.mockResolvedValueOnce(null);
+      mockPrisma.tenantCounter.upsert.mockResolvedValue({ accountSeq: 1 });
+      mockPrisma.account.create.mockResolvedValue({ id: 'account-1', accountNumber: 'ACC-FOSA-000001' });
+
+      await service.create({ memberId: 'member-1', accountType: AccountType.FOSA }, TENANT_ID, ACTOR_ID);
+
+      expect(mockPrisma.account.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ minimumBalance: 0, allowsNegative: false }),
+        }),
+      );
+    });
+
+    it('snapshots minimumBalance/allowsNegative from the tenant AccountTypePolicy when configured', async () => {
+      mockPrisma.member.findFirst.mockResolvedValue({ id: 'member-1', memberNumber: 'M-001' });
+      mockPrisma.account.findFirst.mockResolvedValue(null);
+      mockPrisma.accountTypePolicy.findUnique.mockResolvedValueOnce({ minimumBalance: 500, allowsNegative: true });
+      mockPrisma.tenantCounter.upsert.mockResolvedValue({ accountSeq: 1 });
+      mockPrisma.account.create.mockResolvedValue({ id: 'account-1', accountNumber: 'ACC-BOSA-000001' });
+
+      await service.create({ memberId: 'member-1', accountType: AccountType.BOSA }, TENANT_ID, ACTOR_ID);
+
+      expect(mockPrisma.accountTypePolicy.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { tenantId_accountType: { tenantId: TENANT_ID, accountType: AccountType.BOSA } } }),
+      );
+      expect(mockPrisma.account.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ minimumBalance: 500, allowsNegative: true }),
         }),
       );
     });

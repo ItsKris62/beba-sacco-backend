@@ -3,7 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UnauthorizedException, ConflictException } from '@nestjs/common';
 import { getQueueToken } from '@nestjs/bullmq';
-import { TenantStatus, UserRole } from '@prisma/client';
+import { AccountStatus, TenantStatus, UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { AuthService } from '../auth.service';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -14,11 +14,20 @@ import { OtpService } from '../otp.service';
 import { SmsService } from '../../sms/sms.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { RedisService } from '../../../common/services/redis.service';
+import { TwoFactorService } from '../two-factor.service';
+import { PasswordPolicyService } from '../password-policy.service';
+import { PinService } from '../../pin/pin.service';
 
 jest.mock('argon2', () => ({
   verify: jest.fn(),
   hash: jest.fn(),
 }));
+
+// TwoFactorService transitively imports otplib -> @otplib/plugin-base32-scure ->
+// @scure/base, which ships an ESM-only build that Jest's default (non-transforming)
+// config can't parse. Mocking the module here stops AuthService's import chain from
+// ever loading the real TwoFactorService (and therefore otplib) at all.
+jest.mock('../two-factor.service', () => ({ TwoFactorService: jest.fn() }));
 
 // ─────────────────────────── Mocks ───────────────────────────
 
@@ -108,6 +117,13 @@ const mockRedisService = {
   incr: jest.fn().mockResolvedValue(1),
 };
 
+const mockTwoFactorService = { verifyToken: jest.fn(), verifyBackupCode: jest.fn() };
+const mockPasswordPolicyService = {
+  validatePassword: jest.fn().mockResolvedValue(undefined),
+  validatePasswordAge: jest.fn().mockResolvedValue(undefined),
+};
+const mockPinService = {};
+
 // ─────────────────────────── Test Suite ───────────────────────────
 
 describe('AuthService', () => {
@@ -120,7 +136,7 @@ describe('AuthService', () => {
     email: 'test@kcboda.co.ke',
     passwordHash: '$argon2id$mock-hash',
     role: UserRole.MEMBER,
-    isActive: true,
+    accountStatus: AccountStatus.ACTIVE,
     firstName: 'John',
     lastName: 'Doe',
     tenantId: TENANT_ID,
@@ -144,6 +160,9 @@ describe('AuthService', () => {
         { provide: OtpService, useValue: mockOtpService },
         { provide: SmsService, useValue: mockSmsService },
         { provide: RedisService, useValue: mockRedisService },
+        { provide: TwoFactorService, useValue: mockTwoFactorService },
+        { provide: PasswordPolicyService, useValue: mockPasswordPolicyService },
+        { provide: PinService, useValue: mockPinService },
       ],
     }).compile();
 
@@ -171,7 +190,7 @@ describe('AuthService', () => {
     });
 
     it('returns null when user is inactive', async () => {
-      mockPrismaService.user.findFirst.mockResolvedValue({ ...baseUser, isActive: false });
+      mockPrismaService.user.findFirst.mockResolvedValue({ ...baseUser, accountStatus: AccountStatus.SUSPENDED });
 
       const result = await service.validateUser(baseUser.email, 'password', TENANT_ID);
 
@@ -197,7 +216,7 @@ describe('AuthService', () => {
     });
 
     it('throws UnauthorizedException when account is deactivated', async () => {
-      mockPrismaService.user.findFirst.mockResolvedValue({ ...baseUser, isActive: false });
+      mockPrismaService.user.findFirst.mockResolvedValue({ ...baseUser, accountStatus: AccountStatus.SUSPENDED });
 
       await expect(
         service.login({ email: baseUser.email, password: 'Pass123!' }, TENANT_ID),

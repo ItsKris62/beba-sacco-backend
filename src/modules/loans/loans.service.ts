@@ -1060,6 +1060,31 @@ export class LoansService {
           data: { balance: balAfter.toDecimalPlaces(4).toString() },
         });
 
+        // GL side: the FOSA balance above is decremented exactly once, for the full
+        // actualRepayment amount. These three legs post the GL-only breakdown
+        // (debit FOSA_DEPOSITS / credit the leg-specific income/receivable code) —
+        // they do NOT touch Account.balance again, avoiding a double debit. See
+        // LedgerService.postAccountSourcedRepaymentLegEntry() for why this differs
+        // from the M-Pesa-sourced waterfall (which debits CASH, not FOSA_DEPOSITS).
+        if (toArrears.greaterThan(0)) {
+          await this.ledger.postAccountSourcedRepaymentLegEntry({
+            tx, tenantId, reference: `${reference}-PENALTY`, leg: 'PENALTY',
+            amount: toArrears, accountType: AccountType.FOSA, transactionId: txn.id, actorId: processedBy,
+          });
+        }
+        if (toInterest.greaterThan(0)) {
+          await this.ledger.postAccountSourcedRepaymentLegEntry({
+            tx, tenantId, reference: `${reference}-INTEREST`, leg: 'INTEREST',
+            amount: toInterest, accountType: AccountType.FOSA, transactionId: txn.id, actorId: processedBy,
+          });
+        }
+        if (toPrincipal.greaterThan(0)) {
+          await this.ledger.postAccountSourcedRepaymentLegEntry({
+            tx, tenantId, reference: `${reference}-PRINCIPAL`, leg: 'PRINCIPAL',
+            amount: toPrincipal, accountType: AccountType.FOSA, transactionId: txn.id, actorId: processedBy,
+          });
+        }
+
         const newStatus = newOutstanding.lessThanOrEqualTo(0)
           ? LoanStatus.FULLY_PAID
           : LoanStatus.ACTIVE;

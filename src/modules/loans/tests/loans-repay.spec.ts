@@ -67,6 +67,9 @@ const mockAudit = {
   create: jest.fn().mockResolvedValue(undefined),
   createAtomic: jest.fn().mockResolvedValue(undefined),
 };
+const mockLedger = {
+  postAccountSourcedRepaymentLegEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-leg-1' }, replayed: false }),
+};
 const mockRedis = {};
 const mockIdempotency = {};
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
@@ -118,9 +121,7 @@ describe('LoansService.repay()', () => {
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
         { provide: DisbursementGateService, useValue: mockDisbursementGate },
         { provide: ProductRuleService, useValue: mockProductRules },
-        // repay() doesn't use LedgerService (only disburse() does) — provided as a
-        // dummy purely so Nest's DI container can resolve LoansService's constructor.
-        { provide: LedgerService, useValue: {} },
+        { provide: LedgerService, useValue: mockLedger },
       ],
     }).compile();
 
@@ -322,6 +323,60 @@ describe('LoansService.repay()', () => {
     expect(loanUpdateData.status).toBe(LoanStatus.ACTIVE);
     // Decimal.toDecimalPlaces(4).toString() strips trailing zeros → '5000' not '5000.0000'
     expect(new (require('decimal.js').Decimal)(loanUpdateData.outstandingBalance).toNumber()).toBe(5000);
+  });
+
+  // ── GL posting (LedgerService) ────────────────────────────────────────────
+
+  it('posts a GL leg per non-zero waterfall allocation, debiting FOSA_DEPOSITS not CASH', async () => {
+    mockPrisma.loan.findFirst.mockResolvedValueOnce(activeLoanStub);
+    mockPrisma.account.findFirst.mockResolvedValueOnce(fosaAccountStub);
+    mockPrisma.member.findFirst.mockResolvedValueOnce(null);
+
+    // 1500 owed total: 100 penalty + 400 interest + 1000 principal.
+    mockTx.$queryRaw
+      .mockResolvedValueOnce([{ id: ACCOUNT_ID, balance: '10000.0000', version: 1 }])
+      .mockResolvedValueOnce([{ id: LOAN_ID, outstandingBalance: '1000.0000', status: LoanStatus.ACTIVE, accruedInterest: '400.0000', arrearsAmount: '100.0000' }]);
+
+    mockTx.transaction.create.mockResolvedValueOnce({ amount: '1500.0000', id: 'txn-uuid-1' });
+    mockTx.account.update.mockResolvedValueOnce({});
+    mockTx.loan.update.mockResolvedValueOnce({ id: LOAN_ID, status: LoanStatus.FULLY_PAID });
+
+    await service.repay(LOAN_ID, 1500, TENANT_ID, PROCESSED_BY);
+
+    expect(mockLedger.postAccountSourcedRepaymentLegEntry).toHaveBeenCalledTimes(3);
+    for (const leg of ['PENALTY', 'INTEREST', 'PRINCIPAL'] as const) {
+      expect(mockLedger.postAccountSourcedRepaymentLegEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ leg, accountType: 'FOSA', transactionId: 'txn-uuid-1' }),
+      );
+    }
+    // Each leg gets its own reference scoped to this specific repayment event —
+    // NOT just the loan — so a later repayment on the same loan doesn't collide.
+    const reference = mockTx.transaction.create.mock.calls[0][0].data.reference;
+    expect(mockLedger.postAccountSourcedRepaymentLegEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ reference: `${reference}-PENALTY` }),
+    );
+  });
+
+  it('skips legs with a zero allocation (e.g. no arrears due)', async () => {
+    mockPrisma.loan.findFirst.mockResolvedValueOnce(activeLoanStub);
+    mockPrisma.account.findFirst.mockResolvedValueOnce(fosaAccountStub);
+    mockPrisma.member.findFirst.mockResolvedValueOnce(null);
+
+    // No arrears, no interest — repayment goes entirely to principal.
+    mockTx.$queryRaw
+      .mockResolvedValueOnce([{ id: ACCOUNT_ID, balance: '10000.0000', version: 1 }])
+      .mockResolvedValueOnce([{ id: LOAN_ID, outstandingBalance: '5000.0000', status: LoanStatus.ACTIVE, accruedInterest: '0.0000', arrearsAmount: '0.0000' }]);
+
+    mockTx.transaction.create.mockResolvedValueOnce({ amount: '2000.0000', id: 'txn-uuid-2' });
+    mockTx.account.update.mockResolvedValueOnce({});
+    mockTx.loan.update.mockResolvedValueOnce({ id: LOAN_ID, status: LoanStatus.ACTIVE });
+
+    await service.repay(LOAN_ID, 2000, TENANT_ID, PROCESSED_BY);
+
+    expect(mockLedger.postAccountSourcedRepaymentLegEntry).toHaveBeenCalledTimes(1);
+    expect(mockLedger.postAccountSourcedRepaymentLegEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ leg: 'PRINCIPAL' }),
+    );
   });
 
   // ── Return shape ──────────────────────────────────────────────────────────

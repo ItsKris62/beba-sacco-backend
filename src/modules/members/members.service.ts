@@ -15,6 +15,7 @@ import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { PatchProfileDto } from './dto/patch-profile.dto';
 import type { Member, PaginatedResponse } from './members.types';
+import { provisionMemberAccounts } from '../accounts/utils/provision-accounts.util';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 
 /**
@@ -104,6 +105,9 @@ export class MembersService {
               skipDuplicates: true,
             });
           }
+
+          // Auto-provision FOSA + BOSA accounts (idempotent, snapshots AccountTypePolicy)
+          await provisionMemberAccounts(tx, tenantId, created.id);
 
           return created;
         });

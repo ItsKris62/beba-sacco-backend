@@ -46,6 +46,9 @@ const mockAudit = {
   create: jest.fn().mockResolvedValue(undefined),
   createAtomic: jest.fn().mockResolvedValue(undefined),
 };
+const mockLedger = {
+  postAccountSourcedRepaymentLegEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-leg-1' }, replayed: false }),
+};
 const mockRedis = {};
 const mockIdempotency = {};
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
@@ -110,9 +113,7 @@ describe('LoansService.repay() — SASRA waterfall', () => {
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
         { provide: DisbursementGateService, useValue: mockDisbursementGate },
         { provide: ProductRuleService, useValue: mockProductRules },
-        // repay() doesn't use LedgerService (only disburse() does) — provided as a
-        // dummy purely so Nest's DI container can resolve LoansService's constructor.
-        { provide: LedgerService, useValue: {} },
+        { provide: LedgerService, useValue: mockLedger },
       ],
     }).compile();
 
