@@ -1,5 +1,5 @@
 import { ForbiddenException, InternalServerErrorException } from '@nestjs/common';
-import { AccountType, GuarantorStatus, InterestType, KycStatus, LoanStatus, UserRole } from '@prisma/client';
+import { AccountStatus, AccountType, GuarantorStatus, InterestType, KycStatus, LoanStatus, UserRole } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { Decimal } from 'decimal.js';
 import type { Request } from 'express';
@@ -29,7 +29,7 @@ type SmsMock = {
 };
 
 type LoanApplicationPrismaMock = {
-  member: { findFirst: jest.Mock };
+  member: { findMany: jest.Mock };
   $transaction: jest.Mock;
 };
 
@@ -144,7 +144,7 @@ function createSuccessfulLoanApplyPrisma(): LoanApplicationPrismaMock {
       findFirst: jest
         .fn()
         .mockResolvedValueOnce({ id: applicantMemberId, memberNumber: 'M-001', kycStatus: KycStatus.APPROVED })
-        .mockResolvedValue({ id: guarantorOneId, kycStatus: KycStatus.APPROVED, user: { role: UserRole.MEMBER, isActive: true, status: 'APPROVED' } }),
+        .mockResolvedValue({ id: guarantorOneId, kycStatus: KycStatus.APPROVED, user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE } }),
     },
     loan: {
       findFirst: jest.fn().mockResolvedValue(null),
@@ -184,11 +184,13 @@ function createSuccessfulLoanApplyPrisma(): LoanApplicationPrismaMock {
     },
     loanGuarantor: {
       count: jest.fn().mockResolvedValue(0),
+      findFirst: jest.fn().mockResolvedValue(null),
       create: jest
         .fn()
         .mockResolvedValueOnce({ id: 'lg-1', memberId: guarantorOneId })
         .mockResolvedValueOnce({ id: 'lg-2', memberId: guarantorTwoId }),
     },
+    tenant: { findFirst: jest.fn().mockResolvedValue(null) },
     tenantCounter: { upsert: jest.fn().mockResolvedValue({ loanSeq: 1 }) },
     auditLog: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
     $queryRaw: jest.fn().mockResolvedValue([{ id: applicantMemberId }]),
@@ -196,10 +198,10 @@ function createSuccessfulLoanApplyPrisma(): LoanApplicationPrismaMock {
 
   return {
     member: {
-      findFirst: jest
-        .fn()
-        .mockResolvedValueOnce({ user: { email: 'g1@example.test', firstName: 'Grace', phone: '0711111111', phoneNumber: null } })
-        .mockResolvedValueOnce({ user: { email: 'g2@example.test', firstName: 'Brian', phone: '0722222222', phoneNumber: null } }),
+      findMany: jest.fn().mockResolvedValue([
+        { id: guarantorOneId, user: { email: 'g1@example.test', firstName: 'Grace', phone: '0711111111', phoneNumber: null } },
+        { id: guarantorTwoId, user: { email: 'g2@example.test', firstName: 'Brian', phone: '0722222222', phoneNumber: null } },
+      ]),
     },
     $transaction: jest.fn((callback: (transactionClient: typeof tx) => Promise<unknown>) => callback(tx)),
   };
@@ -241,7 +243,7 @@ describe('LoanApplicationService member loan workflow', () => {
 
   it('wraps unexpected Prisma transaction errors and does not enqueue SMS', async () => {
     const prisma: LoanApplicationPrismaMock = {
-      member: { findFirst: jest.fn() },
+      member: { findMany: jest.fn() },
       $transaction: jest.fn().mockRejectedValue(
         new PrismaClientKnownRequestError('Unique constraint failed', {
           code: 'P2002',

@@ -13,11 +13,13 @@ import { RepaymentReminderService } from './repayment-reminder.service';
 import { IntegrationsModule } from '../integrations/integrations.module';
 import { LoanRepaymentService } from './loan-repayment.service';
 import { LoanRecoveryService } from './loan-recovery.service';
+import { AccountingModule } from '../accounting/accounting.module';
 
 @Module({
   imports: [
     AuditModule,
     IntegrationsModule,
+    AccountingModule,
     BullModule.registerQueue(
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
       { name: QUEUE_NAMES.EMAIL },

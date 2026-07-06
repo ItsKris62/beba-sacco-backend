@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { getQueueToken } from '@nestjs/bullmq';
+import { Decimal } from 'decimal.js';
 import { LoanStatus } from '@prisma/client';
 import { LoansService } from '../loans.service';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -10,19 +11,19 @@ import { IdempotencyService } from '../../../common/services/idempotency.service
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { DisbursementGateService } from '../../../loans/disbursement-gate.service';
 import { ProductRuleService } from '../product-rule.service';
+import { LedgerService } from '../../accounting/ledger.service';
 
 // ─── Transaction mock ──────────────────────────────────────────────────────────
 //
 // disburse() runs inside a $transaction callback that uses:
-//   tx.$queryRaw           (Account FOR UPDATE)
-//   tx.transaction.create  (disbursement GL entry)
-//   tx.account.update      (balance + version)
+//   tx.$queryRaw           (Loan FOR UPDATE)
+//   this.ledger.postEntry  (principal credit + fee debit, GL + Account balance)
 //   tx.loan.update         (status, disbursedAt, repaymentScheduleGenerated)
-//   tx.loanRepayment.createMany  (NEW — Tier 3 schedule generation)
+//   tx.loanRepayment.createMany  (Tier 3 schedule generation)
 
 type TxClient = {
   $queryRaw: jest.Mock;
-  transaction: { create: jest.Mock; findUnique: jest.Mock };
+  transaction: { create: jest.Mock; findFirst: jest.Mock };
   account: { update: jest.Mock };
   loan: { update: jest.Mock };
   loanRepayment: { createMany: jest.Mock };
@@ -32,7 +33,7 @@ type TxClient = {
 function buildTxClient(overrides: Partial<TxClient> = {}): TxClient {
   return {
     $queryRaw: jest.fn(),
-    transaction: { create: jest.fn(), findUnique: jest.fn().mockResolvedValue(null) },
+    transaction: { create: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
     account: { update: jest.fn() },
     loan: { update: jest.fn() },
     loanRepayment: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
@@ -49,6 +50,7 @@ const mockPrisma = {
   loan: { findFirst: jest.fn() },
   member: { findFirst: jest.fn() },
   account: { findFirst: jest.fn() },
+  transaction: { findFirst: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: TxClient) => Promise<unknown>) => cb(mockTx)),
   direct: undefined as undefined,
 };
@@ -60,6 +62,7 @@ const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
 const mockEmailQueue = { add: jest.fn().mockResolvedValue(undefined) };
 const mockDisbursementGate = { assertPassed: jest.fn().mockResolvedValue(undefined) };
 const mockProductRules = {};
+const mockLedger = { postEntry: jest.fn() };
 
 // ─── Common fixtures ──────────────────────────────────────────────────────────
 
@@ -74,6 +77,7 @@ function buildApprovedLoan(overrides = {}) {
     id: LOAN_ID,
     status: LoanStatus.APPROVED,
     loanNumber: 'LN-2026-000001',
+    dueDate: null,
     principalAmount: '50000.0000',
     processingFee: '0.0000',
     memberId: MEMBER_ID,
@@ -86,30 +90,50 @@ function buildApprovedLoan(overrides = {}) {
   };
 }
 
-function setupDisburseMocks(loanOverrides = {}) {
+/**
+ * mockLedger.postEntry() tracks a running FOSA balance across sequential calls
+ * within one disburse() invocation (principal credit, then fee debit), the same
+ * way the real LedgerService.applyBalanceChange() would inside the shared tx.
+ */
+function mockLedgerBalanceTracking(startingBalance = '0') {
+  let balance = new Decimal(startingBalance);
+  let counter = 0;
+  mockLedger.postEntry.mockImplementation(async (params: { amount: Decimal; direction: 'DEBIT' | 'CREDIT' }) => {
+    const balanceBefore = balance;
+    balance = params.direction === 'CREDIT' ? balance.plus(params.amount) : balance.minus(params.amount);
+    counter += 1;
+    return {
+      transaction: {
+        id: `txn-uuid-${counter}`,
+        balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+        balanceAfter: balance.toDecimalPlaces(4).toString(),
+      },
+      journalEntry: { id: `je-uuid-${counter}` },
+    };
+  });
+}
+
+function setupDisburseMocks(loanOverrides: Record<string, unknown> = {}) {
   mockPrisma.loan.findFirst.mockResolvedValueOnce(buildApprovedLoan(loanOverrides));
   mockPrisma.member.findFirst.mockResolvedValueOnce({ kycStatus: 'APPROVED' });
-  mockPrisma.account.findFirst.mockResolvedValueOnce({ id: ACCOUNT_ID, balance: '0.0000', version: 1 });
-  mockTx.$queryRaw
-    .mockResolvedValueOnce([
-      {
-        id: LOAN_ID,
-        status: LoanStatus.APPROVED,
-        principalAmount: '50000.0000',
-        processingFee: '0.0000',
-        tenureMonths: 12,
-        gracePeriodMonths: 0,
-        monthlyInstalment: '4438.9149',
-        repaymentScheduleGenerated: false,
-        ...loanOverrides,
-      },
-    ])
-    .mockResolvedValueOnce([{ id: ACCOUNT_ID, balance: '0.0000', version: 1 }]);
-  mockTx.transaction.create.mockResolvedValue({ id: 'txn-uuid-1', amount: '50000.0000' });
-  mockTx.account.update.mockResolvedValueOnce({});
+  mockPrisma.account.findFirst.mockResolvedValueOnce({ id: ACCOUNT_ID });
+  mockTx.$queryRaw.mockResolvedValueOnce([
+    {
+      id: LOAN_ID,
+      status: LoanStatus.APPROVED,
+      principalAmount: '50000.0000',
+      processingFee: '0.0000',
+      tenureMonths: 12,
+      gracePeriodMonths: 0,
+      monthlyInstalment: '4438.9149',
+      repaymentScheduleGenerated: false,
+      ...loanOverrides,
+    },
+  ]);
   mockTx.loan.update.mockResolvedValueOnce({
     id: LOAN_ID, status: LoanStatus.ACTIVE, repaymentScheduleGenerated: true,
   });
+  mockLedgerBalanceTracking('0');
 }
 
 // ─── Test suite ───────────────────────────────────────────────────────────────
@@ -133,6 +157,7 @@ describe('LoansService.disburse() — schedule generation', () => {
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
         { provide: DisbursementGateService, useValue: mockDisbursementGate },
         { provide: ProductRuleService, useValue: mockProductRules },
+        { provide: LedgerService, useValue: mockLedger },
       ],
     }).compile();
 
@@ -203,34 +228,43 @@ describe('LoansService.disburse() — schedule generation', () => {
     );
   });
 
-  it('credits net disbursement after processing fee while recording gross loan and fee transactions', async () => {
+  it('credits net disbursement after processing fee, posting principal and fee as separate LedgerService entries', async () => {
     setupDisburseMocks({ principalAmount: '100000.0000', processingFee: '5000.0000' });
 
-    await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
+    const result = await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
 
-    expect(mockTx.account.update).toHaveBeenCalledWith(
+    expect(mockLedger.postEntry).toHaveBeenCalledTimes(2);
+    expect(mockLedger.postEntry).toHaveBeenNthCalledWith(
+      1,
       expect.objectContaining({
-        data: expect.objectContaining({ balance: '95000' }),
+        journalType: 'LOAN_DISBURSEMENT',
+        direction: 'CREDIT',
+        accountId: ACCOUNT_ID,
+        loanId: LOAN_ID,
+        reference: `LOAN-DISBURSEMENT-${LOAN_ID}`,
       }),
     );
-    expect(mockTx.transaction.create).toHaveBeenCalledWith(
+    expect(mockLedger.postEntry).toHaveBeenNthCalledWith(
+      2,
       expect.objectContaining({
-        data: expect.objectContaining({
-          type: 'LOAN_DISBURSEMENT',
-          amount: '100000',
-          balanceAfter: '100000',
-        }),
+        journalType: 'FEE_CHARGE',
+        direction: 'DEBIT',
+        accountId: ACCOUNT_ID,
+        loanId: LOAN_ID,
+        reference: `LOAN-DISBURSEMENT-${LOAN_ID}-FEE`,
       }),
     );
-    expect(mockTx.transaction.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          type: 'FEE_CHARGE',
-          amount: '-5000',
-          balanceAfter: '95000',
-        }),
-      }),
-    );
+    // Net disbursement: +100000 principal, -5000 fee = 95000.
+    expect(result.newBalance).toBe(95000);
+  });
+
+  it('skips the fee posting entirely when processingFee is zero', async () => {
+    setupDisburseMocks({ principalAmount: '50000.0000', processingFee: '0.0000' });
+
+    const result = await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
+
+    expect(mockLedger.postEntry).toHaveBeenCalledTimes(1);
+    expect(result.newBalance).toBe(50000);
   });
 
   it('sets repaymentScheduleGenerated: true in the loan update', async () => {
@@ -268,6 +302,29 @@ describe('LoansService.disburse() — schedule generation', () => {
     // Compare year+month only (seconds may differ slightly within the test run)
     expect(actualMonth1.getFullYear()).toBe(expectedMonth1.getFullYear());
     expect(actualMonth1.getMonth()).toBe(expectedMonth1.getMonth());
+  });
+
+  // ── Idempotent replay ─────────────────────────────────────────────────────
+
+  it('replays the existing disbursement result instead of re-disbursing when the loan is already ACTIVE', async () => {
+    mockPrisma.loan.findFirst.mockResolvedValueOnce(buildApprovedLoan({ status: LoanStatus.ACTIVE }));
+    mockPrisma.transaction.findFirst
+      .mockResolvedValueOnce({ id: 'txn-existing-principal', balanceAfter: '50000.0000', createdAt: new Date() })
+      .mockResolvedValueOnce({ id: 'txn-existing-fee', balanceAfter: '48000.0000', createdAt: new Date() });
+
+    const result = await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
+
+    expect(result.newBalance).toBe(48000);
+    expect(result.disbursement_status).toBe('COMPLETED');
+    expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    expect(mockLedger.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('throws ConflictException if the loan is ACTIVE but its disbursement transaction is missing (data inconsistency)', async () => {
+    mockPrisma.loan.findFirst.mockResolvedValueOnce(buildApprovedLoan({ status: LoanStatus.ACTIVE }));
+    mockPrisma.transaction.findFirst.mockResolvedValueOnce(null);
+
+    await expect(service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY)).rejects.toThrow(ConflictException);
   });
 
   // ── Guard: pre-flight errors still propagate ──────────────────────────────

@@ -1,11 +1,12 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
-import { AccountType, LoanStatus, Prisma, TransactionStatus, TransactionType } from '@prisma/client';
+import { AccountType, JournalEntryType, LoanStatus, Prisma, TransactionStatus, TransactionType } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { LedgerService } from '../accounting/ledger.service';
 import {
   ExecuteGuarantorDebitJobPayload,
   GUARANTOR_DEBIT_JOB,
@@ -63,6 +64,7 @@ export class LoanRepaymentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly ledger: LedgerService,
     @InjectQueue(QUEUE_NAMES.GUARANTOR_RECOVERY)
     private readonly guarantorRecoveryQueue: Queue<ExecuteGuarantorDebitJobPayload>,
   ) {}
@@ -154,22 +156,69 @@ export class LoanRepaymentService {
         const balanceBefore = new Decimal(account.balance);
         let balanceAfter = balanceBefore;
 
+        // Penalty/interest/principal legs never touch the FOSA balance — this money
+        // arrives externally (M-Pesa/cash) and is applied directly against the loan's
+        // own fields. Each leg gets its own operational Transaction row (unchanged,
+        // for the member statement) plus a GL-only posting (Cash vs Income/Receivable)
+        // via LedgerService — see postLoanRepaymentLegEntry() for why postEntry()
+        // (which always touches an Account balance) isn't the right tool here.
         if (toPenalty.greaterThan(0)) {
-          ledgerIds.push(await this.createAllocationTransaction(tx, input, account.id, loan.id, toPenalty, balanceBefore, 'PENALTY', 'Penalty allocation'));
+          const penaltyTxnId = await this.createAllocationTransaction(tx, input, account.id, loan.id, toPenalty, balanceBefore, 'PENALTY', 'Penalty allocation');
+          ledgerIds.push(penaltyTxnId);
+          await this.ledger.postLoanRepaymentLegEntry({
+            tx,
+            tenantId: input.tenantId,
+            reference: `${input.reference}-PENALTY`,
+            leg: 'PENALTY',
+            amount: toPenalty,
+            transactionId: penaltyTxnId,
+            actorId: input.processedBy,
+          });
         }
         if (toInterest.greaterThan(0)) {
-          ledgerIds.push(await this.createAllocationTransaction(tx, input, account.id, loan.id, toInterest, balanceBefore, 'INTEREST_EARNED', 'Interest allocation'));
+          const interestTxnId = await this.createAllocationTransaction(tx, input, account.id, loan.id, toInterest, balanceBefore, 'INTEREST_EARNED', 'Interest allocation');
+          ledgerIds.push(interestTxnId);
+          await this.ledger.postLoanRepaymentLegEntry({
+            tx,
+            tenantId: input.tenantId,
+            reference: `${input.reference}-INTEREST`,
+            leg: 'INTEREST',
+            amount: toInterest,
+            transactionId: interestTxnId,
+            actorId: input.processedBy,
+          });
         }
         if (toPrincipal.greaterThan(0)) {
-          ledgerIds.push(await this.createAllocationTransaction(tx, input, account.id, loan.id, toPrincipal, balanceBefore, 'LOAN_REPAYMENT', 'Principal allocation'));
+          const principalTxnId = await this.createAllocationTransaction(tx, input, account.id, loan.id, toPrincipal, balanceBefore, 'LOAN_REPAYMENT', 'Principal allocation');
+          ledgerIds.push(principalTxnId);
+          await this.ledger.postLoanRepaymentLegEntry({
+            tx,
+            tenantId: input.tenantId,
+            reference: `${input.reference}-PRINCIPAL`,
+            leg: 'PRINCIPAL',
+            amount: toPrincipal,
+            transactionId: principalTxnId,
+            actorId: input.processedBy,
+          });
         }
         if (overpayment.greaterThan(0)) {
-          balanceAfter = balanceBefore.plus(overpayment).toDecimalPlaces(4);
-          ledgerIds.push(await this.createDepositTransaction(tx, input, account.id, overpayment, balanceBefore, balanceAfter));
-          await tx.account.update({
-            where: { id: account.id },
-            data: { balance: balanceAfter.toString(), version: { increment: 1 } },
+          // Genuine overpayment DOES land in the member's FOSA account — this is a
+          // plain deposit, so postEntry() (debit CASH, credit FOSA_DEPOSITS) is the
+          // right tool, unlike the three legs above.
+          const { transaction: overpayTxn } = await this.ledger.postEntry({
+            tx,
+            tenantId: input.tenantId,
+            reference: `${input.reference}-OVERPAY`,
+            journalType: JournalEntryType.DEPOSIT,
+            accountId: account.id,
+            amount: overpayment,
+            direction: 'CREDIT',
+            actorId: input.processedBy,
+            description: `Loan repayment overpayment credited to FOSA ${input.receipt ?? input.reference}`,
+            loanId: loan.id,
           });
+          ledgerIds.push(overpayTxn.id);
+          balanceAfter = new Decimal(overpayTxn.balanceAfter.toString());
         }
 
         await tx.loan.update({
@@ -413,31 +462,6 @@ export class LoanRepaymentService {
         balanceAfter: balance.toDecimalPlaces(4).toString(),
         reference: `${input.reference}-${suffix}-${uuidv4()}`,
         description: `${label} from repayment ${input.receipt ?? input.reference}`,
-        processedBy: input.processedBy,
-      },
-    });
-    return transaction.id;
-  }
-
-  private async createDepositTransaction(
-    tx: Prisma.TransactionClient,
-    input: ProcessRepaymentInput,
-    accountId: string,
-    amount: Decimal,
-    balanceBefore: Decimal,
-    balanceAfter: Decimal,
-  ): Promise<string> {
-    const transaction = await tx.transaction.create({
-      data: {
-        tenantId: input.tenantId,
-        accountId,
-        type: TransactionType.DEPOSIT,
-        status: TransactionStatus.COMPLETED,
-        amount: amount.toDecimalPlaces(4).toString(),
-        balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-        balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
-        reference: `${input.reference}-OVERPAY-${uuidv4()}`,
-        description: `Loan repayment overpayment credited to FOSA ${input.receipt ?? input.reference}`,
         processedBy: input.processedBy,
       },
     });

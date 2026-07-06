@@ -10,6 +10,7 @@ import { UserRole } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { AccountsService } from './accounts.service';
 import { CreateAccountDto } from './dto/create-account.dto';
+import { TransferFundsDto } from './dto/transfer-funds.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
@@ -110,5 +111,18 @@ export class AccountsController {
       tenant.id,
       actor.id,
     );
+  }
+
+  @Post(':id/transfer')
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Transfer funds between two accounts of the same member (e.g. FOSA -> BOSA)' })
+  transfer(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: TransferFundsDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.accounts.transfer(id, dto, tenant.id, actor.id);
   }
 }

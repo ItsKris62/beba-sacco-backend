@@ -14,6 +14,7 @@ import { IdempotencyService } from '../../../common/services/idempotency.service
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { DisbursementGateService } from '../../../loans/disbursement-gate.service';
 import { ProductRuleService } from '../product-rule.service';
+import { LedgerService } from '../../accounting/ledger.service';
 
 // ─── Transaction mock builder ────────────────────────────────────────────────
 //
@@ -62,7 +63,10 @@ const mockPrisma = {
   direct: undefined as undefined,
 };
 
-const mockAudit = { create: jest.fn().mockResolvedValue(undefined) };
+const mockAudit = {
+  create: jest.fn().mockResolvedValue(undefined),
+  createAtomic: jest.fn().mockResolvedValue(undefined),
+};
 const mockRedis = {};
 const mockIdempotency = {};
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
@@ -114,6 +118,9 @@ describe('LoansService.repay()', () => {
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },
         { provide: DisbursementGateService, useValue: mockDisbursementGate },
         { provide: ProductRuleService, useValue: mockProductRules },
+        // repay() doesn't use LedgerService (only disburse() does) — provided as a
+        // dummy purely so Nest's DI container can resolve LoansService's constructor.
+        { provide: LedgerService, useValue: {} },
       ],
     }).compile();
 

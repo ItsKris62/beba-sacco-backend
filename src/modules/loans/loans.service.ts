@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
-import { AccountType, GuarantorStatus, LoanStatus, Prisma, TransactionType, TransactionStatus, InterestType } from '@prisma/client';
+import { AccountType, GuarantorStatus, JournalEntryType, LoanStatus, Prisma, TransactionType, TransactionStatus, InterestType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -25,6 +25,7 @@ import {
 } from '../queue/queue.constants';
 import { DisbursementGateService } from '../../loans/disbursement-gate.service';
 import { ProductRuleService } from './product-rule.service';
+import { LedgerService } from '../accounting/ledger.service';
 
 /**
  * Loans Service
@@ -56,6 +57,7 @@ export class LoansService {
     private readonly emailQueue: Queue<EmailJobPayload>,
     private readonly disbursementGate: DisbursementGateService,
     private readonly productRules: ProductRuleService,
+    private readonly ledger: LedgerService,
   ) {}
 
   /**
@@ -429,7 +431,7 @@ export class LoansService {
     const loan = await this.prisma.loan.findFirst({
       where: { id, tenantId },
       select: {
-        id: true, status: true, loanNumber: true,
+        id: true, status: true, loanNumber: true, dueDate: true,
         principalAmount: true, processingFee: true, memberId: true, tenureMonths: true,
         gracePeriodMonths: true, monthlyInstalment: true,
         repaymentScheduleGenerated: true,
@@ -438,14 +440,32 @@ export class LoansService {
     });
     if (!loan) throw new NotFoundException('Loan not found');
 
-    // 409 for idempotent retry: if the loan is already ACTIVE it was successfully
-    // disbursed by an earlier request. Clients can safely treat 409 as a success
-    // indicator and proceed to fetch the loan details.
+    const reference = `LOAN-DISBURSEMENT-${id}`;
+    const feeReference = `LOAN-DISBURSEMENT-${id}-FEE`;
+
+    // Idempotent replay: if the loan is already ACTIVE, it was successfully
+    // disbursed by an earlier request — return that disbursement's result instead
+    // of re-running (or rejecting) the request, mirroring how LedgerService.
+    // postEntry() replays a duplicate reference rather than throwing.
     if (loan.status === LoanStatus.ACTIVE) {
-      throw new ConflictException(
-        `Loan ${loan.loanNumber} has already been disbursed and is ACTIVE. ` +
-        'Retrieve the current loan details for the disbursement record.',
-      );
+      const [existingPrincipalTxn, existingFeeTxn] = await Promise.all([
+        this.prisma.transaction.findFirst({ where: { tenantId, reference } }),
+        this.prisma.transaction.findFirst({ where: { tenantId, reference: feeReference } }),
+      ]);
+      if (!existingPrincipalTxn) {
+        throw new ConflictException(
+          `Loan ${loan.loanNumber} is ACTIVE but its disbursement transaction (${reference}) could not be found — ledger is inconsistent`,
+        );
+      }
+      const finalTxn = existingFeeTxn ?? existingPrincipalTxn;
+      return {
+        loan,
+        transaction: existingPrincipalTxn,
+        newBalance: new Decimal(finalTxn.balanceAfter.toString()).toNumber(),
+        dueDate: loan.dueDate,
+        disbursement_status: 'COMPLETED' as const,
+        estimated_settlement: existingPrincipalTxn.createdAt.toISOString(),
+      };
     }
     if (loan.status !== LoanStatus.APPROVED) {
       throw new BadRequestException(
@@ -467,16 +487,13 @@ export class LoansService {
     // Locate the member's FOSA account for disbursement
     const fosaAccount = await this.prisma.account.findFirst({
       where: { memberId: loan.memberId, tenantId, accountType: 'FOSA', isActive: true },
-      select: { id: true, balance: true, version: true },
+      select: { id: true },
     });
     if (!fosaAccount) {
       throw new BadRequestException(
         'Member has no active FOSA account. Please open a FOSA account before disbursing.',
       );
     }
-
-    const reference = `DISB-${uuidv4()}`;
-    const feeReference = `FEE-${uuidv4()}`;
 
     // Use SERIALIZABLE isolation on the direct client to prevent race conditions
     // (lost updates) when two disbursements or a disbursement + deposit run concurrently.
@@ -516,80 +533,49 @@ export class LoansService {
 
         await this.disbursementGate.assertPassed(tenantId, id, tx);
 
-        const txPrincipal = new Prisma.Decimal(lockedLoan.principalAmount.toString());
-        const processingFee = new Prisma.Decimal(lockedLoan.processingFee.toString());
+        const txPrincipal = new Decimal(lockedLoan.principalAmount.toString());
+        const processingFee = new Decimal(lockedLoan.processingFee.toString());
         const netDisbursement = txPrincipal.minus(processingFee);
         if (netDisbursement.lessThan(0)) {
           throw new BadRequestException('Processing fee cannot exceed loan principal.');
         }
 
-        // Lock account row with FOR UPDATE via raw query to get current balance + version
-        const lockedRows = await tx.$queryRaw`
-          SELECT id, balance, version FROM "Account"
-          WHERE id = ${fosaAccount.id} AND "tenantId" = ${tenantId}
-          FOR UPDATE
-        `;
-        const account = Array.isArray(lockedRows)
-          ? (lockedRows[0] as { id: string; balance: string; version: number } | undefined)
-          : undefined;
-        if (!account) throw new NotFoundException('FOSA account not found or inactive');
+        // Credit gross principal to FOSA: debit LOAN_RECEIVABLE, credit FOSA_DEPOSITS.
+        // Account-balance concurrency/floor enforcement happens inside postEntry()'s
+        // own compare-and-swap updateMany() — no separate FOR UPDATE lock needed here.
+        const { transaction: principalTxn } = await this.ledger.postEntry({
+          tx,
+          tenantId,
+          reference,
+          journalType: JournalEntryType.LOAN_DISBURSEMENT,
+          accountId: fosaAccount.id,
+          amount: txPrincipal,
+          direction: 'CREDIT',
+          actorId: disbursedBy,
+          description: `Loan disbursement – ${loan.loanNumber}`,
+          loanId: id,
+        });
 
-        // Optimistic locking: ensure version hasn't changed since we read it
-        if (account.version !== fosaAccount.version) {
-          throw new ConflictException('Account was modified by another transaction. Please retry.');
+        // Charge the processing fee (if any): debit FOSA_DEPOSITS, credit FEE_INCOME.
+        let feeTxn: typeof principalTxn | null = null;
+        if (processingFee.greaterThan(0)) {
+          const feeResult = await this.ledger.postEntry({
+            tx,
+            tenantId,
+            reference: feeReference,
+            journalType: JournalEntryType.FEE_CHARGE,
+            accountId: fosaAccount.id,
+            amount: processingFee,
+            direction: 'DEBIT',
+            actorId: disbursedBy,
+            description: `Loan processing fee - ${loan.loanNumber}`,
+            loanId: id,
+          });
+          feeTxn = feeResult.transaction;
         }
 
-        // Duplicate reference guard
-        const dupRef = await tx.transaction.findFirst({ where: { tenantId, reference } });
-        if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
-        const dupFeeRef = await tx.transaction.findFirst({ where: { tenantId, reference: feeReference } });
-        if (dupFeeRef) throw new ConflictException(`Reference ${feeReference} already posted`);
-
-        const balanceBefore = new Prisma.Decimal(account.balance.toString());
-        const grossBalanceAfter = balanceBefore.plus(txPrincipal);
-        const balanceAfter = grossBalanceAfter.minus(processingFee);
-        const newVersion = account.version + 1;
-
-        const txn = await tx.transaction.create({
-          data: {
-            tenantId,
-            accountId: fosaAccount.id,
-            loanId: id,
-            type: TransactionType.LOAN_DISBURSEMENT,
-            status: TransactionStatus.COMPLETED,
-            amount: txPrincipal.toDecimalPlaces(4).toString(),
-            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-            balanceAfter: grossBalanceAfter.toDecimalPlaces(4).toString(),
-            reference,
-            description: `Loan disbursement – ${loan.loanNumber}`,
-            processedBy: disbursedBy,
-          },
-        });
-
-        await tx.transaction.create({
-          data: {
-            tenantId,
-            accountId: fosaAccount.id,
-            loanId: id,
-            type: TransactionType.FEE_CHARGE,
-            status: TransactionStatus.COMPLETED,
-            amount: processingFee.negated().toDecimalPlaces(4).toString(),
-            balanceBefore: grossBalanceAfter.toDecimalPlaces(4).toString(),
-            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
-            reference: feeReference,
-            description: `Loan processing fee - ${loan.loanNumber}`,
-            processedBy: disbursedBy,
-          },
-        });
-
-        // Update balance AND version atomically
-        await tx.account.update({
-          where: { id: fosaAccount.id, version: account.version },
-          data: {
-            balance: balanceAfter.toDecimalPlaces(4).toString(),
-            version: newVersion,
-          },
-        });
+        const balanceBefore = new Decimal(principalTxn.balanceBefore.toString());
+        const balanceAfter = new Decimal((feeTxn ?? principalTxn).balanceAfter.toString());
 
         const disbursedAt = new Date();
         // dueDate = disbursement + grace period + repayment tenure
@@ -660,7 +646,7 @@ export class LoansService {
 
         return {
           loan: updatedLoan,
-          transaction: txn,
+          transaction: principalTxn,
           newBalance: balanceAfter.toNumber(),
           dueDate,
           disbursement_status: 'COMPLETED' as const,

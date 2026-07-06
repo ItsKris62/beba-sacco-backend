@@ -7,8 +7,11 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
+import * as argon2 from 'argon2';
+import { randomUUID } from 'crypto';
 import {
   Prisma,
+  AccountStatus,
   AccountType,
   GLAccountType,
   JournalEntryStatus,
@@ -16,6 +19,7 @@ import {
   MpesaTxType,
   TransactionStatus,
   TransactionType,
+  UserRole,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ReconciliationService } from '../financial/reconciliation.service';
@@ -86,6 +90,12 @@ const DEFAULT_GL_ACCOUNTS: GLAccountSeed[] = [
   { code: '5300', name: 'Bad Debt Write-off', type: 'EXPENSE', isSystemAccount: true },
   { code: '5400', name: 'Interest Expense', type: 'EXPENSE', isSystemAccount: true },
 ];
+
+/**
+ * Standardized identifier for the non-human ledger-posting actor, seeded once per
+ * tenant. Never used for login — see AccountingService.ensureSystemUser().
+ */
+const SYSTEM_USER_EMAIL = 'system@beba-sacco.internal';
 
 /** MVP default balance policy per account type, seeded for every new tenant. */
 const DEFAULT_ACCOUNT_TYPE_POLICIES: Array<{
@@ -1299,19 +1309,54 @@ export class AccountingService {
   }
 
   /**
+   * Idempotently ensure the tenant has a non-human "SYSTEM" user for automated
+   * ledger postings (M-Pesa webhooks, interest accrual, scheduled transfers) where
+   * there is no human actor to attribute a JournalEntry.createdById/approvedById to.
+   *
+   * The account is locked down on creation — accountStatus SUSPENDED (blocks login
+   * at both AuthService and JwtStrategy, which both gate on accountStatus === ACTIVE)
+   * and passwordHash is an argon2 hash of a random UUID nobody knows. It only ever
+   * exists to be referenced by ID, never to authenticate.
+   */
+  async ensureSystemUser(tenantId: string): Promise<{ id: string }> {
+    const existing = await this.prisma.user.findFirst({
+      where: { tenantId, email: SYSTEM_USER_EMAIL },
+      select: { id: true },
+    });
+    if (existing) return existing;
+
+    const passwordHash = await argon2.hash(randomUUID());
+    const created = await this.prisma.user.create({
+      data: {
+        tenantId,
+        email: SYSTEM_USER_EMAIL,
+        passwordHash,
+        role: UserRole.SYSTEM,
+        firstName: 'System',
+        lastName: 'Process',
+        emailVerified: true,
+        accountStatus: AccountStatus.SUSPENDED,
+      },
+      select: { id: true },
+    });
+    return created;
+  }
+
+  /**
    * Full accounting provisioning for a newly created tenant: chart of accounts
-   * + default account-type balance policies. Called by TenantsService.create()
-   * right after the Tenant row is inserted. Idempotent — safe to re-run for an
-   * existing tenant (e.g. from the CLI backfill script).
+   * + default account-type balance policies + the SYSTEM actor. Called by
+   * TenantsService.create() right after the Tenant row is inserted. Idempotent —
+   * safe to re-run for an existing tenant (e.g. from the CLI backfill script).
    */
   async provisionTenantAccounting(
     tenantId: string,
-  ): Promise<{ glAccountsSeeded: number; policiesSeeded: number }> {
-    const [gl, policies] = await Promise.all([
+  ): Promise<{ glAccountsSeeded: number; policiesSeeded: number; systemUserId: string }> {
+    const [gl, policies, systemUser] = await Promise.all([
       this.seedDefaultChartOfAccounts(tenantId),
       this.seedDefaultAccountTypePolicies(tenantId),
+      this.ensureSystemUser(tenantId),
     ]);
-    return { glAccountsSeeded: gl.seeded, policiesSeeded: policies.seeded };
+    return { glAccountsSeeded: gl.seeded, policiesSeeded: policies.seeded, systemUserId: systemUser.id };
   }
 
   // ─── HELPERS ──────────────────────────────────────────────────────────────────

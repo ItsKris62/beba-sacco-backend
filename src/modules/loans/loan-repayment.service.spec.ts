@@ -21,7 +21,7 @@ describe('LoanRepaymentService', () => {
   }) {
     const tx = {
       transaction: {
-        findUnique: jest.fn().mockResolvedValue(args.existingTransaction ?? null),
+        findFirst: jest.fn().mockResolvedValue(args.existingTransaction ?? null),
         create: jest.fn().mockImplementation((input: { data: { type: TransactionType; amount: string } }) =>
           Promise.resolve({ id: `tx-${input.data.type}-${input.data.amount}`, amount: new Decimal(input.data.amount), loanId }),
         ),
@@ -74,17 +74,30 @@ describe('LoanRepaymentService', () => {
       },
     };
     const audit = { create: jest.fn().mockResolvedValue({}) };
+    const accountBalance = new Decimal(args.accountBalance ?? '200');
+    const ledger = {
+      postLoanRepaymentLegEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-leg-1' }, replayed: false }),
+      postEntry: jest.fn().mockImplementation(async (params: { amount: Decimal }) => ({
+        transaction: {
+          id: 'txn-overpay-1',
+          balanceBefore: accountBalance.toString(),
+          balanceAfter: accountBalance.plus(params.amount).toDecimalPlaces(4).toString(),
+        },
+        journalEntry: { id: 'je-overpay-1' },
+      })),
+    };
     const queue = { getDelayed: jest.fn().mockResolvedValue([]) };
     const service = new LoanRepaymentService(
       prisma as unknown as ConstructorParameters<typeof LoanRepaymentService>[0],
       audit as unknown as ConstructorParameters<typeof LoanRepaymentService>[1],
+      ledger as unknown as ConstructorParameters<typeof LoanRepaymentService>[2],
       queue as unknown as Queue<ExecuteGuarantorDebitJobPayload>,
     );
-    return { service, tx, audit, queue };
+    return { service, tx, audit, ledger, queue };
   }
 
   it('allocates exact repayment through penalty, interest, then principal', async () => {
-    const { service, tx } = buildService({ paymentAmount: new Decimal('1500') });
+    const { service, tx, ledger } = buildService({ paymentAmount: new Decimal('1500') });
 
     const result = await service.processRepayment({
       tenantId,
@@ -101,10 +114,18 @@ describe('LoanRepaymentService', () => {
     expect(tx.loanRepayment.update as MockFn).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: 'PAID' }),
     }));
+
+    // Every leg posts its GL-only entry (Cash vs Income/Receivable) via LedgerService.
+    expect(ledger.postLoanRepaymentLegEntry).toHaveBeenCalledTimes(3);
+    expect(ledger.postLoanRepaymentLegEntry).toHaveBeenCalledWith(expect.objectContaining({ leg: 'PENALTY' }));
+    expect(ledger.postLoanRepaymentLegEntry).toHaveBeenCalledWith(expect.objectContaining({ leg: 'INTEREST' }));
+    expect(ledger.postLoanRepaymentLegEntry).toHaveBeenCalledWith(expect.objectContaining({ leg: 'PRINCIPAL' }));
+    // No overpayment on this exact-amount repayment.
+    expect(ledger.postEntry).not.toHaveBeenCalled();
   });
 
-  it('routes overpayment to the member FOSA account as a deposit', async () => {
-    const { service, tx } = buildService({ paymentAmount: new Decimal('2000') });
+  it('routes overpayment to the member FOSA account as a deposit via LedgerService.postEntry()', async () => {
+    const { service, ledger } = buildService({ paymentAmount: new Decimal('2000') });
 
     const result = await service.processRepayment({
       tenantId,
@@ -115,16 +136,22 @@ describe('LoanRepaymentService', () => {
     });
 
     expect(result.overpaymentToFosa.toFixed(2)).toBe('500.00');
-    expect(tx.account.update as MockFn).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ balance: '700' }),
-    }));
-    expect(tx.transaction.create as MockFn).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ type: TransactionType.DEPOSIT, amount: '500' }),
-    }));
+    expect(ledger.postEntry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        journalType: 'DEPOSIT',
+        accountId,
+        direction: 'CREDIT',
+        reference: 'MPESA-R2-OVERPAY',
+        loanId,
+      }),
+    );
+    // The three waterfall legs still post their GL-only entries (penalty/interest/
+    // principal fully covered before the remainder becomes overpayment).
+    expect(ledger.postLoanRepaymentLegEntry).toHaveBeenCalledTimes(3);
   });
 
   it('returns existing transaction result without duplicating ledger entries', async () => {
-    const { service, tx } = buildService({
+    const { service, tx, ledger } = buildService({
       paymentAmount: new Decimal('1500'),
       existingTransaction: { loanId, amount: new Decimal('1500') },
     });
@@ -138,6 +165,8 @@ describe('LoanRepaymentService', () => {
     });
 
     expect(tx.transaction.create as MockFn).not.toHaveBeenCalled();
+    expect(ledger.postLoanRepaymentLegEntry).not.toHaveBeenCalled();
+    expect(ledger.postEntry).not.toHaveBeenCalled();
   });
 
   it('cancels delayed guarantor debit jobs after a curing repayment', async () => {

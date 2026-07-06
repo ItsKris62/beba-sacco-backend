@@ -34,6 +34,7 @@ enum UserRole {
   CHAIRMAN // Stage oversight – inherits MEMBER permissions + stage analytics
   AUDITOR // Read-only compliance auditor
   ACCOUNTANT // SACCO accountant – GL, journal entries, reconciliation
+  SYSTEM // Non-human actor for automated ledger postings (M-Pesa webhooks, cron jobs) – never logs in
 
   @@schema("public")
 }

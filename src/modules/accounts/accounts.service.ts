@@ -1,23 +1,28 @@
 import {
-  Injectable, Logger, NotFoundException, BadRequestException, ConflictException,
+  Injectable, Logger, NotFoundException, ConflictException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
-import { TransactionType, TransactionStatus, AccountType } from '@prisma/client';
+import { JournalEntryType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { LedgerService } from '../accounting/ledger.service';
 import { CreateAccountDto } from './dto/create-account.dto';
+import { TransferFundsDto } from './dto/transfer-funds.dto';
 
 /**
  * Accounts Service
  *
  * Handles BOSA (savings) and FOSA (transactional) accounts.
  * All monetary arithmetic uses Decimal from decimal.js — never native number.
- * Balance updates are wrapped in Prisma interactive transactions for atomicity.
+ * deposit()/withdraw() delegate balance updates + GL posting to LedgerService —
+ * see ledger.service.ts for the atomicity/idempotency/minimum-balance-floor logic.
  *
  * TODO: Phase 3 – interest accrual engine (monthly BOSA interest)
  * TODO: Phase 4 – dividend distribution to BOSA accounts
- * TODO: Phase 4 – inter-account transfers with double-entry ledger
+ * TODO: snapshot minimumBalance/allowsNegative from AccountTypePolicy onto new
+ *       Account rows in create() below — currently every new account gets the
+ *       column defaults (0 / false) regardless of the tenant's configured policy.
  */
 @Injectable()
 export class AccountsService {
@@ -26,6 +31,7 @@ export class AccountsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly ledger: LedgerService,
   ) {}
 
   // ─── CREATE ACCOUNT ──────────────────────────────────────────
@@ -104,12 +110,12 @@ export class AccountsService {
   // ─── DEPOSIT ─────────────────────────────────────────────────
 
   /**
-   * Post a DEPOSIT transaction to an account.
-   * Uses Prisma interactive transaction to guarantee atomicity:
-   *   1. Lock and read current balance
-   *   2. Create Transaction record
-   *   3. Update Account.balance
-   * All monetary values handled as Decimal.
+   * Post a DEPOSIT via LedgerService.postEntry() — writes the operational
+   * Transaction row and the paired GL JournalEntry/GLPosting atomically.
+   * Idempotent on (tenantId, reference); duplicate-reference resubmission
+   * returns the original result instead of throwing ConflictException, since
+   * postEntry() replays rather than rejects (a behavior change from the old
+   * manual implementation — see Phase 3 notes).
    */
   async deposit(
     accountId: string,
@@ -120,72 +126,48 @@ export class AccountsService {
     processedBy: string,
     ipAddress?: string,
   ) {
-    if (amountKes <= 0) throw new BadRequestException('Amount must be positive');
-    const amount = new Decimal(amountKes).toDecimalPlaces(4);
+    const amount = new Decimal(amountKes);
 
-    return this.prisma.$transaction(async (tx) => {
-      const account = await tx.account.findFirst({
-        where: { id: accountId, tenantId, isActive: true },
-        select: { id: true, balance: true },
-      });
-      if (!account) throw new NotFoundException('Account not found or inactive');
+    const { transaction } = await this.ledger.postEntry({
+      tenantId,
+      reference,
+      journalType: JournalEntryType.DEPOSIT,
+      accountId,
+      amount,
+      direction: 'CREDIT',
+      actorId: processedBy,
+      description,
+    });
 
-      // Duplicate reference guard
-      const dupRef = await tx.transaction.findFirst({ where: { tenantId, reference } });
-      if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
+    const balanceBefore = new Decimal(transaction.balanceBefore.toString());
+    const balanceAfter = new Decimal(transaction.balanceAfter.toString());
 
-      const balanceBefore = new Decimal(account.balance.toString());
-      const balanceAfter = balanceBefore.plus(amount).toDecimalPlaces(4);
+    this.audit.create({
+      tenantId,
+      userId: processedBy,
+      action: 'ACCOUNT.DEPOSIT',
+      resource: 'Transaction',
+      resourceId: transaction.id,
+      metadata: {
+        accountId,
+        amount: amount.toNumber(),
+        balanceBefore: balanceBefore.toNumber(),
+        balanceAfter: balanceAfter.toNumber(),
+        reference,
+      },
+      ipAddress,
+    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-      const updated = await tx.account.updateMany({
-        where: { id: accountId, tenantId, isActive: true },
-        data: {
-          balance: { increment: amount.toString() },
-          version: { increment: 1 },
-        },
-      });
-
-      if (updated.count === 0) {
-        throw new BadRequestException('Insufficient funds or concurrent modification');
-      }
-
-      const txn = await tx.transaction.create({
-        data: {
-          tenantId,
-          accountId,
-          type: TransactionType.DEPOSIT,
-          status: TransactionStatus.COMPLETED,
-          amount: amount.toString(),
-          balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balanceAfter.toString(),
-          reference,
-          description,
-          processedBy,
-        },
-      });
-
-      await this.audit.create({
-        tenantId,
-        userId: processedBy,
-        action: 'ACCOUNT.DEPOSIT',
-        resource: 'Transaction',
-        resourceId: txn.id,
-        metadata: {
-          accountId,
-          amount: amount.toNumber(),
-          balanceBefore: balanceBefore.toNumber(),
-          balanceAfter: balanceAfter.toNumber(),
-          reference,
-        },
-        ipAddress,
-      }).catch((e: unknown) => this.logger.error('Audit write failed', e));
-
-      return { transaction: txn, newBalance: balanceAfter.toNumber() };
-    }, { isolationLevel: 'Serializable' });
+    return { transaction, newBalance: balanceAfter.toNumber() };
   }
 
   // ─── WITHDRAWAL ──────────────────────────────────────────────
 
+  /**
+   * Post a WITHDRAWAL via LedgerService.postEntry(). The minimum-balance floor
+   * (Account.minimumBalance / allowsNegative) is enforced inside postEntry()'s
+   * atomic conditional update — see LedgerService.applyBalanceChange().
+   */
   async withdraw(
     accountId: string,
     amountKes: number,
@@ -195,56 +177,110 @@ export class AccountsService {
     processedBy: string,
     ipAddress?: string,
   ) {
-    if (amountKes <= 0) throw new BadRequestException('Amount must be positive');
-    const amount = new Decimal(amountKes).toDecimalPlaces(4);
+    const amount = new Decimal(amountKes);
 
-    return this.prisma.$transaction(async (tx) => {
-      const account = await tx.account.findFirst({
-        where: { id: accountId, tenantId, isActive: true },
-        select: { id: true, balance: true },
-      });
-      if (!account) throw new NotFoundException('Account not found or inactive');
+    const { transaction } = await this.ledger.postEntry({
+      tenantId,
+      reference,
+      journalType: JournalEntryType.WITHDRAWAL,
+      accountId,
+      amount,
+      direction: 'DEBIT',
+      actorId: processedBy,
+      description,
+    });
 
-      const dupRef = await tx.transaction.findFirst({ where: { tenantId, reference } });
-      if (dupRef) throw new ConflictException(`Reference ${reference} already posted`);
+    const balanceBefore = new Decimal(transaction.balanceBefore.toString());
+    const balanceAfter = new Decimal(transaction.balanceAfter.toString());
 
-      const balanceBefore = new Decimal(account.balance.toString());
-      const balanceAfter = balanceBefore.minus(amount).toDecimalPlaces(4);
+    this.audit.create({
+      tenantId,
+      userId: processedBy,
+      action: 'ACCOUNT.WITHDRAW',
+      resource: 'Transaction',
+      resourceId: transaction.id,
+      metadata: {
+        accountId,
+        amount: amount.toNumber(),
+        balanceBefore: balanceBefore.toNumber(),
+        balanceAfter: balanceAfter.toNumber(),
+        reference,
+      },
+      ipAddress,
+    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-      const updated = await tx.account.updateMany({
-        where: {
-          id: accountId,
-          tenantId,
-          isActive: true,
-          balance: { gte: amount.toString() },
-        },
-        data: {
-          balance: { decrement: amount.toString() },
-          version: { increment: 1 },
-        },
-      });
+    return { transaction, newBalance: balanceAfter.toNumber() };
+  }
 
-      if (updated.count === 0) {
-        throw new BadRequestException('Insufficient funds or concurrent modification');
-      }
+  // ─── INTERNAL TRANSFER (FOSA <-> BOSA) ────────────────────────
 
-      const txn = await tx.transaction.create({
-        data: {
-          tenantId,
-          accountId,
-          type: TransactionType.WITHDRAWAL,
-          status: TransactionStatus.COMPLETED,
-          amount: amount.toString(),
-          balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balanceAfter.toString(),
-          reference,
-          description,
-          processedBy,
-        },
-      });
+  /**
+   * Transfer funds between two of the SAME member's accounts (e.g. FOSA -> BOSA).
+   * Delegates the atomic double-entry work to LedgerService.postInternalTransfer();
+   * this method's own job is just ownership validation (both accounts must belong
+   * to the same member) before handing off.
+   */
+  async transfer(
+    sourceAccountId: string,
+    dto: TransferFundsDto,
+    tenantId: string,
+    actorId: string,
+    ipAddress?: string,
+  ) {
+    if (sourceAccountId === dto.destinationAccountId) {
+      throw new BadRequestException('Cannot transfer an account to itself');
+    }
 
-      return { transaction: txn, newBalance: balanceAfter.toNumber() };
-    }, { isolationLevel: 'Serializable' });
+    const [source, destination] = await Promise.all([
+      this.prisma.account.findFirst({
+        where: { id: sourceAccountId, tenantId, isActive: true },
+        select: { id: true, memberId: true },
+      }),
+      this.prisma.account.findFirst({
+        where: { id: dto.destinationAccountId, tenantId, isActive: true },
+        select: { id: true, memberId: true },
+      }),
+    ]);
+
+    if (!source) throw new NotFoundException('Source account not found or inactive');
+    if (!destination) throw new NotFoundException('Destination account not found or inactive');
+    if (source.memberId !== destination.memberId) {
+      throw new ForbiddenException('Internal transfers are only allowed between accounts of the same member');
+    }
+
+    const reference = `XFER-${uuidv4()}`;
+    const { fromTransaction, toTransaction, journalEntry } = await this.ledger.postInternalTransfer({
+      tenantId,
+      fromAccountId: sourceAccountId,
+      toAccountId: dto.destinationAccountId,
+      amount: new Decimal(dto.amount),
+      reference,
+      actorId,
+      description: dto.description,
+    });
+
+    this.audit.create({
+      tenantId,
+      userId: actorId,
+      action: 'ACCOUNT.TRANSFER',
+      resource: 'Transaction',
+      resourceId: fromTransaction.id,
+      metadata: {
+        sourceAccountId,
+        destinationAccountId: dto.destinationAccountId,
+        amount: dto.amount,
+        reference,
+        journalEntryId: journalEntry.id,
+      },
+      ipAddress,
+    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+    return {
+      fromTransaction,
+      toTransaction,
+      newSourceBalance: new Decimal(fromTransaction.balanceAfter.toString()).toNumber(),
+      newDestinationBalance: new Decimal(toTransaction.balanceAfter.toString()).toNumber(),
+    };
   }
 
   // ─── TRANSACTION HISTORY ─────────────────────────────────────

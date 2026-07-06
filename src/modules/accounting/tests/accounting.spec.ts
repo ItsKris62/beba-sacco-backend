@@ -1062,12 +1062,21 @@ describe('AccountingService - Accounting Coverage Extensions', () => {
 
       const tx = {
         transaction: {
-          findUnique: jest.fn().mockResolvedValueOnce(null),
+          findFirst: jest.fn().mockResolvedValueOnce(null),
           create: jest.fn().mockResolvedValueOnce({ id: 'ledger-tx-1' }),
         },
         account: {
-          findUnique: jest.fn().mockResolvedValueOnce({ balance: '1000.0000' }),
-          update: jest.fn().mockResolvedValueOnce({}),
+          findFirst: jest.fn().mockResolvedValueOnce({ balance: '1000.0000' }),
+          updateMany: jest.fn().mockResolvedValueOnce({ count: 1 }),
+        },
+        gLAccount: {
+          findMany: jest.fn().mockResolvedValueOnce([
+            { id: 'gl-cash', code: '1000' },
+            { id: 'gl-savings', code: '2000' },
+          ]),
+        },
+        journalEntry: {
+          create: jest.fn().mockResolvedValueOnce({ id: 'je-1' }),
         },
         mpesaTransaction: {
           update: jest.fn().mockResolvedValueOnce({}),

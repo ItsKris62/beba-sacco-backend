@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
-import { LoanStatus, GuarantorStatus, UserRole, InterestType } from '@prisma/client';
+import { AccountStatus, LoanStatus, GuarantorStatus, UserRole, InterestType } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { LoanApplicationService } from './loan-application.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -154,7 +154,7 @@ describe('LoanApplicationService', () => {
         id: 'g1',
         kycStatus: 'APPROVED',
         isBlacklisted: false,
-        user: { firstName: 'J', role: UserRole.MEMBER, isActive: true, status: 'APPROVED' },
+        user: { firstName: 'J', role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
       } as any);
       prisma.account.findFirst.mockResolvedValue(null);
 
@@ -168,7 +168,7 @@ describe('LoanApplicationService', () => {
         id: 'g1',
         kycStatus: 'APPROVED',
         isBlacklisted: false,
-        user: { firstName: 'J', role: UserRole.MEMBER, isActive: true, status: 'APPROVED' },
+        user: { firstName: 'J', role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
       } as any);
       prisma.account.findFirst.mockResolvedValue({ id: 'a1', balance: '500', lockedBalance: '0' } as any);
 
@@ -182,7 +182,7 @@ describe('LoanApplicationService', () => {
         id: 'g1',
         kycStatus: 'APPROVED',
         isBlacklisted: false,
-        user: { firstName: 'J', role: UserRole.MEMBER, isActive: true, status: 'APPROVED' },
+        user: { firstName: 'J', role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
       } as any);
       prisma.account.findFirst.mockResolvedValue({ id: 'a1', balance: '50000', lockedBalance: '0' } as any);
       prisma.loan.findFirst.mockResolvedValue(null);
@@ -198,7 +198,7 @@ describe('LoanApplicationService', () => {
         id: 'g1',
         kycStatus: 'APPROVED',
         isBlacklisted: true,
-        user: { firstName: 'J', role: UserRole.MEMBER, isActive: true, status: 'APPROVED' },
+        user: { firstName: 'J', role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
       } as any);
 
       const result = await service.validateGuarantorEligibility('g1', 'l1', 't1', new Decimal(1000), 'm1');
@@ -248,7 +248,7 @@ describe('LoanApplicationService', () => {
           id: 'g1',
           kycStatus: 'APPROVED',
           isBlacklisted: true,
-          user: { role: UserRole.MEMBER, isActive: true, status: 'APPROVED' },
+          user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
         });
       tx.loan.findFirst.mockResolvedValue(null);
       tx.loanProduct.findFirst.mockResolvedValue({
@@ -303,7 +303,7 @@ describe('LoanApplicationService', () => {
           id: 'guarantor-b',
           kycStatus: 'APPROVED',
           isBlacklisted: false,
-          user: { role: UserRole.MEMBER, isActive: true, status: 'APPROVED' },
+          user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
         });
       tx.loan.findFirst.mockResolvedValue(null);
       tx.loanProduct.findFirst.mockResolvedValue({
