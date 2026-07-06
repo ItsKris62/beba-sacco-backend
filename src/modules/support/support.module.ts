@@ -12,6 +12,7 @@ import { StorageModule } from '../storage/storage.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { isWorkerRuntime } from '../queue/worker-runtime';
 import { SupportNotificationsProcessor } from './processors/support-notifications.processor';
+import { AuthModule } from '../auth/auth.module';
 
 const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTicketsProcessor, SupportNotificationsProcessor] : [];
 
@@ -19,6 +20,7 @@ const SUPPORT_WORKER_PROVIDERS = isWorkerRuntime() ? [SlaProcessor, AutoCloseTic
   imports: [
     PrismaModule,
     StorageModule,
+    AuthModule,
     forwardRef(() => NotificationsModule),
     BullModule.registerQueue(
       { name: QUEUE_NAMES.SUPPORT_NOTIFICATIONS },
