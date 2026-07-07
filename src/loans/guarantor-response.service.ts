@@ -1,5 +1,19 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { AccountType, GuarantorStatus, KycStatus, LoanStatus, Prisma, UserRole, AccountStatus } from '@prisma/client';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  AccountType,
+  GuarantorStatus,
+  KycStatus,
+  LoanStatus,
+  Prisma,
+  UserRole,
+  AccountStatus,
+} from '@prisma/client';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Request } from 'express';
@@ -13,6 +27,8 @@ export type GuarantorWorkflowAction = 'ACCEPT' | 'DECLINE';
 export interface GuarantorWorkflowDto {
   action: GuarantorWorkflowAction;
   notes?: string;
+  /** Required for MEMBER-initiated ACCEPT — confirms the guarantor was shown and understood the liability disclosure. */
+  digitalAcknowledgment?: boolean;
 }
 
 interface LockedGuarantorRow {
@@ -54,7 +70,9 @@ export class GuarantorResponseService {
     return requests.map((request) => ({
       loanId: request.loan.id,
       loanNumber: request.loan.loanNumber,
-      applicantName: [request.loan.member.user.firstName, request.loan.member.user.lastName].filter(Boolean).join(' '),
+      applicantName: [request.loan.member.user.firstName, request.loan.member.user.lastName]
+        .filter(Boolean)
+        .join(' '),
       amount: new Decimal(request.loan.principalAmount.toString()).toNumber(),
       guaranteedAmount: new Decimal(request.guaranteedAmount.toString()).toNumber(),
       status: request.status,
@@ -78,14 +96,18 @@ export class GuarantorResponseService {
       where: { id: guarantorMemberId, tenantId, isActive: true, userId: actorUserId },
       select: { id: true },
     });
-    if (!member) throw new ForbiddenException('Not authorized to respond to this guarantor request');
+    if (!member)
+      throw new ForbiddenException('Not authorized to respond to this guarantor request');
 
     const headerKey = idempotencyHeader?.trim();
-    const idemKey = headerKey ? `guarantor:response:${loanId}:${guarantorMemberId}:${headerKey}` : undefined;
+    const idemKey = headerKey
+      ? `guarantor:response:${loanId}:${guarantorMemberId}:${headerKey}`
+      : undefined;
     if (idemKey) {
       const idem = await this.idempotency.checkAndReserve(idemKey, tenantId, 72 * 60 * 60);
       if (idem.status === 'COMPLETED') return idem.result;
-      if (idem.status === 'PROCESSING') throw new ConflictException('Guarantor response is already processing');
+      if (idem.status === 'PROCESSING')
+        throw new ConflictException('Guarantor response is already processing');
     }
 
     try {
@@ -96,6 +118,7 @@ export class GuarantorResponseService {
         guarantorMatcher: { memberId: guarantorMemberId },
         action: dto.action,
         notes: dto.notes,
+        digitalAcknowledgment: dto.digitalAcknowledgment,
         source: 'MEMBER',
         req,
       });
@@ -128,20 +151,9 @@ export class GuarantorResponseService {
       guarantorMatcher: { idOrMemberId: guarantorIdOrMemberId },
       action: dto.action,
       notes: dto.notes,
+      digitalAcknowledgment: dto.digitalAcknowledgment,
       source: 'ADMIN_OVERRIDE',
       req,
-    });
-  }
-
-  async expirePendingGuarantor(loanId: string, guarantorId: string, tenantId: string) {
-    return this.applyDecision({
-      loanId,
-      tenantId,
-      actorUserId: null,
-      guarantorMatcher: { idOrMemberId: guarantorId },
-      action: 'DECLINE',
-      notes: 'Consent window expired (72h)',
-      source: 'SYSTEM_EXPIRY',
     });
   }
 
@@ -152,15 +164,29 @@ export class GuarantorResponseService {
     guarantorMatcher: { memberId?: string; idOrMemberId?: string };
     action: GuarantorWorkflowAction;
     notes?: string;
+    digitalAcknowledgment?: boolean;
     source: 'MEMBER' | 'ADMIN_OVERRIDE' | 'SYSTEM_EXPIRY';
     req?: Request;
   }) {
     if (args.action !== 'ACCEPT' && args.action !== 'DECLINE') {
       throw new BadRequestException('INVALID_GUARANTOR_ACTION: action must be ACCEPT or DECLINE');
     }
+    // Liability disclosure must be explicitly acknowledged when a member accepts on their
+    // own behalf. Admin overrides carry their own mandatory `reason` as the compliance
+    // record (e.g. "verified signed consent at branch office"), so they are exempt here.
+    if (args.action === 'ACCEPT' && args.source === 'MEMBER' && !args.digitalAcknowledgment) {
+      throw new BadRequestException(
+        'DIGITAL_ACKNOWLEDGMENT_REQUIRED: you must confirm you understand the guarantee obligation before accepting',
+      );
+    }
 
     return this.prisma.$transaction(async (tx) => {
-      const locked = await this.lockGuarantor(tx, args.tenantId, args.loanId, args.guarantorMatcher);
+      const locked = await this.lockGuarantor(
+        tx,
+        args.tenantId,
+        args.loanId,
+        args.guarantorMatcher,
+      );
       if (!locked) throw new NotFoundException('Guarantor request not found');
       if (locked.status !== GuarantorStatus.PENDING) {
         throw new ConflictException(`Guarantor request already ${locked.status}`);
@@ -172,12 +198,21 @@ export class GuarantorResponseService {
           id: true,
           status: true,
           principalAmount: true,
-          loanProduct: { select: { minGuarantors: true, guarantorCoverageRatio: true, requiredAccountType: true } },
+          loanProduct: {
+            select: {
+              minGuarantors: true,
+              maxGuarantors: true,
+              guarantorCoverageRatio: true,
+              requiredAccountType: true,
+            },
+          },
         },
       });
       if (!loan) throw new NotFoundException('Loan not found');
 
-      const expired = args.source === 'SYSTEM_EXPIRY' || Date.now() > locked.invitedAt.getTime() + 72 * 60 * 60 * 1000;
+      const expired =
+        args.source === 'SYSTEM_EXPIRY' ||
+        Date.now() > locked.invitedAt.getTime() + 72 * 60 * 60 * 1000;
       const nextStatus = expired
         ? GuarantorStatus.EXPIRED
         : args.action === 'ACCEPT'
@@ -201,10 +236,11 @@ export class GuarantorResponseService {
           status: nextStatus,
           respondedAt: new Date(),
           holdPlacedAt: nextStatus === GuarantorStatus.ACCEPTED ? new Date() : undefined,
-          notes: nextStatus === GuarantorStatus.EXPIRED ? 'Consent window expired (72h)' : args.notes,
+          notes:
+            nextStatus === GuarantorStatus.EXPIRED ? 'Consent window expired (72h)' : args.notes,
           decidedByUserId: args.actorUserId,
           decisionSource: args.source,
-          auditMetadata: this.auditMetadata(args.req, args.source),
+          auditMetadata: this.auditMetadata(args.req, args.source, args.digitalAcknowledgment),
         },
       });
 
@@ -217,23 +253,48 @@ export class GuarantorResponseService {
           entityId: locked.id,
           oldValue: { lockedBalance: 'UNCHANGED' },
           newValue: { lockedBalance: 'INCREMENTED' },
-          payload: { loanId: args.loanId, guarantorMemberId: locked.memberId, guaranteedAmount: locked.guaranteedAmount, accountType },
+          payload: {
+            loanId: args.loanId,
+            guarantorMemberId: locked.memberId,
+            guaranteedAmount: locked.guaranteedAmount,
+            accountType,
+            digitalAcknowledgment: args.digitalAcknowledgment ?? null,
+          },
         });
       }
 
       await this.writeAudit(tx, {
         tenantId: args.tenantId,
         actorId: args.actorUserId,
-        action: args.source === 'ADMIN_OVERRIDE' ? 'GUARANTOR.ADMIN_OVERRIDE' : `GUARANTOR.${nextStatus}`,
+        action:
+          args.source === 'ADMIN_OVERRIDE' ? 'GUARANTOR.ADMIN_OVERRIDE' : `GUARANTOR.${nextStatus}`,
         entityType: 'LoanGuarantor',
         entityId: locked.id,
         oldValue: { status: locked.status },
         newValue: { status: nextStatus },
-        payload: { loanId: args.loanId, guarantorMemberId: locked.memberId, reason: args.notes, source: args.source },
+        payload: {
+          loanId: args.loanId,
+          guarantorMemberId: locked.memberId,
+          reason: args.notes,
+          source: args.source,
+        },
       });
 
-      const transition = await this.applyLoanState(tx, args.tenantId, args.loanId, loan, args.actorUserId, nextStatus);
-      return { loanId: args.loanId, guarantorId: locked.id, memberId: locked.memberId, status: nextStatus, loanStatus: transition };
+      const transition = await this.applyLoanState(
+        tx,
+        args.tenantId,
+        args.loanId,
+        loan,
+        args.actorUserId,
+        nextStatus,
+      );
+      return {
+        loanId: args.loanId,
+        guarantorId: locked.id,
+        memberId: locked.memberId,
+        status: nextStatus,
+        loanStatus: transition,
+      };
     });
   }
 
@@ -260,12 +321,24 @@ export class GuarantorResponseService {
     return rows[0] ?? null;
   }
 
-  private async assertGuarantorCanAccept(tx: Prisma.TransactionClient, tenantId: string, memberId: string): Promise<void> {
+  private async assertGuarantorCanAccept(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    memberId: string,
+  ): Promise<void> {
     const member = await tx.member.findFirst({
-      where: { id: memberId, tenantId, isActive: true, user: { accountStatus: AccountStatus.ACTIVE } },
+      where: {
+        id: memberId,
+        tenantId,
+        isActive: true,
+        user: { accountStatus: AccountStatus.ACTIVE },
+      },
       select: { kycStatus: true },
     });
-    if (!member) throw new BadRequestException('GUARANTOR_NOT_ACTIVE: guarantor must be an active SACCO member');
+    if (!member)
+      throw new BadRequestException(
+        'GUARANTOR_NOT_ACTIVE: guarantor must be an active SACCO member',
+      );
     if (member.kycStatus !== KycStatus.APPROVED) {
       throw new BadRequestException('GUARANTOR_KYC_NOT_VERIFIED: guarantor KYC must be verified');
     }
@@ -275,7 +348,16 @@ export class GuarantorResponseService {
     tx: Prisma.TransactionClient,
     tenantId: string,
     loanId: string,
-    loan: { status: LoanStatus; principalAmount: Prisma.Decimal; loanProduct: { minGuarantors: number; guarantorCoverageRatio: Prisma.Decimal; requiredAccountType: AccountType | null } },
+    loan: {
+      status: LoanStatus;
+      principalAmount: Prisma.Decimal;
+      loanProduct: {
+        minGuarantors: number;
+        maxGuarantors: number;
+        guarantorCoverageRatio: Prisma.Decimal;
+        requiredAccountType: AccountType | null;
+      };
+    },
     actorId: string | null,
     latestStatus: GuarantorStatus,
   ): Promise<LoanStatus> {
@@ -283,41 +365,35 @@ export class GuarantorResponseService {
 
     const guarantors = await tx.loanGuarantor.findMany({
       where: { tenantId, loanId },
-      select: { id: true, memberId: true, status: true, guaranteedAmount: true, holdReleasedAt: true },
+      select: {
+        id: true,
+        memberId: true,
+        status: true,
+        guaranteedAmount: true,
+        holdReleasedAt: true,
+      },
     });
-    const accepted = guarantors.filter((guarantor) => guarantor.status === GuarantorStatus.ACCEPTED);
+    const accepted = guarantors.filter(
+      (guarantor) => guarantor.status === GuarantorStatus.ACCEPTED,
+    );
     const pending = guarantors.filter((guarantor) => guarantor.status === GuarantorStatus.PENDING);
-    const totalAccepted = accepted.reduce((sum, item) => sum.plus(new Decimal(item.guaranteedAmount.toString())), new Decimal(0));
+    const totalAccepted = accepted.reduce(
+      (sum, item) => sum.plus(new Decimal(item.guaranteedAmount.toString())),
+      new Decimal(0),
+    );
     const requiredCoverage = new Decimal(loan.principalAmount.toString()).times(
       new Decimal(loan.loanProduct.guarantorCoverageRatio?.toString() ?? '1.0'),
     );
 
     const hasDecline = guarantors.some(
-      (guarantor) => guarantor.status === GuarantorStatus.REJECTED || guarantor.status === GuarantorStatus.EXPIRED,
+      (guarantor) =>
+        guarantor.status === GuarantorStatus.REJECTED ||
+        guarantor.status === GuarantorStatus.EXPIRED,
     );
     const criteriaMet =
       pending.length === 0 &&
       accepted.length >= loan.loanProduct.minGuarantors &&
       totalAccepted.greaterThanOrEqualTo(requiredCoverage);
-
-    if (hasDecline || latestStatus === GuarantorStatus.EXPIRED || (pending.length === 0 && !criteriaMet)) {
-      await this.releaseAcceptedHolds(tx, tenantId, loanId, loan.loanProduct, accepted, actorId, 'GUARANTOR_DECLINE_OR_TIMEOUT');
-      await tx.loan.updateMany({
-        where: { id: loanId, tenantId, status: LoanStatus.PENDING_GUARANTORS },
-        data: { status: LoanStatus.REJECTED_GUARANTOR_DECLINE, notes: 'REJECTED_GUARANTOR_DECLINE' },
-      });
-      await this.writeAudit(tx, {
-        tenantId,
-        actorId,
-        action: 'LOAN.REJECTED_GUARANTOR_DECLINE',
-        entityType: 'Loan',
-        entityId: loanId,
-        oldValue: { status: loan.status },
-        newValue: { status: LoanStatus.REJECTED_GUARANTOR_DECLINE },
-        payload: { acceptedCount: accepted.length, totalAccepted: totalAccepted.toString(), requiredCoverage: requiredCoverage.toString() },
-      });
-      return LoanStatus.REJECTED_GUARANTOR_DECLINE;
-    }
 
     if (criteriaMet) {
       await tx.loan.updateMany({
@@ -332,9 +408,88 @@ export class GuarantorResponseService {
         entityId: loanId,
         oldValue: { status: loan.status },
         newValue: { status: LoanStatus.PENDING_APPROVAL },
-        payload: { acceptedCount: accepted.length, totalAccepted: totalAccepted.toString(), requiredCoverage: requiredCoverage.toString() },
+        payload: {
+          acceptedCount: accepted.length,
+          totalAccepted: totalAccepted.toString(),
+          requiredCoverage: requiredCoverage.toString(),
+        },
       });
       return LoanStatus.PENDING_APPROVAL;
+    }
+
+    // Coverage/count criteria aren't met yet. Decide whether a replacement
+    // guarantor can still be solicited (stay in PENDING_GUARANTORS) or whether
+    // the application is truly dead.
+    //
+    // A single decline no longer kills the loan outright: as long as enough
+    // room remains under the product's maxGuarantors cap to invite
+    // replacements and still reach minGuarantors, the borrower gets a chance
+    // to nominate a substitute via POST /members/loans/:id/guarantors/request.
+    // A 72h-expiry-at-response-time is still terminal immediately, matching
+    // the hourly expiry sweep's behaviour for the same case.
+    const activeGuarantors = accepted.length + pending.length;
+    const availableReplacementSlots = Math.max(
+      0,
+      loan.loanProduct.maxGuarantors - activeGuarantors,
+    );
+    const replacementStillFeasible =
+      activeGuarantors + availableReplacementSlots >= loan.loanProduct.minGuarantors;
+    const noOneLeftPending = pending.length === 0;
+
+    const shouldTerminallyReject =
+      latestStatus === GuarantorStatus.EXPIRED ||
+      (noOneLeftPending && !(hasDecline && replacementStillFeasible));
+
+    if (shouldTerminallyReject) {
+      await this.releaseAcceptedHolds(
+        tx,
+        tenantId,
+        loanId,
+        loan.loanProduct,
+        accepted,
+        actorId,
+        'GUARANTOR_DECLINE_OR_TIMEOUT',
+      );
+      await tx.loan.updateMany({
+        where: { id: loanId, tenantId, status: LoanStatus.PENDING_GUARANTORS },
+        data: {
+          status: LoanStatus.REJECTED_GUARANTOR_DECLINE,
+          notes: 'REJECTED_GUARANTOR_DECLINE',
+        },
+      });
+      await this.writeAudit(tx, {
+        tenantId,
+        actorId,
+        action: 'LOAN.REJECTED_GUARANTOR_DECLINE',
+        entityType: 'Loan',
+        entityId: loanId,
+        oldValue: { status: loan.status },
+        newValue: { status: LoanStatus.REJECTED_GUARANTOR_DECLINE },
+        payload: {
+          acceptedCount: accepted.length,
+          totalAccepted: totalAccepted.toString(),
+          requiredCoverage: requiredCoverage.toString(),
+        },
+      });
+      return LoanStatus.REJECTED_GUARANTOR_DECLINE;
+    }
+
+    if (hasDecline) {
+      // Stays open — record why, so the audit trail shows this wasn't simply
+      // "still waiting" but a decline that the borrower can still recover from.
+      await this.writeAudit(tx, {
+        tenantId,
+        actorId,
+        action: 'LOAN.GUARANTOR_REPLACEMENT_INVITABLE',
+        entityType: 'Loan',
+        entityId: loanId,
+        payload: {
+          activeGuarantors,
+          availableReplacementSlots,
+          minGuarantors: loan.loanProduct.minGuarantors,
+          maxGuarantors: loan.loanProduct.maxGuarantors,
+        },
+      });
     }
 
     return loan.status;
@@ -345,7 +500,12 @@ export class GuarantorResponseService {
     tenantId: string,
     loanId: string,
     product: { requiredAccountType: AccountType | null },
-    accepted: Array<{ id: string; memberId: string; guaranteedAmount: Prisma.Decimal; holdReleasedAt: Date | null }>,
+    accepted: Array<{
+      id: string;
+      memberId: string;
+      guaranteedAmount: Prisma.Decimal;
+      holdReleasedAt: Date | null;
+    }>,
     actorId: string | null,
     reason: string,
   ): Promise<void> {
@@ -368,7 +528,13 @@ export class GuarantorResponseService {
         action: 'GUARANTOR.HOLD_RELEASED',
         entityType: 'LoanGuarantor',
         entityId: guarantor.id,
-        payload: { loanId, guarantorMemberId: guarantor.memberId, guaranteedAmount: guarantor.guaranteedAmount.toString(), accountType, reason },
+        payload: {
+          loanId,
+          guarantorMemberId: guarantor.memberId,
+          guaranteedAmount: guarantor.guaranteedAmount.toString(),
+          accountType,
+          reason,
+        },
       });
     }
   }
@@ -408,9 +574,14 @@ export class GuarantorResponseService {
     );
   }
 
-  private auditMetadata(req: Request | undefined, source: string): Prisma.InputJsonValue {
+  private auditMetadata(
+    req: Request | undefined,
+    source: string,
+    digitalAcknowledgment?: boolean,
+  ): Prisma.InputJsonValue {
     return {
       source,
+      digitalAcknowledgment: digitalAcknowledgment ?? null,
       ipAddress: req?.ip ?? null,
       userAgent: req?.headers['user-agent'] ?? null,
       deviceId: req?.headers['x-device-id'] ?? null,

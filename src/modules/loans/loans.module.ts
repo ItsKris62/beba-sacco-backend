@@ -13,19 +13,37 @@ import { IntegrationsModule } from '../integrations/integrations.module';
 import { LoanRepaymentService } from './loan-repayment.service';
 import { LoanRecoveryService } from './loan-recovery.service';
 import { AccountingModule } from '../accounting/accounting.module';
+import { FraudModule } from '../fraud/fraud.module';
 
 @Module({
   imports: [
     AuditModule,
     IntegrationsModule,
     AccountingModule,
+    FraudModule,
     BullModule.registerQueue(
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
       { name: QUEUE_NAMES.EMAIL },
       { name: QUEUE_NAMES.GUARANTOR_RECOVERY },
     ),
   ],
-  providers: [LoansService, LoanRepaymentService, LoanRecoveryService, PrismaService, RedisService, IdempotencyService, DisbursementGateService, ProductRuleService, RepaymentReminderService],
-  exports: [LoansService, LoanRepaymentService, LoanRecoveryService, DisbursementGateService, ProductRuleService],
+  providers: [
+    LoansService,
+    LoanRepaymentService,
+    LoanRecoveryService,
+    PrismaService,
+    RedisService,
+    IdempotencyService,
+    DisbursementGateService,
+    ProductRuleService,
+    RepaymentReminderService,
+  ],
+  exports: [
+    LoansService,
+    LoanRepaymentService,
+    LoanRecoveryService,
+    DisbursementGateService,
+    ProductRuleService,
+  ],
 })
 export class LoansModule {}

@@ -114,6 +114,8 @@ export interface GuarantorReminderJobPayload {
   tenantId: string;
   memberId: string;
   loanNumber: string;
+  /** 1 = 24h reminder, 2 = 48h (final) reminder. Defaults to 1 for backward compatibility. */
+  stage?: 1 | 2;
 }
 
 export interface GuarantorValidationJobPayload {
@@ -307,6 +309,7 @@ export interface SmsJobPayload {
     | 'FIRST_LOGIN_PIN'
     | 'TEMP_PASSWORD'
     | 'GUARANTOR_INVITE'
+    | 'GUARANTOR_REMINDER'
     | 'REPAYMENT_REMINDER'
     | 'GUARANTOR_RECOVERY_NOTICE'
     | 'GUARANTOR_RECOVERY_DEBITED'
@@ -435,10 +438,6 @@ export interface CanaryAnalysisJobPayload {
   prometheusBaseUrl: string;
 }
 
-
-
-
-
 export type SupportNotificationJobType =
   | 'TICKET_CREATED'
   | 'TICKET_REPLIED'
@@ -469,4 +468,3 @@ export const SUPPORT_NOTIFICATION_JOB_OPTIONS = {
   removeOnComplete: true,
   removeOnFail: false,
 };
-

@@ -13,7 +13,6 @@ import { StatementService } from '../../statements/statement.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { DashboardService } from '../../dashboard/dashboard.service';
 import { DocumentsService } from '../../documents/documents.service';
-import { LoanAdminService } from '../loan-admin.service';
 import { LoanReviewService } from '../loan-review.service';
 import { LoanRecoveryService } from '../loan-recovery.service';
 import { SmsService } from '../../sms/sms.service';
@@ -83,7 +82,6 @@ describe('Loan workflow controllers', () => {
         { provide: PrismaService, useValue: prismaService },
         { provide: DashboardService, useValue: { getMemberDashboard: jest.fn() } },
         { provide: DocumentsService, useValue: {} },
-        { provide: LoanAdminService, useValue: { findAll: jest.fn().mockResolvedValue({ data: [], meta: { total: 0 } }) } },
         { provide: LoanReviewService, useValue: { process: jest.fn() } },
         { provide: LoanRecoveryService, useValue: { recoverFromGuarantors: jest.fn() } },
         { provide: SmsService, useValue: smsService },
@@ -179,7 +177,7 @@ describe('Loan workflow controllers', () => {
 
   it('returns 403 when a MEMBER role accesses admin loan routes', async () => {
     await request(app.getHttpServer())
-      .get('/api/v1/admin/loans')
+      .get(`/api/v1/admin/members/${memberId}/guarantor-exposure`)
       .set('x-test-role', UserRole.MEMBER)
       .expect(403);
   });

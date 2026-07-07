@@ -1,10 +1,25 @@
 import {
-  Controller, Get, Post, Patch, Param, Body, Delete,
-  Query, HttpCode, HttpStatus, ParseUUIDPipe, ParseFloatPipe, Req,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Param,
+  Body,
+  Delete,
+  Query,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+  Req,
 } from '@nestjs/common';
 import {
-  ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
-  ApiResponse, ApiQuery, ApiHeader,
+  ApiTags,
+  ApiBearerAuth,
+  ApiSecurity,
+  ApiOperation,
+  ApiResponse,
+  ApiQuery,
+  ApiHeader,
 } from '@nestjs/swagger';
 import { LoanStatus, UserRole } from '@prisma/client';
 import { Request } from 'express';
@@ -13,8 +28,8 @@ import { CreateLoanProductDto } from './dto/create-loan-product.dto';
 import { UpdateLoanProductDto } from './dto/update-loan-product.dto';
 import { ApplyLoanDto } from './dto/apply-loan.dto';
 import { ApproveLoanDto } from './dto/approve-loan.dto';
+import { SignApprovalChainDto } from './dto/sign-approval-chain.dto';
 import { InviteGuarantorsDto } from './dto/invite-guarantors.dto';
-import { GuarantorResponseDto } from './dto/guarantor-response.dto';
 import { RejectLoanDto } from './dto/reject-loan.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Public } from '../../common/decorators/public.decorator';
@@ -47,21 +62,31 @@ export class LoansController {
   }
 
   @Get('products')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR, UserRole.MEMBER)
+  @Roles(
+    UserRole.TENANT_ADMIN,
+    UserRole.MANAGER,
+    UserRole.TELLER,
+    UserRole.AUDITOR,
+    UserRole.MEMBER,
+  )
   @ApiOperation({ summary: 'List active loan products' })
   @ApiQuery({ name: 'includeInactive', required: false, type: Boolean })
   findAllProducts(
     @CurrentTenant() tenant: Tenant,
     @Query('includeInactive') includeInactive?: boolean,
   ) {
-    return this.loans.findAllProducts(tenant.id, includeInactive === true || String(includeInactive) === 'true');
+    return this.loans.findAllProducts(
+      tenant.id,
+      includeInactive === true || String(includeInactive) === 'true',
+    );
   }
 
   @Get('products/public')
   @Public()
   @ApiOperation({
     summary: 'List active loan products (public, unauthenticated)',
-    description: 'Read-only feed for the public marketing site and loan calculator. Always excludes inactive products regardless of query params.',
+    description:
+      'Read-only feed for the public marketing site and loan calculator. Always excludes inactive products regardless of query params.',
   })
   findPublicProducts(@CurrentTenant() tenant: Tenant) {
     return this.loans.findAllProducts(tenant.id, false);
@@ -70,10 +95,7 @@ export class LoansController {
   @Get('products/:id')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR)
   @ApiOperation({ summary: 'Get loan product by ID' })
-  findOneProduct(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentTenant() tenant: Tenant,
-  ) {
+  findOneProduct(@Param('id', ParseUUIDPipe) id: string, @CurrentTenant() tenant: Tenant) {
     return this.loans.findOneProduct(id, tenant.id);
   }
 
@@ -96,7 +118,8 @@ export class LoansController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Deactivate a loan product',
-    description: 'Soft-deactivates the product so existing loans retain their historical product reference.',
+    description:
+      'Soft-deactivates the product so existing loans retain their historical product reference.',
   })
   @ApiResponse({ status: 200, description: 'Loan product deactivated' })
   deactivateProduct(
@@ -126,7 +149,12 @@ export class LoansController {
 
   @Get()
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR)
-  @ApiOperation({ summary: 'List loans (optionally filtered by memberId or status)' })
+  @ApiOperation({
+    summary: 'List loans (optionally filtered by memberId or status)',
+    description:
+      'Each loan includes guarantorCoveragePercent (% of principal covered by ACCEPTED guarantors), ' +
+      'computed via a single batched query for the whole page.',
+  })
   @ApiQuery({ name: 'memberId', required: false })
   @ApiQuery({ name: 'status', required: false, enum: LoanStatus })
   @ApiQuery({ name: 'page', required: false, type: Number })
@@ -144,10 +172,7 @@ export class LoansController {
   @Get(':id')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR)
   @ApiOperation({ summary: 'Get loan details (includes transactions and product)' })
-  findOne(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentTenant() tenant: Tenant,
-  ) {
+  findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentTenant() tenant: Tenant) {
     return this.loans.findOne(id, tenant.id);
   }
 
@@ -170,6 +195,40 @@ export class LoansController {
     @Req() req: Request,
   ) {
     return this.loans.approve(id, tenant.id, actor.id, dto.comment, req.ip, req.get('user-agent'));
+  }
+
+  @Patch(':id/approval-chain/sign')
+  @Roles(UserRole.MANAGER, UserRole.TELLER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Sign off on a large loan's 4-eyes disbursement approval chain",
+    description:
+      'For loans ≥ KES 500,000, disburse() is blocked until one MANAGER and one TELLER have each ' +
+      'signed off here. The same person cannot fill both slots. Rejecting either slot permanently ' +
+      'blocks disbursement for this loan.',
+  })
+  @ApiResponse({ status: 200, description: 'Sign-off recorded' })
+  @ApiResponse({
+    status: 400,
+    description: 'No pending slot for this role, or approval chain does not exist',
+  })
+  @ApiResponse({ status: 403, description: 'This approver has already signed off on this loan' })
+  signApprovalChain(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SignApprovalChainDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.loans.signApprovalChain(
+      id,
+      tenant.id,
+      actor.id,
+      actor.role,
+      dto.approve,
+      dto.notes,
+      req.ip,
+    );
   }
 
   @Patch(':id/disburse')
@@ -213,9 +272,15 @@ export class LoansController {
       },
     },
   })
-  @ApiResponse({ status: 400, description: 'Loan is not approved, KYC is not approved, or fee exceeds principal' })
+  @ApiResponse({
+    status: 400,
+    description: 'Loan is not approved, KYC is not approved, or fee exceeds principal',
+  })
   @ApiResponse({ status: 404, description: 'Loan or FOSA account not found' })
-  @ApiResponse({ status: 409, description: 'Loan already disbursed or concurrent account update detected' })
+  @ApiResponse({
+    status: 409,
+    description: 'Loan already disbursed or concurrent account update detected',
+  })
   disburse(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentTenant() tenant: Tenant,
@@ -245,7 +310,9 @@ export class LoansController {
   @Post(':id/invite-guarantors')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Invite guarantors for a DRAFT loan (moves status to PENDING_GUARANTORS)' })
+  @ApiOperation({
+    summary: 'Invite guarantors for a DRAFT loan (moves status to PENDING_GUARANTORS)',
+  })
   inviteGuarantors(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: InviteGuarantorsDto,
@@ -259,10 +326,7 @@ export class LoansController {
   @Get(':id/guarantors')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR)
   @ApiOperation({ summary: 'List guarantors and their response status for a loan' })
-  getGuarantors(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentTenant() tenant: Tenant,
-  ) {
+  getGuarantors(@Param('id', ParseUUIDPipe) id: string, @CurrentTenant() tenant: Tenant) {
     return this.loans.getGuarantors(id, tenant.id);
   }
 

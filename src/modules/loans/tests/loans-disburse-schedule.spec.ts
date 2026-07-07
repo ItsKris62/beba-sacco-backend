@@ -12,6 +12,8 @@ import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { DisbursementGateService } from '../../../loans/disbursement-gate.service';
 import { ProductRuleService } from '../product-rule.service';
 import { LedgerService } from '../../accounting/ledger.service';
+import { ApprovalChainService } from '../../fraud/approval-chain.service';
+import { BehavioralRiskScorerService } from '../../fraud/risk-scorer/behavioral-risk-scorer.service';
 
 // ─── Transaction mock ──────────────────────────────────────────────────────────
 //
@@ -63,6 +65,8 @@ const mockEmailQueue = { add: jest.fn().mockResolvedValue(undefined) };
 const mockDisbursementGate = { assertPassed: jest.fn().mockResolvedValue(undefined) };
 const mockProductRules = {};
 const mockLedger = { postEntry: jest.fn() };
+const mockApprovalChain = { isChainApproved: jest.fn().mockResolvedValue(true) };
+const mockRiskScorer = {};
 
 // ─── Common fixtures ──────────────────────────────────────────────────────────
 
@@ -158,6 +162,8 @@ describe('LoansService.disburse() — schedule generation', () => {
         { provide: DisbursementGateService, useValue: mockDisbursementGate },
         { provide: ProductRuleService, useValue: mockProductRules },
         { provide: LedgerService, useValue: mockLedger },
+        { provide: ApprovalChainService, useValue: mockApprovalChain },
+        { provide: BehavioralRiskScorerService, useValue: mockRiskScorer },
       ],
     }).compile();
 

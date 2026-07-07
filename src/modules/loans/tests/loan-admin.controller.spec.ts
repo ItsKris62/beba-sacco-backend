@@ -4,7 +4,6 @@ import { Request } from 'express';
 import { LoanAdminController } from '../loan-admin.controller';
 import { LoanApplicationService } from '../loan-application.service';
 import { LoansService } from '../loans.service';
-import { LoanAdminService } from '../loan-admin.service';
 import { LoanReviewService } from '../loan-review.service';
 import { LoanRecoveryService } from '../loan-recovery.service';
 import { AdminLoanStatus, UpdateLoanStatusDto } from '../dto/update-loan-status.dto';
@@ -51,7 +50,6 @@ describe('LoanAdminController — PATCH /admin/loans/:id/status', () => {
       providers: [
         { provide: LoanApplicationService, useValue: mockLoanAppService },
         { provide: LoansService, useValue: mockLoansService },
-        { provide: LoanAdminService, useValue: { findAll: jest.fn() } },
         { provide: LoanReviewService, useValue: mockLoanReviewService },
         { provide: LoanRecoveryService, useValue: mockLoanRecoveryService },
         { provide: PrismaService, useValue: mockPrisma },

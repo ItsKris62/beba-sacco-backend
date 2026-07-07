@@ -1,4 +1,14 @@
-import { DynamicModule, Inject, Injectable, Logger, Module, OnModuleInit, Optional, Provider, Type } from '@nestjs/common';
+import {
+  DynamicModule,
+  Inject,
+  Injectable,
+  Logger,
+  Module,
+  OnModuleInit,
+  Optional,
+  Provider,
+  Type,
+} from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QUEUE_NAMES } from './queue.constants';
@@ -30,6 +40,7 @@ import { LoanPenaltyProcessor } from './processors/loan-penalty.processor';
 import { GuarantorDefaultOffsetProcessor } from './processors/guarantor-default-offset.processor';
 import { DailyReconScheduler } from './daily-recon.scheduler';
 import { DailyJobsScheduler } from '../../queues/schedulers/daily-jobs.scheduler';
+import { CronOrchestratorService } from './cron-orchestrator.service';
 
 // Service dependencies needed by processors
 import { MpesaModule } from '../mpesa/mpesa.module';
@@ -104,6 +115,9 @@ export const ADVANCED_FINANCIAL_QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   MpesaReconciliationProcessor,
   LedgerIntegrityProcessor,
   RepaymentScheduleProcessor,
+  // Fans out per-tenant INTEREST_ACCRUAL jobs — only useful (and only registered)
+  // alongside InterestAccrualProcessor, which actually consumes them.
+  CronOrchestratorService,
 ];
 
 export function shouldRegisterQueueProcessors(options: QueueModuleOptions = {}): boolean {
@@ -156,6 +170,25 @@ class QueueStartupDiagnostics implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
+    // ENABLE_PHASE3_DAILY_JOBS turns on CronOrchestratorService's daily accrual
+    // fan-out, but that service is only registered as a provider when the
+    // advanced-financial-jobs flag is also set (see getQueueProcessorProviders
+    // below) — otherwise InterestAccrualProcessor never exists to consume the
+    // jobs it enqueues. Checked here (always instantiated, regardless of mode)
+    // rather than inside CronOrchestratorService itself, which in the broken
+    // configuration is never constructed and so could never assert on its own.
+    const advancedFinancialJobsEnabled =
+      process.env.FEATURE_ADVANCED_FINANCIAL_JOBS === 'true' ||
+      process.env.PHASE_4_ENABLED === 'true';
+    if (process.env.ENABLE_PHASE3_DAILY_JOBS === 'true' && !advancedFinancialJobsEnabled) {
+      throw new Error(
+        'Invalid configuration: ENABLE_PHASE3_DAILY_JOBS=true requires FEATURE_ADVANCED_FINANCIAL_JOBS=true ' +
+          '(or PHASE_4_ENABLED=true). Without it, CronOrchestratorService is never registered, so the daily ' +
+          'interest-accrual fan-out (and DEFAULTED classification that depends on it) silently never runs. ' +
+          'Set both flags together, or leave both unset.',
+      );
+    }
+
     const moduleMode = this.mode ?? 'web';
     const runtimeMode = moduleMode === 'worker' || isWorkerRuntime() ? 'worker' : 'web';
     const processorCount = getQueueProcessorProviders({ mode: moduleMode }).length;
@@ -168,7 +201,9 @@ class QueueStartupDiagnostics implements OnModuleInit {
         : undefined);
     const appEndpoint =
       redisEndpointFromUrl(this.configService.get<string>('app.redis.url')) ??
-      (appHost ? `${appHost}:${this.configService.get<number>('app.redis.port', 6379)}` : undefined);
+      (appHost
+        ? `${appHost}:${this.configService.get<number>('app.redis.port', 6379)}`
+        : undefined);
 
     this.logger.log(
       `BullMQ startup: runtime=${runtimeMode} moduleMode=${moduleMode} ` +
@@ -283,7 +318,9 @@ class QueueStartupDiagnostics implements OnModuleInit {
               if (times > 1) {
                 if (!bullGaveUp) {
                   bullGaveUp = true;
-                  console.warn('[BullMQ] Dedicated Bull Redis is not configured; using app Redis fallback in degraded mode');
+                  console.warn(
+                    '[BullMQ] Dedicated Bull Redis is not configured; using app Redis fallback in degraded mode',
+                  );
                 }
                 return null;
               }
@@ -360,15 +397,8 @@ export class QueueModule {
 
     return {
       module: QueueModule,
-      providers: [
-        { provide: QUEUE_MODULE_MODE, useValue: options.mode ?? 'web' },
-        ...providers,
-      ],
+      providers: [{ provide: QUEUE_MODULE_MODE, useValue: options.mode ?? 'web' }, ...providers],
       exports: [BullModule, ...providers],
     };
   }
 }
-
-
-
-

@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { LoanApplicationService } from './loan-application.service';
-import { LoanAdminService } from './loan-admin.service';
 import { LoanReviewService } from './loan-review.service';
 import { GuarantorValidationService } from './guarantor-validation.service';
 import { LoanRecoveryService } from './loan-recovery.service';
@@ -49,7 +48,6 @@ import { SmsModule } from '../sms/sms.module';
   controllers: [LoanAdminController, GuarantorResponseController],
   providers: [
     LoanApplicationService,
-    LoanAdminService,
     LoanReviewService,
     GuarantorResponseService,
     GuarantorValidationService,
@@ -60,6 +58,12 @@ import { SmsModule } from '../sms/sms.module';
     RedisService,
     IdempotencyService,
   ],
-  exports: [LoanApplicationService, GuarantorResponseService, GuarantorValidationService, LoanRecoveryService, ProductRuleService],
+  exports: [
+    LoanApplicationService,
+    GuarantorResponseService,
+    GuarantorValidationService,
+    LoanRecoveryService,
+    ProductRuleService,
+  ],
 })
 export class LoanApplicationModule {}

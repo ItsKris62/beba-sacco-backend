@@ -355,69 +355,6 @@ describe('LoanApplicationService', () => {
     });
   });
 
-  // ─── GUARANTOR CONSENT RESPONSE ───────────────────────────────────────────
-
-  describe('guarantorResponse', () => {
-    const mockReq = { ip: '127.0.0.1', headers: { 'user-agent': 'test', 'x-request-id': 'req-1' } } as any;
-
-    it('should reject consent spoofing (wrong JWT)', async () => {
-      prisma.member.findFirst.mockResolvedValue({ userId: 'correct-user' } as any);
-
-      await expect(
-        service.guarantorResponse('l1', 'g1', { action: 'ACCEPT' as any, digitalAcknowledgment: true }, 't1', 'wrong-user', mockReq, 'idem-1'),
-      ).rejects.toThrow(ForbiddenException);
-    });
-
-    it('should reject missing digital acknowledgment', async () => {
-      prisma.member.findFirst.mockResolvedValue({ userId: 'u1' } as any);
-      prisma.loanGuarantor.findFirst.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: new Date(), guaranteedAmount: '1000' } as any);
-
-      await expect(
-        service.guarantorResponse('l1', 'g1', { action: 'ACCEPT' as any, digitalAcknowledgment: false }, 't1', 'u1', mockReq, 'idem-2'),
-      ).rejects.toThrow(BadRequestException);
-    });
-
-    it('should reject expired consent (72h)', async () => {
-      const oldDate = new Date();
-      oldDate.setHours(oldDate.getHours() - 73);
-      prisma.member.findFirst.mockResolvedValue({ userId: 'u1' } as any);
-      const tx = createMockPrisma();
-      tx.$queryRaw.mockResolvedValue([{ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: oldDate, guaranteedAmount: '1000' }]);
-      tx.loanGuarantor.update.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.EXPIRED, guaranteedAmount: '1000' });
-      tx.loan.findFirst.mockResolvedValue({
-        id: 'l1',
-        status: LoanStatus.PENDING_GUARANTORS,
-        principalAmount: '1000',
-        loanProduct: { minGuarantors: 1, guarantorCoverageRatio: '1', requiredAccountType: 'FOSA' },
-      });
-      prisma.$transaction.mockImplementation((cb: (transactionClient: any) => unknown) => cb(tx));
-
-      await expect(
-        service.guarantorResponse('l1', 'g1', { action: 'ACCEPT' as any, digitalAcknowledgment: true }, 't1', 'u1', mockReq, 'idem-3'),
-      ).rejects.toThrow(BadRequestException);
-    });
-
-    it('should accept valid consent and publish event', async () => {
-      prisma.member.findFirst.mockResolvedValue({ userId: 'u1' } as any);
-      const tx = createMockPrisma();
-      tx.$queryRaw.mockResolvedValue([{ id: 'gr1', status: GuarantorStatus.PENDING, invitedAt: new Date(), guaranteedAmount: '1000' }]);
-      tx.loanGuarantor.update.mockResolvedValue({ id: 'gr1', status: GuarantorStatus.ACCEPTED, guaranteedAmount: '1000' });
-      tx.loanGuarantor.findMany.mockResolvedValue([{ guaranteedAmount: '1000' }]);
-      tx.loan.findFirst.mockResolvedValue({
-        id: 'l1',
-        status: LoanStatus.PENDING_GUARANTORS,
-        principalAmount: '1000',
-        loanProduct: { minGuarantors: 1, guarantorCoverageRatio: '1', requiredAccountType: 'FOSA' },
-      });
-      tx.loan.updateMany.mockResolvedValue({ count: 1 });
-      prisma.$transaction.mockImplementation((cb: (transactionClient: any) => unknown) => cb(tx));
-
-      const result = await service.guarantorResponse('l1', 'g1', { action: 'ACCEPT' as any, digitalAcknowledgment: true }, 't1', 'u1', mockReq, 'idem-4');
-      expect(result.status).toBe('ACCEPTED');
-      expect(mockIdempotency.complete).toHaveBeenCalled();
-    });
-  });
-
   // ─── STATUS UPDATE (RBAC) ─────────────────────────────────────────────────
 
   describe('updateStatus', () => {

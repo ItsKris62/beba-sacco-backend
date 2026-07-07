@@ -1,10 +1,26 @@
 import {
-  Controller, Get, Patch, Post, Body, Param, Query, Req,
-  HttpCode, HttpStatus, ParseUUIDPipe, UseGuards,
+  Controller,
+  Get,
+  Patch,
+  Body,
+  Param,
+  Req,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+  UseGuards,
 } from '@nestjs/common';
 import {
-  ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
-  ApiResponse, ApiHeader, ApiParam, ApiQuery, ApiBody, ApiProperty, ApiPropertyOptional,
+  ApiTags,
+  ApiBearerAuth,
+  ApiSecurity,
+  ApiOperation,
+  ApiResponse,
+  ApiHeader,
+  ApiParam,
+  ApiBody,
+  ApiProperty,
+  ApiPropertyOptional,
 } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
@@ -12,11 +28,9 @@ import { Decimal } from 'decimal.js';
 import { Request } from 'express';
 import { LoanApplicationService } from './loan-application.service';
 import { LoansService } from './loans.service';
-import { LoanAdminService } from './loan-admin.service';
 import { LoanReviewService } from './loan-review.service';
 import { LoanRecoveryService } from './loan-recovery.service';
 import { UpdateLoanStatusDto, AdminLoanStatus } from './dto/update-loan-status.dto';
-import { GetAdminLoansQueryDto } from './dto/get-admin-loans-query.dto';
 import { ReviewLoanDto } from './dto/review-loan.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { LoanStateGuard } from './decorators/loan-state-guard.decorator';
@@ -27,12 +41,18 @@ import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 
 export class RecoverLoanDto {
-  @ApiProperty({ description: 'Default amount to recover from accepted guarantors', example: 10000 })
+  @ApiProperty({
+    description: 'Default amount to recover from accepted guarantors',
+    example: 10000,
+  })
   @IsNumber()
   @Min(1)
   defaultAmount!: number;
 
-  @ApiPropertyOptional({ description: 'Recovery notes for audit context', example: '90-day default recovery' })
+  @ApiPropertyOptional({
+    description: 'Recovery notes for audit context',
+    example: '90-day default recovery',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(1000)
@@ -59,56 +79,9 @@ export class LoanAdminController {
   constructor(
     private readonly loanApp: LoanApplicationService,
     private readonly loans: LoansService,
-    private readonly loanAdmin: LoanAdminService,
     private readonly loanReview: LoanReviewService,
     private readonly loanRecovery: LoanRecoveryService,
   ) {}
-
-  // ─── LOAN LIST ───────────────────────────────────────────────────────────────
-
-  @Get('loans')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'List all loans (admin)',
-    description:
-      'Paginated list of all loans in the tenant. Filterable by status, product, and member. ' +
-      'Returns guarantor coverage (% of principal covered by accepted guarantors) and ' +
-      'accruedInterest (stubbed at 0 until Tier 3 schema migration).',
-  })
-  @ApiQuery({ name: 'status', required: false, enum: ['DRAFT','PENDING_GUARANTORS','PENDING_REVIEW','APPROVED','ACTIVE','FULLY_PAID','REJECTED','DEFAULTED'] })
-  @ApiQuery({ name: 'loanProductId', required: false, type: String })
-  @ApiQuery({ name: 'memberId', required: false, type: String })
-  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
-  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
-  @ApiResponse({
-    status: 200,
-    description: 'Paginated loan list',
-    schema: {
-      example: {
-        data: [
-          {
-            id: 'uuid',
-            loanNumber: 'LN-2026-000001',
-            memberName: 'Jane Doe',
-            productId: 'uuid',
-            status: 'ACTIVE',
-            principalAmount: 50000,
-            outstandingBalance: 42000,
-            accruedInterest: 0,
-            disbursedAt: '2026-05-01T10:00:00.000Z',
-            guarantorCoverage: 100,
-          },
-        ],
-        meta: { page: 1, limit: 20, total: 1, totalPages: 1 },
-      },
-    },
-  })
-  async listLoans(
-    @Query() query: GetAdminLoansQueryDto,
-    @CurrentTenant() tenant: Tenant,
-  ) {
-    return this.loanAdmin.findAll(tenant.id, query);
-  }
 
   // ─── GUARANTOR EXPOSURE ─────────────────────────────────────────────────────
 
@@ -156,7 +129,7 @@ export class LoanAdminController {
     description:
       '**Workflow transitions** (PENDING_GUARANTORS, PENDING_REVIEW, APPROVED, REJECTED): ' +
       'update the loan status only, no financial operations.\n\n' +
-      '**DISBURSED**: triggers real financial disbursement — credits the member\'s FOSA ' +
+      "**DISBURSED**: triggers real financial disbursement — credits the member's FOSA " +
       'account with netDisbursement = principalAmount - processingFee inside a Serializable transaction. ' +
       'The ledger stores a gross LOAN_DISBURSEMENT credit and a separate FEE_CHARGE debit. ' +
       'Idempotent: returns 409 if the loan is already ACTIVE (already disbursed).\n\n' +
@@ -180,21 +153,27 @@ export class LoanAdminController {
     schema: {
       example: {
         id: 'uuid',
-            loanNumber: 'LN-2026-000001',
-            status: 'ACTIVE',
-            principalAmount: '50000.0000',
-            processingFee: '1000.0000',
-            netDisbursement: 49000,
-            newBalance: 59000,
-            disbursedAt: '2026-05-08T10:00:00.000Z',
-          },
+        loanNumber: 'LN-2026-000001',
+        status: 'ACTIVE',
+        principalAmount: '50000.0000',
+        processingFee: '1000.0000',
+        netDisbursement: 49000,
+        newBalance: 59000,
+        disbursedAt: '2026-05-08T10:00:00.000Z',
+      },
     },
   })
-  @ApiResponse({ status: 400, description: 'Invalid status transition or missing rejection reason' })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid status transition or missing rejection reason',
+  })
   @ApiResponse({ status: 403, description: 'Insufficient role privileges' })
   @ApiResponse({ status: 404, description: 'Loan not found' })
   @ApiResponse({ status: 409, description: 'Loan already disbursed (idempotent DISBURSED call)' })
-  @ApiResponse({ status: 422, description: 'Member has no active FOSA account or KYC not approved' })
+  @ApiResponse({
+    status: 422,
+    description: 'Member has no active FOSA account or KYC not approved',
+  })
   @UseGuards(LoanStateTransitionGuard)
   @LoanStateGuard({ loanIdParam: 'id', targetStatusBodyField: 'status' })
   async updateStatus(
@@ -232,7 +211,12 @@ export class LoanAdminController {
     description: 'Loan review action processed',
     schema: {
       example: {
-        loan: { id: 'uuid', status: 'ACTIVE', principalAmount: '50000.0000', processingFee: '1000.0000' },
+        loan: {
+          id: 'uuid',
+          status: 'ACTIVE',
+          principalAmount: '50000.0000',
+          processingFee: '1000.0000',
+        },
         principalAmount: 50000,
         processingFee: 1000,
         netDisbursement: 49000,

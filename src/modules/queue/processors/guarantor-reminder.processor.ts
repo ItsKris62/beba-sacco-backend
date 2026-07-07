@@ -4,13 +4,15 @@ import { Job } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
 import { QUEUE_NAMES, GuarantorReminderJobPayload } from '../queue.constants';
 import { PlunkService } from '../../../common/services/plunk.service';
+import { SmsService } from '../../sms/sms.service';
 
 /**
  * LoanGuarantor Reminder Processor
  *
- * Fires 24 hours after a guarantor is invited (see LoansService.inviteGuarantors).
- * Looks up the guarantor's name and borrower's name from the DB,
- * then sends a reminder email via Plunk if the guarantee is still PENDING.
+ * Fires at 24h and 48h after a guarantor is invited (see
+ * LoanApplicationService.inviteGuarantors), sending both an email (via Plunk)
+ * and an SMS (via Africa's Talking, through SmsService) if the guarantee is
+ * still PENDING at fire time.
  *
  * Uses PrismaClient directly (not PrismaService) because processors
  * run in the BullMQ worker context where DI is not always reliable for
@@ -27,15 +29,19 @@ export class GuarantorReminderProcessor extends WorkerHost {
   // PrismaClient is instantiated directly to avoid circular DI in queue context
   private readonly prisma = new PrismaClient();
 
-  constructor(private readonly plunk: PlunkService) {
+  constructor(
+    private readonly plunk: PlunkService,
+    private readonly smsService: SmsService,
+  ) {
     super();
   }
 
   async process(job: Job<GuarantorReminderJobPayload>): Promise<void> {
-    const { loanId, guarantorId, tenantId, loanNumber } = job.data;
+    const { loanId, guarantorId, tenantId, loanNumber, stage } = job.data;
+    const isFinalReminder = stage === 2;
 
     this.logger.log(
-      `LoanGuarantor reminder: loanId=${loanId} guarantorMemberId=${guarantorId} loan=${loanNumber}`,
+      `LoanGuarantor reminder (stage=${stage ?? 1}): loanId=${loanId} guarantorMemberId=${guarantorId} loan=${loanNumber}`,
     );
 
     // Skip if guarantor already responded
@@ -44,12 +50,18 @@ export class GuarantorReminderProcessor extends WorkerHost {
       select: {
         status: true,
         guaranteedAmount: true,
-        member: { select: { user: { select: { email: true, firstName: true } } } },
+        member: {
+          select: {
+            user: { select: { email: true, firstName: true, phone: true, phoneNumber: true } },
+          },
+        },
       },
     });
 
     if (!guarantor) {
-      this.logger.warn(`LoanGuarantor record not found for loanId=${loanId} memberId=${guarantorId}`);
+      this.logger.warn(
+        `LoanGuarantor record not found for loanId=${loanId} memberId=${guarantorId}`,
+      );
       return;
     }
 
@@ -72,15 +84,44 @@ export class GuarantorReminderProcessor extends WorkerHost {
 
     const guarantorEmail = guarantor.member.user.email;
     const guarantorFirstName = guarantor.member.user.firstName;
+    const guarantorPhone = guarantor.member.user.phone ?? guarantor.member.user.phoneNumber;
     const guaranteedAmount = Number(guarantor.guaranteedAmount);
 
     await this.plunk.send({
       to: guarantorEmail,
-      subject: `Reminder: Pending guarantor response for loan ${loanNumber}`,
-      body: await this.buildReminderEmail(guarantorFirstName, borrowerName, loanNumber, guaranteedAmount),
+      subject: isFinalReminder
+        ? `Final reminder: Pending guarantor response for loan ${loanNumber}`
+        : `Reminder: Pending guarantor response for loan ${loanNumber}`,
+      body: await this.buildReminderEmail(
+        guarantorFirstName,
+        borrowerName,
+        loanNumber,
+        guaranteedAmount,
+        isFinalReminder,
+      ),
     });
+    this.logger.log(
+      `LoanGuarantor reminder email sent to ${guarantorEmail} for loan ${loanNumber}`,
+    );
 
-    this.logger.log(`LoanGuarantor reminder email sent to ${guarantorEmail} for loan ${loanNumber}`);
+    if (guarantorPhone) {
+      const message = isFinalReminder
+        ? `Beba SACCO: Final reminder - ${borrowerName} still needs your guarantor response for loan ${loanNumber} (${this.kes(guaranteedAmount)}). Respond soon or the request may expire.`
+        : `Beba SACCO: Reminder - ${borrowerName} is waiting on your guarantor response for loan ${loanNumber} (${this.kes(guaranteedAmount)}). Log in to the portal to respond.`;
+      await this.smsService.enqueueSms(
+        { type: 'GUARANTOR_REMINDER', phone: guarantorPhone, message },
+        `guarantor.reminder.sms:${loanId}:${guarantorId}:${stage ?? 1}`,
+      );
+      this.logger.log(`LoanGuarantor reminder SMS enqueued for ${loanNumber}`);
+    } else {
+      this.logger.warn(
+        `No phone number on file for guarantor ${guarantorId} — SMS reminder skipped`,
+      );
+    }
+  }
+
+  private kes(n: number): string {
+    return `KES ${n.toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
 
   private async buildReminderEmail(
@@ -88,10 +129,8 @@ export class GuarantorReminderProcessor extends WorkerHost {
     borrowerName: string,
     loanNumber: string,
     guaranteedAmount: number,
+    isFinalReminder: boolean,
   ): Promise<string> {
-    const kes = (n: number) =>
-      `KES ${n.toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
     return `
 <!DOCTYPE html>
 <html lang="en">
@@ -115,15 +154,15 @@ export class GuarantorReminderProcessor extends WorkerHost {
     <div class="header"><h1>Beba SACCO</h1></div>
     <div class="body">
       <p>Dear ${firstName},</p>
-      <h2>Friendly Reminder ⏰</h2>
-      <p>You have a pending guarantor request from <strong>${borrowerName}</strong> that requires your response.</p>
+      <h2>${isFinalReminder ? 'Final Reminder ⚠️' : 'Friendly Reminder ⏰'}</h2>
+      <p>You have a pending guarantor request from <strong>${borrowerName}</strong> that requires your response${isFinalReminder ? ', and the 72-hour consent window is closing soon' : ''}.</p>
       <div class="highlight">
         <table>
           <tr><td>Loan Number</td><td>${loanNumber}</td></tr>
-          <tr><td>Your Guaranteed Amount</td><td>${kes(guaranteedAmount)}</td></tr>
+          <tr><td>Your Guaranteed Amount</td><td>${this.kes(guaranteedAmount)}</td></tr>
         </table>
       </div>
-      <p>Please log in to the Beba SACCO portal to respond. The loan cannot proceed until all guarantors have responded.</p>
+      <p>Please log in to the Beba SACCO portal to respond. The loan cannot proceed until all guarantors have responded${isFinalReminder ? ', and this request will expire automatically if it is not answered in time' : ''}.</p>
     </div>
     <div class="footer">
       &copy; ${new Date().getFullYear()} Beba SACCO &mdash; Please do not reply to this email.
@@ -133,4 +172,3 @@ export class GuarantorReminderProcessor extends WorkerHost {
 </html>`.trim();
   }
 }
-

@@ -11,7 +11,6 @@ import {
   HttpCode,
   HttpStatus,
   Req,
-  UseGuards,
   ForbiddenException,
   Res,
 } from '@nestjs/common';
@@ -40,7 +39,6 @@ import { CurrentTenant } from '../../common/decorators/current-tenant.decorator'
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 import { MemberApplyLoanDto, MemberRequestGuarantorsDto } from '../loans/dto/member-apply-loan.dto';
-import { GuarantorConsentResponseDto } from '../loans/dto/guarantor-consent-response.dto';
 import { MemberStkPushDto } from './dto/member-stk-push.dto';
 import { WithdrawMpesaDto } from './dto/withdraw-mpesa.dto';
 import { InternalTransferDto } from './dto/internal-transfer.dto';
@@ -67,8 +65,12 @@ import { ApiErrorExamples } from '../../common/swagger/error-response-examples';
 @ApiTags('Member Portal')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
-  @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-  @ApiHeader({ name: 'X-Correlation-ID', required: false, description: 'Optional request tracing ID' })
+@ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
+@ApiHeader({
+  name: 'X-Correlation-ID',
+  required: false,
+  description: 'Optional request tracing ID',
+})
 @Roles(UserRole.MEMBER, UserRole.LOAN_OFFICER)
 @Controller('members')
 export class MemberPortalController {
@@ -112,6 +114,7 @@ export class MemberPortalController {
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
     // Members cannot manage their own stage assignments
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { stageIds: _ignored, ...profileFields } = dto;
     return this.members.patchProfile(memberId, profileFields, tenant.id, user.id, req.ip);
   }
@@ -265,14 +268,10 @@ export class MemberPortalController {
     @Query('limit') limit?: number,
   ) {
     const memberId = await this.resolveMemberId(user.id, tenant.id);
-    return this.statements.getFosaStatement(
-      tenant.id,
-      user.id,
-      memberId,
-      periodFrom,
-      periodTo,
-      { page, limit },
-    );
+    return this.statements.getFosaStatement(tenant.id, user.id, memberId, periodFrom, periodTo, {
+      page,
+      limit,
+    });
   }
 
   // ─── LOAN SELF-APPLICATION ─────────────────────────────────────────────────
@@ -538,7 +537,10 @@ export class MemberPortalController {
     description: 'Required to prevent duplicate STK prompts on retry',
   })
   @ApiResponse({ status: 200, description: 'STK Push initiated' })
-  @ApiResponse({ status: 400, description: 'Invalid amount, phone, missing FOSA account, or missing idempotency key' })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid amount, phone, missing FOSA account, or missing idempotency key',
+  })
   @ApiResponse({ status: 503, description: 'M-Pesa temporarily unavailable' })
   async depositMpesa(
     @Body() dto: MemberStkPushDto,
@@ -573,13 +575,7 @@ export class MemberPortalController {
     @CurrentTenant() tenant: Tenant,
     @Req() req: Request,
   ) {
-    return this.portal.withdrawMpesa(
-      user.id,
-      dto.phoneNumber,
-      dto.amount,
-      tenant.id,
-      req.ip,
-    );
+    return this.portal.withdrawMpesa(user.id, dto.phoneNumber, dto.amount, tenant.id, req.ip);
   }
 
   @Post('accounts/transfer')
@@ -588,12 +584,15 @@ export class MemberPortalController {
   @ApiOperation({
     summary: 'Transfer funds between own FOSA and BOSA accounts',
     description:
-      'Moves money between the authenticated member\'s own FOSA and BOSA accounts. ' +
+      "Moves money between the authenticated member's own FOSA and BOSA accounts. " +
       'Minimum transfer amount is KES 100. The source account must have sufficient ' +
       'available balance (respecting the minimum balance floor).',
   })
   @ApiResponse({ status: 200, description: 'Transfer completed successfully' })
-  @ApiResponse({ status: 400, description: 'Insufficient funds, below minimum balance, or invalid transfer parameters' })
+  @ApiResponse({
+    status: 400,
+    description: 'Insufficient funds, below minimum balance, or invalid transfer parameters',
+  })
   @ApiResponse({ status: 404, description: 'Source or destination account not found' })
   @ApiResponse({ status: 429, description: 'Too many transfer requests — max 5 per minute' })
   async internalTransfer(
@@ -602,11 +601,6 @@ export class MemberPortalController {
     @CurrentTenant() tenant: Tenant,
     @Req() req: Request,
   ) {
-    return this.portal.internalTransfer(
-      user.id,
-      tenant.id,
-      dto,
-      req.ip,
-    );
+    return this.portal.internalTransfer(user.id, tenant.id, dto, req.ip);
   }
 }

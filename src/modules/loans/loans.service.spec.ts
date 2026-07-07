@@ -7,6 +7,8 @@ import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DisbursementGateService } from '../../loans/disbursement-gate.service';
 import { ProductRuleService } from './product-rule.service';
 import { LedgerService } from '../accounting/ledger.service';
+import { ApprovalChainService } from '../fraud/approval-chain.service';
+import { BehavioralRiskScorerService } from '../fraud/risk-scorer/behavioral-risk-scorer.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -36,6 +38,8 @@ const mockProductRules = {
   assertLoanApplicationRules: jest.fn().mockReturnValue(undefined),
 } as unknown as ProductRuleService;
 const mockLedger = {} as unknown as LedgerService;
+const mockApprovalChain = {} as unknown as ApprovalChainService;
+const mockRiskScorer = {} as unknown as BehavioralRiskScorerService;
 
 function makeService(): LoansService {
   return new LoansService(
@@ -48,6 +52,8 @@ function makeService(): LoansService {
     mockDisbursementGate,
     mockProductRules,
     mockLedger,
+    mockApprovalChain,
+    mockRiskScorer,
   );
 }
 

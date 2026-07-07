@@ -341,7 +341,7 @@ describe('GuarantorResponseService respondAsMember', () => {
     const result = await service.respondAsMember(
       loanId,
       guarantorTwoId,
-      { action: 'ACCEPT' },
+      { action: 'ACCEPT', digitalAcknowledgment: true },
       tenantId,
       'guarantor-user-2',
       request({ 'x-idempotency-key': 'guarantor-key-2' }),

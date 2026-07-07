@@ -1,6 +1,27 @@
-import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Req } from '@nestjs/common';
-import { ApiBearerAuth, ApiHeader, ApiOperation, ApiParam, ApiProperty, ApiPropertyOptional, ApiResponse, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Req,
+} from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiHeader,
+  ApiOperation,
+  ApiParam,
+  ApiProperty,
+  ApiPropertyOptional,
+  ApiResponse,
+  ApiSecurity,
+  ApiTags,
+} from '@nestjs/swagger';
+import { IsBoolean, IsEnum, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { Request } from 'express';
 import { UserRole } from '@prisma/client';
 import { GuarantorResponseService, GuarantorWorkflowAction } from './guarantor-response.service';
@@ -11,9 +32,12 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../modules/auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
 
-enum GuarantorDecision { ACCEPT = 'ACCEPT', DECLINE = 'DECLINE' }
+enum GuarantorDecision {
+  ACCEPT = 'ACCEPT',
+  DECLINE = 'DECLINE',
+}
 
-class GuarantorResponseDto {
+class GuarantorActionDto {
   @ApiProperty({ enum: GuarantorDecision, example: GuarantorDecision.ACCEPT })
   @IsEnum(GuarantorDecision)
   action!: GuarantorDecision;
@@ -23,18 +47,31 @@ class GuarantorResponseDto {
   @IsString()
   @MaxLength(500)
   notes?: string;
-
-  @ApiPropertyOptional({ description: 'Frontend confirmation checkbox that the member understands the guarantee obligation' })
-  @IsOptional()
-  @IsBoolean()
-  digitalAcknowledgment?: boolean;
 }
 
-class AdminGuarantorOverrideDto extends GuarantorResponseDto {
+class GuarantorResponseDto extends GuarantorActionDto {
+  @ApiProperty({
+    description:
+      'Frontend confirmation checkbox that the member has been shown and understands the liability disclosure ' +
+      '(their savings can be drawn on default). Required when accepting.',
+  })
+  @IsNotEmpty()
+  @IsBoolean()
+  digitalAcknowledgment!: boolean;
+}
+
+class AdminGuarantorOverrideDto extends GuarantorActionDto {
   @ApiProperty({ example: 'Verified signed consent at branch office.' })
   @IsString()
   @MaxLength(1000)
   reason!: string;
+
+  // Admin overrides carry the mandatory `reason` above as their compliance record instead —
+  // the member did not click through the in-app disclosure, so this is not required here.
+  @ApiPropertyOptional({ description: 'Not required for admin overrides.' })
+  @IsOptional()
+  @IsBoolean()
+  digitalAcknowledgment?: boolean;
 }
 
 @ApiTags('Loan Guarantor Workflow')
@@ -71,7 +108,10 @@ export class GuarantorResponseController {
   @ApiHeader({ name: 'X-Idempotency-Key', required: true })
   @ApiParam({ name: 'id', description: 'Loan UUID' })
   @ApiResponse({ status: 200, description: 'Guarantor response recorded' })
-  @ApiResponse({ status: 400, description: 'Invalid action, expired request, or eligibility failure' })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid action, expired request, or eligibility failure',
+  })
   @ApiResponse({ status: 403, description: 'Authenticated member is not the requested guarantor' })
   @ApiResponse({ status: 404, description: 'Guarantor request not found' })
   @ApiResponse({ status: 409, description: 'Duplicate or already-processed guarantor response' })
@@ -87,7 +127,11 @@ export class GuarantorResponseController {
     return this.service.respondAsMember(
       loanId,
       memberId,
-      { action: dto.action as GuarantorWorkflowAction, notes: dto.notes },
+      {
+        action: dto.action as GuarantorWorkflowAction,
+        notes: dto.notes,
+        digitalAcknowledgment: dto.digitalAcknowledgment,
+      },
       tenant.id,
       user.id,
       req,
@@ -116,7 +160,11 @@ export class GuarantorResponseController {
     return this.service.adminOverride(
       loanId,
       guarantorId,
-      { action: dto.action as GuarantorWorkflowAction, notes: dto.reason.trim() },
+      {
+        action: dto.action as GuarantorWorkflowAction,
+        notes: dto.reason.trim(),
+        digitalAcknowledgment: dto.digitalAcknowledgment,
+      },
       tenant.id,
       actor.id,
       req,
@@ -124,13 +172,18 @@ export class GuarantorResponseController {
   }
 
   private requireIdempotencyKey(req: Request): string {
-    const key = (req.headers['x-idempotency-key'] as string | undefined) ?? (req.headers['idempotency-key'] as string | undefined);
+    const key =
+      (req.headers['x-idempotency-key'] as string | undefined) ??
+      (req.headers['idempotency-key'] as string | undefined);
     if (!key?.trim()) throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
     return key.trim();
   }
 
   private async resolveMemberId(userId: string, tenantId: string): Promise<string> {
-    const member = await this.prisma.member.findFirst({ where: { tenantId, userId, isActive: true }, select: { id: true } });
+    const member = await this.prisma.member.findFirst({
+      where: { tenantId, userId, isActive: true },
+      select: { id: true },
+    });
     if (!member) throw new BadRequestException('MEMBER_PROFILE_NOT_FOUND');
     return member.id;
   }
