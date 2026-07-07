@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
-import { AccountStatus, LoanStatus, GuarantorStatus, UserRole, InterestType } from '@prisma/client';
+import { AccountStatus, AccountType, LoanStatus, GuarantorStatus, UserRole, InterestType } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { LoanApplicationService } from './loan-application.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -175,6 +175,57 @@ describe('LoanApplicationService', () => {
       const result = await service.validateGuarantorEligibility('g1', 'l1', 't1', new Decimal(1000), 'm1');
       expect(result.eligible).toBe(false);
       expect(result.reason).toContain('Insufficient FOSA');
+    });
+
+    it('rejects a BOSA-required guarantee when the guarantor has sufficient FOSA but insufficient BOSA balance', async () => {
+      prisma.member.findFirst.mockResolvedValue({
+        id: 'g1',
+        kycStatus: 'APPROVED',
+        isBlacklisted: false,
+        user: { firstName: 'J', role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
+      } as any);
+      prisma.account.findFirst.mockImplementation(({ where }: any) =>
+        Promise.resolve(
+          where.accountType === AccountType.BOSA
+            ? { id: 'bosa-1', balance: '500', lockedBalance: '0' }
+            : { id: 'fosa-1', balance: '50000', lockedBalance: '0' },
+        ),
+      );
+
+      const result = await service.validateGuarantorEligibility(
+        'g1', 'l1', 't1', new Decimal(1000), 'm1', AccountType.BOSA,
+      );
+      expect(result.eligible).toBe(false);
+      expect(result.reason).toContain('Insufficient FOSA');
+      expect(prisma.account.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ accountType: AccountType.BOSA }) }),
+      );
+    });
+
+    it('accepts a BOSA-required guarantee when the guarantor has sufficient BOSA but insufficient FOSA balance', async () => {
+      prisma.member.findFirst.mockResolvedValue({
+        id: 'g1',
+        kycStatus: 'APPROVED',
+        isBlacklisted: false,
+        user: { firstName: 'J', role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
+      } as any);
+      prisma.account.findFirst.mockImplementation(({ where }: any) =>
+        Promise.resolve(
+          where.accountType === AccountType.BOSA
+            ? { id: 'bosa-1', balance: '50000', lockedBalance: '0' }
+            : { id: 'fosa-1', balance: '500', lockedBalance: '0' },
+        ),
+      );
+      prisma.loan.findFirst.mockResolvedValue(null);
+      prisma.loanGuarantor.count.mockResolvedValue(0);
+
+      const result = await service.validateGuarantorEligibility(
+        'g1', 'l1', 't1', new Decimal(1000), 'm1', AccountType.BOSA,
+      );
+      expect(result.eligible).toBe(true);
+      expect(prisma.account.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ accountType: AccountType.BOSA }) }),
+      );
     });
 
     it('should reject if max concurrent guarantees exceeded', async () => {

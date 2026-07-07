@@ -360,7 +360,7 @@ export class LoanApplicationService {
 
     // Check FOSA
     const fosaAccount = await this.prisma.account.findFirst({
-      where: { memberId: guarantorMemberId, tenantId, accountType: 'FOSA', isActive: true },
+      where: { memberId: guarantorMemberId, tenantId, accountType, isActive: true },
       select: { id: true, balance: true, lockedBalance: true, frozenSavings: true },
     });
     if (!fosaAccount) {
