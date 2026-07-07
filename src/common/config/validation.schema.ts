@@ -164,6 +164,7 @@ export const validationSchema = Joi.object({
   PLUNK_SECRET_KEY: Joi.string().optional(),
   PLUNK_FROM_EMAIL: Joi.string().email().required(),
   PLUNK_FROM_NAME: Joi.string().default('Beba SACCO'),
+  EMAIL_IGNORE_DELIVERY_FAILURES: Joi.boolean().truthy('true').falsy('false').default(false),
 
   // ── CORS & Security ────────────────────────────────────────────────────────
   CORS_ORIGIN: Joi.string().required(),
@@ -215,6 +216,7 @@ export const validationSchema = Joi.object({
     otherwise: Joi.optional(),
   }),
   AFRICAS_TALKING_SENDER_ID: Joi.string().optional(),
+  SMS_IGNORE_DELIVERY_FAILURES: Joi.boolean().truthy('true').falsy('false').default(false),
 
   // ── BullMQ Worker Concurrency ──────────────────────────────────────────────
   BULLMQ_CONCURRENCY_ACCRUAL: Joi.number().integer().default(3),
@@ -222,3 +224,4 @@ export const validationSchema = Joi.object({
   BULLMQ_CONCURRENCY_LEDGER: Joi.number().integer().default(2),
   BULLMQ_CONCURRENCY_WEBHOOK: Joi.number().integer().default(10),
 });
+

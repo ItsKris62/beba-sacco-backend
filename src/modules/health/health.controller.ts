@@ -1,4 +1,6 @@
 import { Controller, Get, HttpException, HttpStatus } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { HealthCheck } from '@nestjs/terminus';
 import { SkipThrottle } from '@nestjs/throttler';
@@ -7,6 +9,7 @@ import { FeatureFlags, FEATURE_FLAG_NAMES } from '../../config/feature-flags';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { StorageService } from '../storage/storage.service';
+import { QUEUE_NAMES } from '../queue/queue.constants';
 
 type DependencyCheck = {
   status: 'ok' | 'error';
@@ -25,6 +28,14 @@ export class HealthController {
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly storage: StorageService,
+    @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK)
+    private readonly mpesaCallbackQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
+    private readonly mpesaDisbursementQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.LOAN_DISBURSE)
+    private readonly loanDisburseQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.REPORT_GENERATION)
+    private readonly reportQueue: Queue,
   ) {}
 
   @Public()
@@ -38,6 +49,7 @@ export class HealthController {
       this.checkDatabase(),
       this.checkRedis(),
       this.checkStorage(),
+      this.checkBullMqQueues(),
       this.checkFeatureFlags(),
     ]);
 
@@ -49,7 +61,8 @@ export class HealthController {
         database: this.formatCheck(checks[0], true),
         redis: this.formatCheck(checks[1], true),
         storage: this.formatCheck(checks[2], true),
-        featureFlags: this.formatCheck(checks[3], false),
+        bullmq: this.formatCheck(checks[3], true),
+        featureFlags: this.formatCheck(checks[4], false),
       },
     };
 
@@ -165,6 +178,60 @@ export class HealthController {
     });
   }
 
+  private async checkBullMqQueues() {
+    return this.measureLatency(async () => {
+      const failedThreshold = Number(process.env.HEALTH_BULLMQ_FAILED_THRESHOLD ?? 25);
+      const waitingThreshold = Number(process.env.HEALTH_BULLMQ_WAITING_THRESHOLD ?? 1000);
+      const stalledThreshold = Number(process.env.HEALTH_BULLMQ_STALLED_THRESHOLD ?? 0);
+      const queues = [
+        { name: QUEUE_NAMES.MPESA_CALLBACK, queue: this.mpesaCallbackQueue },
+        { name: QUEUE_NAMES.MPESA_DISBURSEMENT, queue: this.mpesaDisbursementQueue },
+        { name: QUEUE_NAMES.LOAN_DISBURSE, queue: this.loanDisburseQueue },
+        { name: QUEUE_NAMES.REPORT_GENERATION, queue: this.reportQueue },
+      ];
+
+      const details = await Promise.all(
+        queues.map(async ({ name, queue }) => {
+          const [counts, stalled] = await Promise.all([
+            queue.getJobCounts('waiting', 'failed'),
+            this.getStalledCount(queue),
+          ]);
+
+          return {
+            queue: name,
+            waiting: counts.waiting ?? 0,
+            failed: counts.failed ?? 0,
+            stalled,
+          };
+        }),
+      );
+
+      const unhealthy = details.filter(
+        (queue) =>
+          queue.failed > failedThreshold ||
+          queue.waiting > waitingThreshold ||
+          queue.stalled > stalledThreshold,
+      );
+
+      if (unhealthy.length > 0) {
+        throw new Error(`Critical BullMQ queue health threshold breached: ${JSON.stringify(unhealthy)}`);
+      }
+
+      return { status: 'ok' as const, queues: details };
+    });
+  }
+
+  private async getStalledCount(queue: Queue): Promise<number> {
+    try {
+      const client = await queue.client;
+      const key = queue.toKey('stalled');
+      return await client.scard(key);
+    } catch (error) {
+      throw new Error(
+        `Unable to read stalled jobs for queue ${queue.name}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   private async checkFeatureFlags() {
     return {
       status: 'ok' as const,
@@ -202,3 +269,4 @@ export class HealthController {
     return { ...result, latencyMs: Date.now() - start };
   }
 }
+

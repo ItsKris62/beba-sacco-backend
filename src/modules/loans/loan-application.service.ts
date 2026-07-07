@@ -464,16 +464,53 @@ export class LoanApplicationService {
       }
       return result;
     } catch (err) {
+      const isOneOpenLoanViolation = this.isOneOpenLoanConstraintViolation(err);
       if (
         idempotencyKey &&
-        (err instanceof BadRequestException || err instanceof ConflictException)
+        (err instanceof BadRequestException ||
+          err instanceof ConflictException ||
+          isOneOpenLoanViolation)
       ) {
         const idemKey = `loan:apply:${userId}:${memberId}:${dto.loanProductId}:${idempotencyKey}`;
         await this.idempotency.release(idemKey, tenantId);
       }
+      if (isOneOpenLoanViolation) {
+        throw this.oneOpenLoanConflict();
+      }
       throw err;
     }
   }
+
+  private oneOpenLoanConflict(): ConflictException {
+    return new ConflictException(
+      'ONE_OPEN_LOAN_ONLY: You already have an open loan. You can apply for another loan after it is fully paid.',
+    );
+  }
+
+  private isOneOpenLoanConstraintViolation(error: unknown): boolean {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const target = Array.isArray(error.meta?.target)
+        ? error.meta.target.join(',')
+        : String(error.meta?.target ?? '');
+      return (
+        target.includes('loan_one_open_per_member') ||
+        (target.includes('tenantId') && target.includes('memberId'))
+      );
+    }
+
+    const dbError = error as {
+      code?: string;
+      constraint?: string;
+      meta?: { code?: string; constraint?: string; target?: unknown };
+      cause?: { code?: string; constraint?: string };
+    };
+    const code = dbError.code ?? dbError.meta?.code ?? dbError.cause?.code;
+    const constraint =
+      dbError.constraint ?? dbError.meta?.constraint ?? dbError.cause?.constraint;
+
+    return code === '23505' && constraint === 'loan_one_open_per_member';
+  }
+
 
   private async _doMemberApply(
     dto: MemberApplyLoanDto,

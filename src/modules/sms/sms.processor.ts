@@ -30,3 +30,4 @@ export class SmsProcessor extends WorkerHost {
     }
   }
 }
+

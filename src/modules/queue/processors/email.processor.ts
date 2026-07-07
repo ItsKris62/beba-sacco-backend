@@ -338,3 +338,4 @@ export class EmailProcessor extends WorkerHost {
     };
   }
 }
+

@@ -1,5 +1,5 @@
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Logger, Optional } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Job, Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
@@ -7,7 +7,9 @@ import { Prisma, TransactionStatus, TransactionType, MpesaTxType, MpesaTriggerSo
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
+import { CacheService } from '../../../common/services/cache.service';
 import { LoanRepaymentService } from '../../loans/loan-repayment.service';
+import { MetricsService } from '../../metrics/metrics.service';
 import {
   QUEUE_NAMES,
   MpesaCallbackJobPayload,
@@ -53,8 +55,10 @@ export class MpesaCallbackProcessor extends WorkerHost {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly loanRepayment: LoanRepaymentService,
+    private readonly cache: CacheService,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)
     private readonly dlq: Queue,
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     super();
   }
@@ -188,6 +192,8 @@ export class MpesaCallbackProcessor extends WorkerHost {
         ? parseDarajaTimestamp(meta.TransactionDate)
         : new Date(),
     });
+
+    this.metrics?.recordMpesaStkPushSuccess(mpesaTx.tenantId);
 
     this.logger.log(
       `STK Push processed | receipt=${receipt} amount=${amount.toFixed(2)} ` +
@@ -599,6 +605,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
         callbackPayload: params.rawPayload,
         transactionDate: params.transactionDate,
       });
+      await this.cache.invalidateTenantDashboard(params.tenantId);
       this.audit.create({
         tenantId: params.tenantId,
         actorId: 'SYSTEM',
@@ -805,6 +812,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
     // Emit audit log after the transaction commits — fire-and-forget so a missed
     // audit event never rolls back the ledger entry.
     if (auditData) {
+      await this.cache.invalidateTenantDashboard(params.tenantId);
       const { action, entityId, balanceBefore, balanceAfter, loanId, loanNumber, isFullyPaid } = auditData;
       this.audit.create({
         tenantId: params.tenantId,
@@ -923,6 +931,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
     );
 
     if (auditData) {
+      await this.cache.invalidateTenantDashboard(params.tenantId);
       this.audit.create({
         tenantId: params.tenantId,
         actorId: 'SYSTEM',
@@ -952,6 +961,8 @@ export class MpesaCallbackProcessor extends WorkerHost {
   @OnWorkerEvent('failed')
   async onFailed(job: Job<MpesaCallbackJobPayload>): Promise<void> {
     if ((job.attemptsMade ?? 0) < (job.opts?.attempts ?? 3)) return;
+
+    this.metrics?.recordMpesaCallbackFailure(job.data.tenantId, job.data.callbackType);
 
     this.logger.error(
       `mpesa.callback job ${job.id} moved to DLQ after ${job.attemptsMade} attempts`,
@@ -1012,5 +1023,6 @@ export class MpesaCallbackProcessor extends WorkerHost {
     throw new Error(`No active account for member ${memberId} in tenant ${tenantId}`);
   }
 }
+
 
 

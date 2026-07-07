@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { PrismaService } from '../../prisma/prisma.service';
 import { maskPhone } from '../mpesa/utils/mpesa.utils';
@@ -59,10 +60,6 @@ export class SasraValidatorService {
       `SASRA audit run | start=${startDate.toISOString()} end=${endDate.toISOString()} ` +
         `tenant=${tenantId ?? 'ALL'}`,
     );
-
-    const whereClause = tenantId
-      ? `WHERE mt."tenantId" = '${tenantId}' AND mt."createdAt" >= '${startDate.toISOString()}' AND mt."createdAt" <= '${endDate.toISOString()}'`
-      : `WHERE mt."createdAt" >= '${startDate.toISOString()}' AND mt."createdAt" <= '${endDate.toISOString()}'`;
 
     const [
       allTransactions,
@@ -268,9 +265,9 @@ export class SasraValidatorService {
     endDate: Date,
     tenantId?: string,
   ): Promise<SasraMismatchEntry[]> {
-    const tenantFilter = tenantId ? `AND mt."tenantId" = '${tenantId}'` : '';
+    const tenantFilter = tenantId ? Prisma.sql`AND mt."tenantId" = ${tenantId}` : Prisma.empty;
 
-    // Detect: MpesaTransaction.amount ≠ linked Transaction.amount
+    // Detect: MpesaTransaction.amount != linked Transaction.amount
     // Also catches: COMPLETED MpesaTransaction with no linked Transaction (orphan)
     type MismatchRow = {
       mt_id: string;
@@ -282,8 +279,7 @@ export class SasraValidatorService {
       created_at: Date;
     };
 
-    const rows = await this.prisma.$queryRawUnsafe<MismatchRow[]>(
-      `
+    const rows = await this.prisma.$queryRaw<MismatchRow[]>(Prisma.sql`
       SELECT
         mt.id               AS mt_id,
         mt.reference        AS reference,
@@ -294,14 +290,14 @@ export class SasraValidatorService {
           WHEN t.id IS NULL AND mt.status = 'COMPLETED'
             THEN 'COMPLETED MpesaTransaction has no linked ledger entry'
           WHEN t.id IS NOT NULL AND ABS(mt.amount - t.amount) > 0.0001
-            THEN 'Amount drift: MpesaTransaction.amount ≠ Transaction.amount'
+            THEN 'Amount drift: MpesaTransaction.amount != Transaction.amount'
           ELSE NULL
         END AS issue,
         mt."createdAt"      AS created_at
       FROM "MpesaTransaction" mt
       LEFT JOIN "Transaction" t ON t.id = mt."transactionId"
-      WHERE mt."createdAt" >= $1
-        AND mt."createdAt" <= $2
+      WHERE mt."createdAt" >= ${startDate}
+        AND mt."createdAt" <= ${endDate}
         ${tenantFilter}
         AND (
           -- Case 1: COMPLETED but no ledger entry
@@ -312,10 +308,7 @@ export class SasraValidatorService {
         )
       ORDER BY mt."createdAt" DESC
       LIMIT 500
-      `,
-      startDate,
-      endDate,
-    );
+    `);
 
     return rows.map((row) => ({
       mpesaTxId: row.mt_id,
@@ -328,7 +321,6 @@ export class SasraValidatorService {
       detectedAt: this.toEatIso(row.created_at),
     }));
   }
-
   /**
    * Detects PENDING transactions older than 24h that have NOT transitioned to
    * FAILED or been moved to the DLQ.

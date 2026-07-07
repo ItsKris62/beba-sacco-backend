@@ -33,6 +33,7 @@ export interface AuditLogFilters {
   fromDate?: Date;
   toDate?: Date;
   limit?: number;
+  cursor?: string;
   offset?: number;
   crossTenant?: boolean;
 }
@@ -225,31 +226,38 @@ export class AuditService {
   /**
    * Query audit logs with filters and pagination.
    */
-  async findAll(filters: AuditLogFilters): Promise<{ data: AuditLogEntry[]; total: number }> {
+  async findAll(filters: AuditLogFilters): Promise<{
+    data: AuditLogEntry[];
+    nextCursor: string | null;
+    hasMore: boolean;
+  }> {
     const safeLimit = Math.min(200, Math.max(1, filters.limit ?? 50));
-    const safeOffset = Math.max(0, filters.offset ?? 0);
 
     const where = this.buildWhere(filters);
     const client = filters.crossTenant ? this.prisma.direct : this.prisma;
 
-    const [data, total] = await client.$transaction([
-      client.auditLog.findMany({
-        where,
-        orderBy: { timestamp: 'desc' },
-        skip: safeOffset,
-        take: safeLimit,
-        include: {
-          user: {
-            select: { firstName: true, lastName: true, email: true },
-          },
+    const rows = await client.auditLog.findMany({
+      where,
+      orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
+      ...(filters.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {}),
+      take: safeLimit + 1,
+      include: {
+        user: {
+          select: { firstName: true, lastName: true, email: true },
         },
-      }),
-      client.auditLog.count({ where }),
-    ]);
+      },
+    });
 
-    return { data: data.map((entry) => this.serializeEntry(entry)), total };
+    const hasMore = rows.length > safeLimit;
+    const pageRows = hasMore ? rows.slice(0, safeLimit) : rows;
+    const nextCursor = hasMore ? pageRows[pageRows.length - 1]?.id ?? null : null;
+
+    return {
+      data: pageRows.map((entry) => this.serializeEntry(entry)),
+      nextCursor,
+      hasMore,
+    };
   }
-
   async findForExport(filters: AuditLogFilters): Promise<AuditLogEntry[]> {
     const client = filters.crossTenant ? this.prisma.direct : this.prisma;
     const data = await client.auditLog.findMany({

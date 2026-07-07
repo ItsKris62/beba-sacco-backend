@@ -38,7 +38,18 @@ const REQUIRED_KYC_DOCUMENT_TYPES: DocumentType[] = [
   DocumentType.MEMBER_FORM,
 ];
 
-const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
+const ALLOWED_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+  'image/heic',
+  'image/heif',
+]);
+// Some mobile browsers/file pickers don't report a real MIME type for HEIC/HEIF
+// captures (or any file) and send "application/octet-stream" instead — mirrors
+// the same fallback the frontend applies in app/member/profile/page.tsx.
+const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.pdf', '.heic', '.heif']);
 
 const REVIEW_ROLES = new Set<UserRole>([UserRole.MANAGER, UserRole.CHAIRMAN]);
 const VIEW_ROLES = new Set<UserRole>([
@@ -93,7 +104,7 @@ export class DocumentsService {
 
     const uploadTtlSeconds = this.uploadUrlTtlSeconds(tenantId);
     const version = await this.nextDocumentVersion(tenantId, member.id, dto.type);
-    const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType);
+    const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType, dto.originalFileName);
     const expiresAt = new Date(Date.now() + uploadTtlSeconds * 1000);
     const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
     const secureUpload = this.secureUploadTokenFields(tenantId, expiresAt);
@@ -311,7 +322,7 @@ export class DocumentsService {
 
     const uploadTtlSeconds = this.uploadUrlTtlSeconds(tenantId);
     const version = await this.nextDocumentVersion(tenantId, member.id, dto.type);
-    const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType);
+    const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType, dto.originalFileName);
     const expiresAt = new Date(Date.now() + uploadTtlSeconds * 1000);
     const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
     const secureUpload = this.secureUploadTokenFields(tenantId, expiresAt);
@@ -1132,13 +1143,30 @@ export class DocumentsService {
   }
 
   private assertUploadPayload(dto: RequestDocumentUploadUrlDto): void {
-    if (!ALLOWED_MIME_TYPES.has(dto.mimeType)) {
+    const mimeTypeIsTrustworthy = dto.mimeType !== 'application/octet-stream';
+    const isAllowed = mimeTypeIsTrustworthy
+      ? ALLOWED_MIME_TYPES.has(dto.mimeType)
+      : this.hasAllowedExtension(dto.originalFileName);
+    if (!isAllowed) {
       throw new BadRequestException(`Unsupported MIME type: ${dto.mimeType}`);
     }
     const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
     if (declaredSizeBytes > MAX_DOCUMENT_UPLOAD_BYTES) {
       throw new BadRequestException(`Document exceeds ${MAX_DOCUMENT_UPLOAD_BYTES} bytes`);
     }
+  }
+
+  private hasAllowedExtension(fileName?: string): boolean {
+    return this.extensionFromFileName(fileName) !== null;
+  }
+
+  /** Returns the lowercased extension (no leading dot) if it's in the allowed set, else null. */
+  private extensionFromFileName(fileName?: string): string | null {
+    if (!fileName) return null;
+    const dotIndex = fileName.lastIndexOf('.');
+    if (dotIndex === -1) return null;
+    const extensionWithDot = fileName.slice(dotIndex).toLowerCase();
+    return ALLOWED_UPLOAD_EXTENSIONS.has(extensionWithDot) ? extensionWithDot.slice(1) : null;
   }
 
   private getDeclaredSizeBytes(dto: RequestDocumentUploadUrlDto): number {
@@ -1188,8 +1216,9 @@ export class DocumentsService {
     memberId: string,
     type: DocumentType,
     mimeType: string,
+    originalFileName?: string,
   ): string {
-    return `tenants/${tenantId}/members/${memberId}/${type.toLowerCase()}_${Date.now()}_${uuidv4()}.${this.extensionFor(mimeType)}`;
+    return `tenants/${tenantId}/members/${memberId}/${type.toLowerCase()}_${Date.now()}_${uuidv4()}.${this.extensionFor(mimeType, originalFileName)}`;
   }
 
   private assertObjectKeyOwnership(objectKey: string, tenantId: string, memberId: string): void {
@@ -1199,7 +1228,7 @@ export class DocumentsService {
     }
   }
 
-  private extensionFor(mimeType: string): string {
+  private extensionFor(mimeType: string, originalFileName?: string): string {
     switch (mimeType) {
       case 'image/jpeg':
         return 'jpg';
@@ -1209,8 +1238,17 @@ export class DocumentsService {
         return 'webp';
       case 'application/pdf':
         return 'pdf';
-      default:
+      case 'image/heic':
+        return 'heic';
+      case 'image/heif':
+        return 'heif';
+      default: {
+        // Unrecognized/octet-stream MIME types reach here only after
+        // assertUploadPayload() already validated the file extension itself.
+        const fromFileName = this.extensionFromFileName(originalFileName);
+        if (fromFileName) return fromFileName;
         throw new BadRequestException(`Unsupported MIME type: ${mimeType}`);
+      }
     }
   }
 

@@ -17,6 +17,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
+import { CacheService } from '../../common/services/cache.service';
 import { QUEUE_NAMES, type EmailJobPayload } from '../queue/queue.constants';
 import { UpdateKycDto } from './dto/update-kyc.dto';
 import { ReviewMemberDto, ReviewAction } from './dto/review-member.dto';
@@ -54,6 +55,7 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly redis: RedisService,
+    private readonly cache: CacheService,
     @InjectQueue(QUEUE_NAMES.EMAIL) private readonly emailQueue: Queue,
   ) {}
 
@@ -845,6 +847,8 @@ export class AdminService {
         flow: 'updateKyc',
       });
     }
+
+    await this.cache.invalidateTenantDashboard(tenantId);
 
     return this.withBusinessKycStatus(result.member, tenantId);
   }

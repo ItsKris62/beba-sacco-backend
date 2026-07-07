@@ -197,6 +197,7 @@ export class GuarantorResponseService {
         select: {
           id: true,
           status: true,
+          member: { select: { userId: true } },
           principalAmount: true,
           loanProduct: {
             select: {
@@ -293,7 +294,10 @@ export class GuarantorResponseService {
         guarantorId: locked.id,
         memberId: locked.memberId,
         status: nextStatus,
-        loanStatus: transition,
+        loanStatus: transition.loanStatus,
+        ...(transition.remainingCoverage !== undefined && {
+          remainingCoverage: transition.remainingCoverage,
+        }),
       };
     });
   }
@@ -350,6 +354,7 @@ export class GuarantorResponseService {
     loanId: string,
     loan: {
       status: LoanStatus;
+      member: { userId: string };
       principalAmount: Prisma.Decimal;
       loanProduct: {
         minGuarantors: number;
@@ -360,8 +365,8 @@ export class GuarantorResponseService {
     },
     actorId: string | null,
     latestStatus: GuarantorStatus,
-  ): Promise<LoanStatus> {
-    if (loan.status !== LoanStatus.PENDING_GUARANTORS) return loan.status;
+  ): Promise<{ loanStatus: LoanStatus; remainingCoverage?: number }> {
+    if (loan.status !== LoanStatus.PENDING_GUARANTORS) return { loanStatus: loan.status };
 
     const guarantors = await tx.loanGuarantor.findMany({
       where: { tenantId, loanId },
@@ -383,6 +388,9 @@ export class GuarantorResponseService {
     );
     const requiredCoverage = new Decimal(loan.principalAmount.toString()).times(
       new Decimal(loan.loanProduct.guarantorCoverageRatio?.toString() ?? '1.0'),
+    );
+    const remainingCoverage = Decimal.max(requiredCoverage.minus(totalAccepted), 0).toDecimalPlaces(
+      4,
     );
 
     const hasDecline = guarantors.some(
@@ -414,7 +422,7 @@ export class GuarantorResponseService {
           requiredCoverage: requiredCoverage.toString(),
         },
       });
-      return LoanStatus.PENDING_APPROVAL;
+      return { loanStatus: LoanStatus.PENDING_APPROVAL, remainingCoverage: 0 };
     }
 
     // Coverage/count criteria aren't met yet. Decide whether a replacement
@@ -471,7 +479,10 @@ export class GuarantorResponseService {
           requiredCoverage: requiredCoverage.toString(),
         },
       });
-      return LoanStatus.REJECTED_GUARANTOR_DECLINE;
+      return {
+        loanStatus: LoanStatus.REJECTED_GUARANTOR_DECLINE,
+        remainingCoverage: remainingCoverage.toNumber(),
+      };
     }
 
     if (hasDecline) {
@@ -488,11 +499,24 @@ export class GuarantorResponseService {
           availableReplacementSlots,
           minGuarantors: loan.loanProduct.minGuarantors,
           maxGuarantors: loan.loanProduct.maxGuarantors,
+          remainingCoverage: remainingCoverage.toString(),
+        },
+      });
+
+      await tx.inAppNotification.create({
+        data: {
+          tenantId,
+          userId: loan.member.userId,
+          title: 'Guarantor declined',
+          body:
+            `A guarantor declined your loan request. Remaining guarantor coverage required: ` +
+            `KES ${remainingCoverage.toFixed(2)}.`,
+          type: 'LOAN_GUARANTOR_DECLINED',
         },
       });
     }
 
-    return loan.status;
+    return { loanStatus: loan.status, remainingCoverage: remainingCoverage.toNumber() };
   }
 
   private async releaseAcceptedHolds(

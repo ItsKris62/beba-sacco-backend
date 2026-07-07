@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -21,6 +21,7 @@ import {
 } from '../queue/queue.constants';
 import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
 import { LoanRepaymentService } from '../loans/loan-repayment.service';
+import { MetricsService } from '../metrics/metrics.service';
 
 // ─── Redis key helpers ────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ export class MpesaService {
     private readonly b2cTimeoutQueue: Queue<MpesaB2cTimeoutJobPayload>,
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)
     private readonly callbackDlqQueue: Queue,
+    @Optional() private readonly metrics?: MetricsService,
   ) {}
 
   // ─── Member Deposit (STK Push) ──────────────────────────────────────────
@@ -152,6 +154,8 @@ export class MpesaService {
           status: TransactionStatus.PENDING,
         },
       });
+      this.metrics?.recordMpesaStkPush(tenantId);
+
 
       this.logger.log(
         `STK Push initiated | tenant=${tenantId} member=${memberId} ` +
@@ -631,6 +635,7 @@ export class MpesaService {
     return secondsUntilMidnightEAT();
   }
 }
+
 
 
 

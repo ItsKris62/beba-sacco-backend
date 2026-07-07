@@ -26,6 +26,7 @@ import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
+import { CacheService } from '../../common/services/cache.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { CreateLoanProductDto } from './dto/create-loan-product.dto';
 import { UpdateLoanProductDto } from './dto/update-loan-product.dto';
@@ -67,6 +68,7 @@ export class LoansService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly redis: RedisService,
+    private readonly cache: CacheService,
     private readonly idempotency: IdempotencyService,
     @InjectQueue(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER)
     private readonly guarantorReminderQueue: Queue<GuarantorReminderJobPayload>,
@@ -311,36 +313,35 @@ export class LoansService {
 
   async findAll(
     tenantId: string,
-    opts: { memberId?: string; status?: LoanStatus; page?: number; limit?: number } = {},
+    opts: { memberId?: string; status?: LoanStatus; cursor?: string; page?: number; limit?: number } = {},
   ) {
-    const page = Math.max(1, opts.page ?? 1);
-    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
-    const skip = (page - 1) * limit;
+    const limit = Math.min(100, Math.max(1, Number(opts.limit ?? 20)));
 
-    const where = {
+    const where: Prisma.LoanWhereInput = {
       tenantId,
       ...(opts.memberId && { memberId: opts.memberId }),
       ...(opts.status && { status: opts.status }),
     };
 
-    const [loans, total] = await this.prisma.$transaction([
-      this.prisma.loan.findMany({
-        where,
-        include: {
-          member: {
-            select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } },
-          },
-          loanProduct: { select: { name: true } },
+    const loans = await this.prisma.loan.findMany({
+      where,
+      include: {
+        member: {
+          select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } },
         },
-        skip,
-        take: limit,
-        orderBy: { appliedAt: 'desc' },
-      }),
-      this.prisma.loan.count({ where }),
-    ]);
+        loanProduct: { select: { name: true } },
+      },
+      ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
+      take: limit + 1,
+      orderBy: [{ appliedAt: 'desc' }, { id: 'desc' }],
+    });
 
-    // Guarantor coverage for the whole page in one groupBy — never loop-and-query per loan.
-    const loanIds = loans.map((loan) => loan.id);
+    const hasMore = loans.length > limit;
+    const pageRows = hasMore ? loans.slice(0, limit) : loans;
+    const nextCursor = hasMore ? pageRows[pageRows.length - 1]?.id ?? null : null;
+
+    // Guarantor coverage for the whole page in one groupBy - never loop-and-query per loan.
+    const loanIds = pageRows.map((loan) => loan.id);
     const acceptedTotals = loanIds.length
       ? await this.prisma.loanGuarantor.groupBy({
           by: ['loanId'],
@@ -355,7 +356,7 @@ export class LoansService {
       ]),
     );
 
-    const data = loans.map((loan) => {
+    const data = pageRows.map((loan) => {
       const principal = new Decimal(loan.principalAmount.toString());
       const totalGuaranteed = coverageByLoanId.get(loan.id) ?? new Decimal(0);
       const guarantorCoveragePercent = principal.isZero()
@@ -364,7 +365,12 @@ export class LoansService {
       return { ...loan, guarantorCoveragePercent };
     });
 
-    return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+    return {
+      data,
+      nextCursor,
+      hasMore,
+      meta: { limit, cursor: opts.cursor ?? null, nextCursor, hasMore },
+    };
   }
 
   // ─── FIND ONE ─────────────────────────────────────────────────
@@ -549,6 +555,8 @@ export class LoansService {
     if (requiresDualApproval) {
       await this.approvalChain.initApprovalChain(id, tenantId);
     }
+
+    await this.cache.invalidateTenantDashboard(tenantId);
 
     return { ...updated, requiresDualApproval };
   }
@@ -862,6 +870,8 @@ export class LoansService {
         `loan.disburse:${id}`,
       );
     }
+
+    await this.cache.invalidateTenantDashboard(tenantId);
 
     return disbursalResult;
   }
@@ -1400,6 +1410,8 @@ export class LoansService {
         `loan.repay:${loanId}`,
       );
     }
+
+    await this.cache.invalidateTenantDashboard(tenantId);
 
     return repayResult;
   }

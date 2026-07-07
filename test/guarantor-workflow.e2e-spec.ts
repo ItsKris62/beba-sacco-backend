@@ -1,7 +1,8 @@
+import { expect } from '@jest/globals';
 import { Decimal } from 'decimal.js';
 import { v4 as uuidv4 } from 'uuid';
 import * as argon2 from 'argon2';
-import { AccountType, UserRole } from '@prisma/client';
+import { AccountStatus, AccountType, UserRole } from '@prisma/client';
 import { GUARANTOR_EXPIRY_CHECK_JOB } from '../src/modules/queue/queue.constants';
 import { GuarantorExpiryConsumer } from '../src/modules/queue/processors/guarantor-expiry.consumer';
 import { TestAppContext, TestAppFactory } from './helpers/test-app.factory';
@@ -28,9 +29,8 @@ describe('Guarantor workflow phases 1-3', () => {
         firstName: 'Second',
         lastName: 'Guarantor',
         phone: '254744444444',
-        isActive: true,
         emailVerified: true,
-        status: 'APPROVED',
+        accountStatus: AccountStatus.ACTIVE,
       },
     });
     await ctx.prisma.member.create({
@@ -84,8 +84,31 @@ describe('Guarantor workflow phases 1-3', () => {
   }, 60000);
 
   afterAll(async () => {
-    await ctx.teardown();
+    if (ctx) await ctx.teardown();
   }, 30000);
+
+  afterEach(async () => {
+    if (!ctx) return;
+    await ctx.prisma.loan.updateMany({
+      where: {
+        tenantId: ctx.seed.tenantId,
+        memberId: ctx.seed.memberId,
+        status: {
+          in: [
+            'DRAFT',
+            'PENDING_GUARANTORS',
+            'PENDING_REVIEW',
+            'PENDING_APPROVAL',
+            'APPROVED',
+            'ACTIVE',
+            'DISBURSED',
+            'DEFAULTED',
+          ],
+        },
+      },
+      data: { status: 'FULLY_PAID', notes: 'E2E cleanup after guarantor workflow scenario' },
+    });
+  });
 
   async function applyWithTwoGuarantors(principalAmount = 30000) {
     return ctx.request()
@@ -196,6 +219,70 @@ describe('Guarantor workflow phases 1-3', () => {
     expect(JSON.stringify(audit?.payload)).toContain('Manager confirmed consent');
   });
 
+  it('edge 2b: guarantor decline leaves loan open for re-solicitation and reports remaining coverage', async () => {
+    const apply = await applyWithTwoGuarantors(24690);
+    expect(apply.status).toBe(201);
+    expect(apply.body.status).toBe('PENDING_GUARANTORS');
+
+    const firstAccept = await ctx.request()
+      .post(`/api/members/loans/${apply.body.id}/guarantor-response`)
+      .set('Authorization', `Bearer ${ctx.seed.guarantorToken}`)
+      .set('X-Tenant-ID', ctx.seed.tenantId)
+      .set('X-Idempotency-Key', `accept-decline-edge-${Date.now()}`)
+      .send({ action: 'ACCEPT', digitalAcknowledgment: true });
+    expect(firstAccept.status).toBe(200);
+    expect(firstAccept.body.loanStatus).toBe('PENDING_GUARANTORS');
+
+    const secondDecline = await ctx.request()
+      .post(`/api/members/loans/${apply.body.id}/guarantor-response`)
+      .set('Authorization', `Bearer ${secondGuarantorToken}`)
+      .set('X-Tenant-ID', ctx.seed.tenantId)
+      .set('X-Idempotency-Key', `decline-reinvite-edge-${Date.now()}`)
+      .send({ action: 'DECLINE', notes: 'Unable to guarantee this loan' });
+    expect(secondDecline.status).toBe(200);
+    expect(secondDecline.body).toMatchObject({
+      status: 'REJECTED',
+      loanStatus: 'PENDING_GUARANTORS',
+      remainingCoverage: 12345,
+    });
+
+    const loan = await ctx.prisma.loan.findFirst({
+      where: { tenantId: ctx.seed.tenantId, id: apply.body.id },
+      include: { guarantors: true },
+    });
+    expect(loan?.status).toBe('PENDING_GUARANTORS');
+    expect(loan?.guarantors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          memberId: ctx.seed.guarantorMemberId,
+          status: 'ACCEPTED',
+        }),
+        expect.objectContaining({
+          memberId: secondGuarantorMemberId,
+          status: 'REJECTED',
+        }),
+      ]),
+    );
+
+    const acceptedCoverage = (loan?.guarantors ?? [])
+      .filter((guarantor) => guarantor.status === 'ACCEPTED')
+      .reduce(
+        (sum, guarantor) => sum.plus(new Decimal(guarantor.guaranteedAmount.toString())),
+        new Decimal(0),
+      );
+    expect(new Decimal(24690).minus(acceptedCoverage).toNumber()).toBe(12345);
+
+    const notification = await ctx.prisma.inAppNotification.findFirst({
+      where: {
+        tenantId: ctx.seed.tenantId,
+        userId: ctx.seed.memberUserId,
+        type: 'LOAN_GUARANTOR_DECLINED',
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(notification?.body).toContain('12345');
+  });
+
   it('edge 3: 72h expiry auto-declines and releases accepted holds', async () => {
     const apply = await applyWithTwoGuarantors(20000);
     expect(apply.status).toBe(201);
@@ -234,7 +321,3 @@ describe('Guarantor workflow phases 1-3', () => {
     expect(new Decimal(after?.lockedBalance.toString() ?? '0').equals(lockedBefore)).toBe(true);
   });
 });
-
-function expect(status: any) {
-  throw new Error('Function not implemented.');
-}

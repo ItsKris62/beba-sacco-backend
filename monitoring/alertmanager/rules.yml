@@ -5,9 +5,9 @@ groups:
       # ── HTTP Error Rate ───────────────────────────────────────────────────
       - alert: HighErrorRate
         expr: |
-          sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m]))
+          sum(rate(beba_http_request_duration_seconds_count{status_code=~"5.."}[5m]))
           /
-          sum(rate(http_request_duration_seconds_count[5m])) > 0.01
+          sum(rate(beba_http_request_duration_seconds_count[5m])) > 0.01
         for: 5m
         labels:
           severity: critical
@@ -19,7 +19,7 @@ groups:
       - alert: HighP99Latency
         expr: |
           histogram_quantile(0.99,
-            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+            sum(rate(beba_http_request_duration_seconds_bucket[5m])) by (le)
           ) > 0.5
         for: 5m
         labels:
@@ -49,6 +49,15 @@ groups:
           description: "Connection pool utilisation: {{ $value | humanizePercentage }}."
 
       # ── M-Pesa Reconciliation Mismatch ────────────────────────────────────
+      # M-Pesa Callback Failures
+      - alert: MpesaCallbackFailures
+        expr: increase(beba_mpesa_callback_failures_total[5m]) > 3
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High rate of M-Pesa callback failures"
+          description: "More than 3 M-Pesa callback processing failures occurred in the last 5 minutes."
       - alert: ReconMismatch
         expr: sacco_recon_mismatch_total > 0
         for: 0m
@@ -90,3 +99,5 @@ groups:
         annotations:
           summary: "Synthetic health probe failing"
           description: "GET /api/health/synthetic has been failing for 2 minutes."
+
+

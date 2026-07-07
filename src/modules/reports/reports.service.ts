@@ -14,6 +14,9 @@ export interface BuiltReport {
   contentType: string;
 }
 
+const REPORT_BATCH_SIZE = 1000;
+const MAX_REPORT_ROWS = 50000;
+
 @Injectable()
 export class ReportsService {
   constructor(
@@ -154,45 +157,11 @@ export class ReportsService {
     const to = new Date(payload.filters.to);
 
     if (payload.type === 'LOAN_BOOK') {
-      const loans = await this.prisma.loan.findMany({
-        where: { tenantId: payload.tenantId, appliedAt: { gte: from, lte: to } },
-        select: {
-          loanNumber: true,
-          status: true,
-          principalAmount: true,
-          outstandingBalance: true,
-          appliedAt: true,
-          member: { select: { memberNumber: true } },
-        },
-        orderBy: { appliedAt: 'desc' },
-      });
-      return loans.map((loan) => ({
-        loanNumber: loan.loanNumber,
-        memberNumber: loan.member.memberNumber,
-        status: loan.status,
-        principalAmount: Number(loan.principalAmount),
-        outstandingBalance: Number(loan.outstandingBalance),
-        appliedAt: loan.appliedAt.toISOString(),
-      }));
+      return this.fetchLoanBookRows(payload.tenantId, from, to);
     }
 
     if (payload.type === 'MEMBER_BALANCES') {
-      const accounts = await this.prisma.account.findMany({
-        where: { tenantId: payload.tenantId, isActive: true },
-        select: {
-          accountNumber: true,
-          accountType: true,
-          balance: true,
-          member: { select: { memberNumber: true } },
-        },
-        orderBy: { accountNumber: 'asc' },
-      });
-      return accounts.map((account) => ({
-        memberNumber: account.member.memberNumber,
-        accountNumber: account.accountNumber,
-        accountType: account.accountType,
-        balance: Number(account.balance),
-      }));
+      return this.fetchMemberBalanceRows(payload.tenantId);
     }
 
     if (payload.type === 'AUDIT_TRAIL') {
@@ -236,6 +205,91 @@ export class ReportsService {
     ];
   }
 
+  private async fetchLoanBookRows(
+    tenantId: string,
+    from: Date,
+    to: Date,
+  ): Promise<Record<string, unknown>[]> {
+    const rows: Record<string, unknown>[] = [];
+    let cursor: string | undefined;
+
+    while (rows.length < MAX_REPORT_ROWS) {
+      const batch = await this.prisma.loan.findMany({
+        where: { tenantId, appliedAt: { gte: from, lte: to } },
+        select: {
+          id: true,
+          loanNumber: true,
+          status: true,
+          principalAmount: true,
+          outstandingBalance: true,
+          appliedAt: true,
+          member: { select: { memberNumber: true } },
+          loanProduct: { select: { name: true } },
+        },
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        take: Math.min(REPORT_BATCH_SIZE, MAX_REPORT_ROWS - rows.length),
+        orderBy: [{ appliedAt: 'desc' }, { id: 'desc' }],
+      });
+
+      if (batch.length === 0) break;
+
+      for (const loan of batch) {
+        rows.push({
+          loanNumber: loan.loanNumber,
+          memberNumber: loan.member.memberNumber,
+          product: loan.loanProduct.name,
+          status: loan.status,
+          principalAmount: Number(loan.principalAmount),
+          outstandingBalance: Number(loan.outstandingBalance),
+          appliedAt: loan.appliedAt.toISOString(),
+        });
+      }
+
+      cursor = batch[batch.length - 1].id;
+      if (batch.length < REPORT_BATCH_SIZE) break;
+    }
+
+    return rows;
+  }
+
+  private async fetchMemberBalanceRows(tenantId: string): Promise<Record<string, unknown>[]> {
+    const rows: Record<string, unknown>[] = [];
+    let cursor: string | undefined;
+
+    while (rows.length < MAX_REPORT_ROWS) {
+      const batch = await this.prisma.account.findMany({
+        where: { tenantId, isActive: true },
+        select: {
+          id: true,
+          accountNumber: true,
+          accountType: true,
+          balance: true,
+          frozenSavings: true,
+          member: { select: { memberNumber: true } },
+        },
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        take: Math.min(REPORT_BATCH_SIZE, MAX_REPORT_ROWS - rows.length),
+        orderBy: [{ accountNumber: 'asc' }, { id: 'asc' }],
+      });
+
+      if (batch.length === 0) break;
+
+      for (const account of batch) {
+        rows.push({
+          accountNumber: account.accountNumber,
+          memberNumber: account.member.memberNumber,
+          accountType: account.accountType,
+          balance: Number(account.balance),
+          frozenSavings: Number(account.frozenSavings),
+        });
+      }
+
+      cursor = batch[batch.length - 1].id;
+      if (batch.length < REPORT_BATCH_SIZE) break;
+    }
+
+    return rows;
+  }
   private toCsv(rows: Record<string, unknown>[]): string {
     if (rows.length === 0) return 'message\nNo records found\n';
     const headers = Object.keys(rows[0]);
@@ -272,3 +326,4 @@ export class ReportsService {
     });
   }
 }
+

@@ -54,6 +54,7 @@ import { StorageModule } from '../storage/storage.module';
 import { GuarantorValidationService } from '../loans/guarantor-validation.service';
 import { AlertsService } from '../alerts/alerts.service';
 import { SmsModule } from '../sms/sms.module';
+import { MetricsModule } from '../metrics/metrics.module';
 import { SmsProcessor } from '../sms/sms.processor';
 import { RepaymentReminderProcessor } from '../notifications/processors/repayment-reminder.processor';
 import { GuarantorRecoveryProcessor } from '../notifications/processors/guarantor-recovery.processor';
@@ -378,6 +379,7 @@ class QueueStartupDiagnostics implements OnModuleInit {
     ReportsModule,
     StorageModule,
     SmsModule,
+    MetricsModule,
   ],
   providers: [
     { provide: QUEUE_MODULE_MODE, useValue: 'web' },
@@ -402,3 +404,4 @@ export class QueueModule {
     };
   }
 }
+

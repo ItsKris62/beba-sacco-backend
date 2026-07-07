@@ -157,16 +157,18 @@ export class LoansController {
   })
   @ApiQuery({ name: 'memberId', required: false })
   @ApiQuery({ name: 'status', required: false, enum: LoanStatus })
-  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'cursor', required: false, type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Deprecated; use cursor' })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   findAll(
     @CurrentTenant() tenant: Tenant,
     @Query('memberId') memberId?: string,
     @Query('status') status?: LoanStatus,
+    @Query('cursor') cursor?: string,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
   ) {
-    return this.loans.findAll(tenant.id, { memberId, status, page, limit });
+    return this.loans.findAll(tenant.id, { memberId, status, cursor, page, limit });
   }
 
   @Get(':id')

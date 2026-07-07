@@ -13,6 +13,7 @@ import { AuditModule } from '../audit/audit.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { isWorkerRuntime } from '../queue/worker-runtime';
 import { LoansModule } from '../loans/loans.module';
+import { MetricsModule } from '../metrics/metrics.module';
 
 const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   ? [
@@ -54,6 +55,7 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   imports: [
     AuditModule,
     LoansModule,
+    MetricsModule,
     // Queue registrations (connection inherited from BullModule.forRootAsync in QueueModule)
     BullModule.registerQueue(
       { name: QUEUE_NAMES.MPESA_CALLBACK },
@@ -77,3 +79,4 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   exports: [MpesaService, DarajaClientService, MpesaTenantResolverService],
 })
 export class MpesaModule {}
+

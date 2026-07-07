@@ -25,6 +25,7 @@ export class MetricsService implements OnModuleInit {
   readonly loansRepaid: client.Counter<string>;
   readonly mpesaStkPushTotal: client.Counter<string>;
   readonly mpesaStkPushSuccess: client.Counter<string>;
+  readonly mpesaCallbackFailures: client.Counter<string>;
   readonly emailQueueTotal: client.Counter<string>;
 
   constructor() {
@@ -65,12 +66,21 @@ export class MetricsService implements OnModuleInit {
     this.mpesaStkPushTotal = new client.Counter({
       name: 'beba_mpesa_stk_push_total',
       help: 'Total M-Pesa STK push requests initiated',
+      labelNames: ['tenant_id'],
       registers: [this.registry],
     });
 
     this.mpesaStkPushSuccess = new client.Counter({
       name: 'beba_mpesa_stk_push_success_total',
       help: 'Total successful M-Pesa STK push callbacks',
+      labelNames: ['tenant_id'],
+      registers: [this.registry],
+    });
+
+    this.mpesaCallbackFailures = new client.Counter({
+      name: 'beba_mpesa_callback_failures_total',
+      help: 'Total M-Pesa callback processing failures',
+      labelNames: ['tenant_id', 'type'],
       registers: [this.registry],
     });
 
@@ -86,7 +96,38 @@ export class MetricsService implements OnModuleInit {
     // Registry is fully configured by constructor — nothing async needed here.
   }
 
+  recordMpesaStkPush(tenantId: string): void {
+    this.mpesaStkPushTotal.inc({ tenant_id: tenantId });
+  }
+
+  recordMpesaStkPushSuccess(tenantId: string): void {
+    this.mpesaStkPushSuccess.inc({ tenant_id: tenantId });
+  }
+
+  recordMpesaCallbackFailure(tenantId: string | undefined, type: string | undefined): void {
+    this.mpesaCallbackFailures.inc({
+      tenant_id: tenantId || 'unresolved',
+      type: this.normalizeCallbackType(type),
+    });
+  }
+
+  private normalizeCallbackType(type: string | undefined): string {
+    switch (type) {
+      case 'STK_PUSH':
+        return 'stk_push';
+      case 'C2B':
+        return 'c2b';
+      case 'B2C_RESULT':
+        return 'b2c';
+      case 'B2C_TIMEOUT':
+        return 'b2c_timeout';
+      default:
+        return 'unknown';
+    }
+  }
   async getMetrics(): Promise<string> {
     return this.registry.metrics();
   }
 }
+
+

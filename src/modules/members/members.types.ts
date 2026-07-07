@@ -6,5 +6,7 @@ export type Member = PrismaMember & {
 
 export interface PaginatedResponse<T> {
   data: T[];
-  meta: { total: number; page: number; limit: number; totalPages: number };
+  nextCursor: string | null;
+  hasMore: boolean;
+  meta: { limit: number; cursor: string | null; nextCursor: string | null; hasMore: boolean };
 }

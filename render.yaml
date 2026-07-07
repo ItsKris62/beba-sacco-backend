@@ -20,9 +20,9 @@ services:
     plan: starter
     region: oregon
     autoDeploy: true
-    buildCommand: npm install --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    buildCommand: npm ci --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
     preDeployCommand: npx prisma migrate deploy --schema=src/prisma/schema.prisma
-    startCommand: npm run start:prod
+    startCommand: node dist/main
     healthCheckPath: /api/health/ping
     envVars:
       - key: NODE_ENV
@@ -40,6 +40,10 @@ services:
           name: beba-postgres
           property: connectionString
       - key: DIRECT_URL
+        fromDatabase:
+          name: beba-postgres
+          property: connectionString
+      - key: DATABASE_DIRECT_URL
         fromDatabase:
           name: beba-postgres
           property: connectionString
@@ -156,8 +160,8 @@ services:
     plan: starter
     region: oregon
     autoDeploy: true
-    buildCommand: npm install --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
-    startCommand: npm run start:worker:prod
+    buildCommand: npm ci --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    startCommand: node dist/worker
     envVars:
       - key: NODE_ENV
         value: production
@@ -168,6 +172,10 @@ services:
           name: beba-postgres
           property: connectionString
       - key: DIRECT_URL
+        fromDatabase:
+          name: beba-postgres
+          property: connectionString
+      - key: DATABASE_DIRECT_URL
         fromDatabase:
           name: beba-postgres
           property: connectionString
@@ -259,3 +267,4 @@ services:
         sync: false
       - key: PAGERDUTY_INTEGRATION_KEY
         sync: false
+

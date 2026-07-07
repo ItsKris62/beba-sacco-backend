@@ -1,0 +1,3 @@
+CREATE UNIQUE INDEX IF NOT EXISTS "loan_one_open_per_member"
+ON "Loan" ("tenantId", "memberId")
+WHERE "status" IN ('DRAFT', 'PENDING_GUARANTORS', 'PENDING_REVIEW', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'DISBURSED', 'DEFAULTED');

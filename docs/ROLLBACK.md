@@ -90,7 +90,7 @@ render env set -e production -s beba-sacco-api SENTRY_TRACES_SAMPLE_RATE=0
 render env set -e production -s beba-sacco-api LOG_LEVEL=info
 ```
 
-Frontend upload polish has no feature flag because it preserves the existing API contract. If a UI-only regression appears, redeploy the previous Netlify build while keeping backend flags unchanged.
+Frontend upload polish has no feature flag because it preserves the existing API contract. If a UI-only regression appears, redeploy the previous Vercel build while keeping backend flags unchanged.
 
 ## Escalation Contacts
 

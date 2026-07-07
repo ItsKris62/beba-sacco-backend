@@ -35,7 +35,8 @@ export class AuditController {
       'Returns paginated audit logs for the current tenant. ' +
       'Accessible by TENANT_ADMIN, MANAGER, and AUDITOR roles.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'cursor', required: false, type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1, description: 'Deprecated; use cursor' })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
   @ApiQuery({ name: 'action', required: false, type: String, example: 'AUTH.LOGIN' })
   @ApiQuery({ name: 'entityType', required: false, type: String, example: 'Loan' })
@@ -52,6 +53,7 @@ export class AuditController {
   findAll(
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() user: AuthenticatedUser,
+    @Query('cursor') cursor?: string,
     @Query('page') page = 1,
     @Query('limit') limit = 50,
     @Query('action') action?: string,
@@ -66,7 +68,6 @@ export class AuditController {
   ) {
     const safePage = Math.max(1, Number(page));
     const safeLimit = Math.min(200, Math.max(1, Number(limit)));
-    const offset = (safePage - 1) * safeLimit;
 
     const fromDate = from ? new Date(from) : undefined;
     let toDate: Date | undefined;
@@ -88,16 +89,13 @@ export class AuditController {
       fromDate,
       toDate,
       limit: safeLimit,
-      offset,
+      cursor,
       crossTenant: isSuperAdmin,
     }).then((result) => ({
       data: result.data,
-      meta: {
-        page: safePage,
-        limit: safeLimit,
-        total: result.total,
-        totalPages: Math.ceil(result.total / safeLimit),
-      },
+      nextCursor: result.nextCursor,
+      hasMore: result.hasMore,
+      meta: { limit: safeLimit, cursor: cursor ?? null, nextCursor: result.nextCursor, hasMore: result.hasMore },
     }));
   }
   @Get('export')
@@ -239,7 +237,8 @@ export class AdminAuditController {
       'Admin compatibility endpoint for paginated audit visibility. ' +
       'Accessible only to SUPER_ADMIN and TENANT_ADMIN roles.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'cursor', required: false, type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1, description: 'Deprecated; use cursor' })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
   @ApiQuery({ name: 'userId', required: false, type: String })
   @ApiQuery({ name: 'action', required: false, type: String, example: 'LOAN.APPLY' })
@@ -249,6 +248,7 @@ export class AdminAuditController {
   findAdminAuditLogs(
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() user: AuthenticatedUser,
+    @Query('cursor') cursor?: string,
     @Query('page') page = 1,
     @Query('limit') limit = 50,
     @Query('userId') userId?: string,
@@ -263,7 +263,6 @@ export class AdminAuditController {
   ) {
     const safePage = Math.max(1, Number(page));
     const safeLimit = Math.min(200, Math.max(1, Number(limit)));
-    const offset = (safePage - 1) * safeLimit;
 
     const fromDate = startDate ? new Date(startDate) : undefined;
     const toDate = endDate ? new Date(endDate) : undefined;
@@ -285,17 +284,14 @@ export class AdminAuditController {
         fromDate,
         toDate,
         limit: safeLimit,
-        offset,
+        cursor,
         crossTenant: isSuperAdmin,
       })
       .then((result) => ({
         data: result.data,
-        meta: {
-          page: safePage,
-          limit: safeLimit,
-          total: result.total,
-          totalPages: Math.ceil(result.total / safeLimit),
-        },
+        nextCursor: result.nextCursor,
+        hasMore: result.hasMore,
+        meta: { limit: safeLimit, cursor: cursor ?? null, nextCursor: result.nextCursor, hasMore: result.hasMore },
       }));
   }
 }

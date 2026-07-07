@@ -164,11 +164,9 @@ export class MembersService {
 
   async findAll(
     tenantId: string,
-    opts: { page?: number; limit?: number; search?: string; isActive?: boolean },
+    opts: { page?: number; limit?: number; cursor?: string; search?: string; isActive?: boolean },
   ): Promise<PaginatedResponse<Member>> {
-    const page = Math.max(1, opts.page ?? 1);
-    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
-    const skip = (page - 1) * limit;
+    const limit = Math.min(100, Math.max(1, Number(opts.limit ?? 20)));
 
     const where = {
       tenantId,
@@ -183,23 +181,25 @@ export class MembersService {
       }),
     };
 
-    const [data, total] = await this.prisma.$transaction([
-      this.prisma.member.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { joinedAt: 'desc' },
-        include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
-      }),
-      this.prisma.member.count({ where }),
-    ]);
+    const rows = await this.prisma.member.findMany({
+      where,
+      ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
+      take: limit + 1,
+      orderBy: [{ joinedAt: 'desc' }, { id: 'desc' }],
+      include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
+    });
+
+    const hasMore = rows.length > limit;
+    const data = (hasMore ? rows.slice(0, limit) : rows) as Member[];
+    const nextCursor = hasMore ? data[data.length - 1]?.id ?? null : null;
 
     return {
-      data: data as Member[],
-      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+      data,
+      nextCursor,
+      hasMore,
+      meta: { limit, cursor: opts.cursor ?? null, nextCursor, hasMore },
     };
   }
-
   // ─── FIND ONE ────────────────────────────────────────────────
 
   async findOne(id: string, tenantId: string): Promise<Member> {

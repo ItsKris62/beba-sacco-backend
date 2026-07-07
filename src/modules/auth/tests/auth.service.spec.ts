@@ -19,6 +19,7 @@ import { PasswordPolicyService } from '../password-policy.service';
 import { PinService } from '../../pin/pin.service';
 
 jest.mock('argon2', () => ({
+  argon2id: 2,
   verify: jest.fn(),
   hash: jest.fn(),
 }));
@@ -329,6 +330,46 @@ describe('AuthService', () => {
       ).rejects.toThrow(ConflictException);
     });
 
+
+    it('hashes new passwords with Argon2id parameters', async () => {
+      jest.mocked(argon2.hash)
+        .mockResolvedValueOnce('$argon2id$v=19$m=65536,t=3,p=1$registration')
+        .mockResolvedValueOnce('$argon2id$v=19$m=65536,t=3,p=1$refresh');
+      mockPrismaService.user.findFirst.mockResolvedValue(null);
+      mockPrismaService.user.create.mockResolvedValue({
+        id: 'registered-user-id',
+        email: 'new@test.com',
+        phone: '254700000000',
+        phoneNumber: null,
+        role: UserRole.MEMBER,
+        firstName: 'New',
+        lastName: 'Member',
+        tenantId: TENANT_ID,
+        mustChangePassword: false,
+      });
+      mockPrismaService.user.update.mockResolvedValue({});
+
+      await service.register(
+        {
+          email: 'NEW@Test.com',
+          password: 'StrongPass123!',
+          firstName: 'New',
+          lastName: 'Member',
+          phone: '254700000000',
+        },
+        TENANT_ID,
+      );
+
+      expect(argon2.hash).toHaveBeenNthCalledWith(1, 'StrongPass123!', {
+        type: argon2.argon2id,
+        memoryCost: 65536,
+        timeCost: 3,
+        parallelism: 1,
+      });
+      expect(String(mockPrismaService.user.create.mock.calls[0][0].data.passwordHash)).toMatch(
+        /^\$argon2id\$/,
+      );
+    });
     // TODO: assert role is always MEMBER regardless of what is passed
     it.todo('always creates user with MEMBER role');
 

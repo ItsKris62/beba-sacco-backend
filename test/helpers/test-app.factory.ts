@@ -23,7 +23,7 @@ import request from 'supertest';
 import { AppModule } from '../../src/app.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { RedisService } from '../../src/common/services/redis.service';
-import { UserRole, LoanStatus, GuarantorStatus, AccountType } from '@prisma/client';
+import { AccountStatus, UserRole, LoanStatus, GuarantorStatus, AccountType } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { v4 as uuidv4 } from 'uuid';
 import * as argon2 from 'argon2';
@@ -101,6 +101,8 @@ export class TestAppFactory {
     const prisma = app.get(PrismaService);
     const redis = app.get(RedisService);
 
+    await this.ensureSchemaPermissions(prisma);
+
     // Clean slate
     await this.cleanDatabase(prisma);
     await redis.delPattern('idempotency:*');
@@ -144,6 +146,24 @@ export class TestAppFactory {
     const scheduler = app.get(SchedulerRegistry, { strict: false });
     for (const name of scheduler.getCronJobs().keys()) {
       scheduler.deleteCronJob(name);
+    }
+  }
+
+  private static async ensureSchemaPermissions(prisma: PrismaService): Promise<void> {
+    const grants = [
+      'GRANT ALL ON SCHEMA public TO neondb_owner;',
+      'GRANT ALL ON ALL TABLES IN SCHEMA public TO neondb_owner;',
+      'GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO neondb_owner;',
+    ];
+
+    for (const grant of grants) {
+      try {
+        await prisma.$executeRawUnsafe(grant);
+      } catch {
+        // Local Docker users may not have or need the Neon role. If the active
+        // E2E connection is the underprivileged Neon role, the following seed
+        // query will still fail with the real permission error.
+      }
     }
   }
   private static async cleanDatabase(prisma: PrismaService): Promise<void> {
@@ -265,9 +285,8 @@ export class TestAppFactory {
         firstName: 'Admin',
         lastName: 'User',
         phone: '254711111111',
-        isActive: true,
         emailVerified: true,
-        status: 'APPROVED',
+        accountStatus: AccountStatus.ACTIVE,
       },
     });
 
@@ -283,9 +302,8 @@ export class TestAppFactory {
         firstName: 'Member',
         lastName: 'User',
         phone: '254722222222',
-        isActive: true,
         emailVerified: true,
-        status: 'APPROVED',
+        accountStatus: AccountStatus.ACTIVE,
       },
     });
 
@@ -385,9 +403,8 @@ export class TestAppFactory {
         firstName: 'Guarantor',
         lastName: 'User',
         phone: '254733333333',
-        isActive: true,
         emailVerified: true,
-        status: 'APPROVED',
+        accountStatus: AccountStatus.ACTIVE,
       },
     });
 

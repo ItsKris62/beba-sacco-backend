@@ -44,18 +44,20 @@ export class MembersController {
   @Get()
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR)
   @ApiOperation({ summary: 'List members (paginated, tenant-scoped)' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'cursor', required: false, type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Deprecated; use cursor' })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'search', required: false, type: String })
   @ApiQuery({ name: 'isActive', required: false, type: Boolean })
   findAll(
     @CurrentTenant() tenant: Tenant,
+    @Query('cursor') cursor?: string,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
     @Query('search') search?: string,
     @Query('isActive') isActive?: boolean,
   ) {
-    return this.members.findAll(tenant.id, { page, limit, search, isActive });
+    return this.members.findAll(tenant.id, { cursor, page, limit, search, isActive });
   }
 
   @Get(':id')
