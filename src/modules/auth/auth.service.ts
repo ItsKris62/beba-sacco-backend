@@ -31,6 +31,8 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { PasswordResetMethod, PasswordResetRequestDto } from './dto/password-reset-request.dto';
 import { PasswordResetVerifyDto } from './dto/password-reset-verify.dto';
 import { VerifyPinDto } from './dto/verify-pin.dto';
+import { VerifyLoginOtpDto } from './dto/verify-login-otp.dto';
+import { ResendLoginOtpDto } from './dto/resend-login-otp.dto';
 import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
 import { ResetPasswordConfirmDto } from './dto/reset-password-confirm.dto';
 import type { JwtPayload } from './strategies/jwt.strategy';
@@ -216,6 +218,7 @@ export class AuthService {
           tenantId: true,
           mustChangePassword: true,
           pinLoginRequired: true,
+          phoneVerified: true,
           lastPasswordChangeAt: true,
           twoFactorEnabled: true,
           totpEnrolledAt: true,
@@ -281,6 +284,43 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    // First-login temp-password accounts must verify phone ownership via a 6-digit
+    // SMS OTP before tokens are issued. Scoped to mustChangePassword (not just
+    // !phoneVerified) so already-onboarded accounts — which also default to
+    // phoneVerified=false unless they went through this or the legacy PIN flow —
+    // are never affected; this only ever fires for genuinely new accounts.
+    if (user.mustChangePassword && !user.phoneVerified) {
+      const phone = user.phone ?? user.phoneNumber;
+      if (!phone) {
+        throw new UnauthorizedException('No phone number on file for verification');
+      }
+      const otp = await this.otpService.generate(phone);
+      await this.smsService.enqueueSms(
+        {
+          type: 'LOGIN_OTP',
+          phone,
+          message: `Your Beba SACCO verification code is ${otp}. It expires in 30 minutes. Do not share this with anyone.`,
+        },
+        `auth.login_otp:${user.id}`,
+      );
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: 'AUTH.LOGIN.PHONE_VERIFICATION_REQUIRED',
+        resource: 'User',
+        resourceId: user.id,
+        metadata: { reason: 'phone_not_verified' },
+        ipAddress,
+      });
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'Phone verification required',
+        requiresPhoneVerification: true,
+        phone,
+      });
+    }
+
     const enforceEmailVerification =
       this.configService.get<string>('app.features.emailVerificationEnforced') === 'true';
     if (enforceEmailVerification && !user.emailVerified) {
@@ -342,7 +382,12 @@ export class AuthService {
         });
       }
       if (loginDto.backupCode) {
-        await this.twoFactorService.verifyBackupCode(user.id, tenantId, loginDto.backupCode, ipAddress);
+        await this.twoFactorService.verifyBackupCode(
+          user.id,
+          tenantId,
+          loginDto.backupCode,
+          ipAddress,
+        );
       } else if (loginDto.totpToken) {
         await this.twoFactorService.verifyToken(user.id, loginDto.totpToken, tenantId);
       }
@@ -419,7 +464,11 @@ export class AuthService {
    * the client straight to PATCH /auth/change-password, which clears both
    * mustChangePassword and pinLoginRequired once a real password is set.
    */
-  async verifyPin(dto: VerifyPinDto, tenantId: string, ipAddress?: string): Promise<LoginResponseDto> {
+  async verifyPin(
+    dto: VerifyPinDto,
+    tenantId: string,
+    ipAddress?: string,
+  ): Promise<LoginResponseDto> {
     await this.assertTenantAcceptsLogin(tenantId);
 
     const normalizedPhone = dto.phone.trim().replace(/^\+/, '');
@@ -517,6 +566,156 @@ export class AuthService {
       requiresPasswordChange: candidate.mustChangePassword,
       user: this.toUserDto(candidate),
     };
+  }
+
+  // ─────────────────────────── VERIFY LOGIN OTP (phone verification) ───────────────────────────
+
+  /**
+   * Verify the 6-digit SMS OTP required after a first-time temp-password login
+   * (see the mustChangePassword + !phoneVerified gate in login()). On success,
+   * marks the phone verified and issues a full session, exactly like login().
+   */
+  async verifyLoginOtp(
+    dto: VerifyLoginOtpDto,
+    tenantId: string,
+    ipAddress?: string,
+  ): Promise<LoginResponseDto> {
+    await this.assertTenantAcceptsLogin(tenantId);
+
+    const normalizedPhone = dto.phone.trim().replace(/^\+/, '');
+
+    const candidate = await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.findFirst({
+        where: {
+          AND: [
+            { OR: [{ phone: normalizedPhone }, { phoneNumber: normalizedPhone }] },
+            { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] },
+          ],
+        },
+        select: {
+          id: true,
+          email: true,
+          phone: true,
+          phoneNumber: true,
+          role: true,
+          accountStatus: true,
+          firstName: true,
+          lastName: true,
+          tenantId: true,
+          mustChangePassword: true,
+        },
+      }),
+    );
+
+    if (!candidate || candidate.accountStatus !== AccountStatus.ACTIVE) {
+      await this.writeAuditSafe({
+        tenantId,
+        action: 'AUTH.LOGIN_OTP.FAILED',
+        resource: 'User',
+        metadata: {
+          reason: candidate ? 'account_inactive' : 'user_not_found',
+          phone: maskPhone(normalizedPhone),
+        },
+        ipAddress,
+      });
+      this.trackFailedAttemptAsync(tenantId, normalizedPhone, ipAddress);
+      throw new UnauthorizedException('Invalid phone number or code');
+    }
+
+    const valid = await this.otpService.validate(normalizedPhone, dto.otp);
+
+    if (!valid) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: candidate.id,
+        action: 'AUTH.LOGIN_OTP.FAILED',
+        resource: 'User',
+        resourceId: candidate.id,
+        metadata: { reason: 'invalid_or_expired_otp' },
+        ipAddress,
+      });
+      this.trackFailedAttemptAsync(tenantId, normalizedPhone, ipAddress);
+      throw new UnauthorizedException('Invalid or expired code');
+    }
+
+    const { accessToken, refreshToken } = this.generateTokens({
+      id: candidate.id,
+      email: candidate.email,
+      phone: candidate.phone ?? candidate.phoneNumber ?? null,
+      role: candidate.role,
+      tenantId: candidate.tenantId,
+    });
+
+    const refreshHash = await argon2.hash(refreshToken);
+
+    await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.update({
+        where: { id: candidate.id },
+        data: { phoneVerified: true, refreshToken: refreshHash, lastLoginAt: new Date() },
+      }),
+    );
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: candidate.id,
+      action: 'AUTH.LOGIN_OTP.VERIFIED',
+      resource: 'User',
+      resourceId: candidate.id,
+      metadata: { email: candidate.email, role: candidate.role },
+      ipAddress,
+    });
+
+    return {
+      accessToken,
+      refreshToken,
+      migrateRefreshToken: true,
+      requiresPasswordChange: candidate.mustChangePassword,
+      user: this.toUserDto(candidate),
+    };
+  }
+
+  /** Regenerate and re-send the login OTP — rate-limited at the controller. */
+  async resendLoginOtp(
+    dto: ResendLoginOtpDto,
+    tenantId: string,
+    ipAddress?: string,
+  ): Promise<void> {
+    const normalizedPhone = dto.phone.trim().replace(/^\+/, '');
+
+    const candidate = await tenantAsyncStorage.run(undefined, () =>
+      this.prisma.user.findFirst({
+        where: {
+          AND: [
+            { OR: [{ phone: normalizedPhone }, { phoneNumber: normalizedPhone }] },
+            { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] },
+          ],
+        },
+        select: { id: true },
+      }),
+    );
+
+    // Always behave the same whether or not the phone is registered, to avoid
+    // leaking account existence — mirrors requestPasswordResetSms's approach.
+    if (!candidate) return;
+
+    const otp = await this.otpService.generate(normalizedPhone);
+    await this.smsService.enqueueSms(
+      {
+        type: 'LOGIN_OTP',
+        phone: normalizedPhone,
+        message: `Your Beba SACCO verification code is ${otp}. It expires in 30 minutes. Do not share this with anyone.`,
+      },
+      `auth.resend_login_otp:${candidate.id}`,
+    );
+
+    await this.writeAuditSafe({
+      tenantId,
+      userId: candidate.id,
+      action: 'AUTH.LOGIN_OTP.RESENT',
+      resource: 'User',
+      resourceId: candidate.id,
+      ipAddress,
+    });
   }
 
   // ─────────────────────────── REGISTER ───────────────────────────
@@ -1059,11 +1258,7 @@ export class AuthService {
     const identifier = this.normalizePasswordResetIdentifier(dto.method, dto.identifier);
     await this.assertPasswordResetRequestAllowed(identifier, ipAddress);
 
-    const user = await this.findUserByPasswordResetIdentifier(
-      dto.method,
-      identifier,
-      tenantId,
-    );
+    const user = await this.findUserByPasswordResetIdentifier(dto.method, identifier, tenantId);
     const otpKey = user ? this.resolveOtpKey(dto.method, identifier, user) : null;
 
     await this.writeAuditSafe({
@@ -1135,11 +1330,7 @@ export class AuthService {
   ): Promise<void> {
     this.assertLegacyAuthEndpointsEnabled();
     const identifier = this.normalizePasswordResetIdentifier(dto.method, dto.identifier);
-    const user = await this.findUserByPasswordResetIdentifier(
-      dto.method,
-      identifier,
-      tenantId,
-    );
+    const user = await this.findUserByPasswordResetIdentifier(dto.method, identifier, tenantId);
     const otpKey = user ? this.resolveOtpKey(dto.method, identifier, user) : null;
 
     if (!user || !otpKey) {
@@ -1271,7 +1462,12 @@ export class AuthService {
 
     if (!user) return;
 
-    await this.pinService.generateAndIssuePin(user.id, tenantId, PinPurpose.PASSWORD_RESET, ipAddress);
+    await this.pinService.generateAndIssuePin(
+      user.id,
+      tenantId,
+      PinPurpose.PASSWORD_RESET,
+      ipAddress,
+    );
   }
 
   /**
@@ -1573,7 +1769,9 @@ export class AuthService {
     identifier: string,
   ): string {
     const trimmed = identifier.trim();
-    return method === PasswordResetMethod.EMAIL ? trimmed.toLowerCase() : this.formatPhoneForOtp(trimmed);
+    return method === PasswordResetMethod.EMAIL
+      ? trimmed.toLowerCase()
+      : this.formatPhoneForOtp(trimmed);
   }
 
   private formatPhoneForOtp(phone?: string | null): string {
@@ -1600,7 +1798,6 @@ export class AuthService {
 
     return `${localPart.slice(0, 2)}***@${domain}`;
   }
-
 
   /**
    * Legacy email-link and legacy email/SMS-OTP reset flows are superseded by the
@@ -1707,4 +1904,3 @@ export class AuthService {
     }
   }
 }
-

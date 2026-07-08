@@ -18,10 +18,13 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
 
   const manager = { id: 'actor-id', role: UserRole.MANAGER };
 
+  let smsServiceMock: any;
+
   beforeEach(() => {
     prismaMock = {
       user: {
         findFirst: jest.fn(),
+        create: jest.fn(),
         update: jest.fn().mockImplementation(({ data }: { data: unknown }) => ({
           id: 'target-id',
           ...(data as Record<string, unknown>),
@@ -34,7 +37,67 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       validatePin: jest.fn(),
       regenerateAndRevealPin: jest.fn(),
     } as any;
-    service = new UsersService(prismaMock, auditMock, {} as any, pinServiceMock, { add: jest.fn() } as any);
+    smsServiceMock = { enqueueSms: jest.fn().mockResolvedValue(true) };
+    service = new UsersService(
+      prismaMock,
+      auditMock,
+      {} as any,
+      pinServiceMock,
+      smsServiceMock,
+      { add: jest.fn() } as any,
+    );
+  });
+
+  describe('create()', () => {
+    const newUserDto = {
+      email: 'newteller@example.com',
+      firstName: 'New',
+      lastName: 'Teller',
+      phone: '+254700000000',
+      role: UserRole.TELLER,
+    } as any;
+
+    it('generates a temp password, hashes it, and enqueues an SMS instead of using PinService', async () => {
+      prismaMock.user.findFirst.mockResolvedValue(null); // email not already registered
+      prismaMock.user.create.mockResolvedValue({ id: 'new-user-id', ...newUserDto });
+
+      const result = await service.create(newUserDto, 'tenant-1', manager);
+
+      expect(result.success).toBe(true);
+      expect(typeof result.temporaryPassword).toBe('string');
+      expect(result.temporaryPassword.length).toBeGreaterThanOrEqual(12);
+      expect(result.smsEnqueued).toBe(true);
+
+      const { data } = prismaMock.user.create.mock.calls[0][0];
+      expect(data.passwordHash).toMatch(/^\$argon2id\$/);
+      expect(data.mustChangePassword).toBe(true);
+      expect(data.pinLoginRequired).toBeUndefined(); // no longer set — PIN flow retired for new accounts
+
+      expect(smsServiceMock.enqueueSms).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'TEMP_PASSWORD', phone: newUserDto.phone }),
+        expect.any(String),
+      );
+    });
+
+    it('reports smsEnqueued: false (without failing the request) when the SMS queue is down', async () => {
+      prismaMock.user.findFirst.mockResolvedValue(null);
+      prismaMock.user.create.mockResolvedValue({ id: 'new-user-id', ...newUserDto });
+      smsServiceMock.enqueueSms.mockResolvedValueOnce(false);
+
+      const result = await service.create(newUserDto, 'tenant-1', manager);
+
+      expect(result.success).toBe(true);
+      expect(result.smsEnqueued).toBe(false);
+      expect(typeof result.temporaryPassword).toBe('string');
+    });
+
+    it('blocks MANAGER from creating a TENANT_ADMIN account', async () => {
+      await expect(
+        service.create({ ...newUserDto, role: UserRole.TENANT_ADMIN }, 'tenant-1', manager),
+      ).rejects.toThrow(ForbiddenException);
+
+      expect(prismaMock.user.create).not.toHaveBeenCalled();
+    });
   });
 
   describe('update()', () => {

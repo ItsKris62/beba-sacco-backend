@@ -11,6 +11,7 @@ import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { SmsService } from '../sms/sms.service';
 import { ApproveApplicationDto, RejectApplicationDto } from './dto/review-application.dto';
 
 /**
@@ -47,6 +48,7 @@ export class OnboardingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly smsService: SmsService,
   ) {}
 
   // ─── APPROVE ─────────────────────────────────────────────────────────────────
@@ -140,8 +142,7 @@ export class OnboardingService {
 
     // Derive email
     const email =
-      dto.email?.toLowerCase() ??
-      `member.${app.idNumber}@${tenantId.slice(0, 8)}.beba.local`;
+      dto.email?.toLowerCase() ?? `member.${app.idNumber}@${tenantId.slice(0, 8)}.beba.local`;
 
     const dupEmail = await this.prisma.user.findFirst({
       where: { email },
@@ -163,14 +164,16 @@ export class OnboardingService {
 
     // ── Atomic transaction with retry on number collision ─────────────────────
     const MAX_ATTEMPTS = 3;
-    let result: {
-      user: { id: string; email: string; firstName: string; lastName: string };
-      member: { id: string; memberNumber: string };
-      accounts: { id: string; accountNumber: string; accountType: string }[];
-      stage: { id: string; name: string };
-      assignment: { id: string; position: string };
-      tempPassword: string;
-    } | undefined;
+    let result:
+      | {
+          user: { id: string; email: string; firstName: string; lastName: string };
+          member: { id: string; memberNumber: string };
+          accounts: { id: string; accountNumber: string; accountType: string }[];
+          stage: { id: string; name: string };
+          assignment: { id: string; position: string };
+          tempPassword: string;
+        }
+      | undefined;
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const memberNumber = this.generateMemberNumber(app.position);
@@ -260,7 +263,8 @@ export class OnboardingService {
             data: {
               userId: user.id,
               stageId: stage.id,
-              position: (app.position as 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER') ?? 'MEMBER',
+              position:
+                (app.position as 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER') ?? 'MEMBER',
               isActive: true,
             },
             select: { id: true, position: true },
@@ -350,6 +354,19 @@ export class OnboardingService {
     }
     // ── End transaction ───────────────────────────────────────────────────────
 
+    // Best-effort SMS notification — enqueue never throws (SmsService catches
+    // internally), so this can't fail the request. `smsEnqueued` reflects whether
+    // the job was queued, not final delivery. If it fails to queue, the admin
+    // still gets the plaintext password below so the member isn't locked out.
+    const smsEnqueued = await this.smsService.enqueueSms(
+      {
+        type: 'TEMP_PASSWORD',
+        phone: app.phoneNumber,
+        message: `Your Beba SACCO temporary password is ${result.tempPassword}. You must verify your phone and change it on first login.`,
+      },
+      `applications.approve:${result.user.id}`,
+    );
+
     // Audit log (outside transaction – non-fatal)
     await this.auditSafe({
       tenantId,
@@ -368,6 +385,7 @@ export class OnboardingService {
         stageId: result.stage.id,
         stageName: result.stage.name,
         position: result.assignment.position,
+        smsEnqueued,
       },
       ipAddress,
     });
@@ -384,7 +402,10 @@ export class OnboardingService {
       stage: result.stage,
       stageAssignment: result.assignment,
       temporaryPassword: result.tempPassword,
-      message: `Member ${result.member.memberNumber} created successfully. Temporary password issued — user must change on first login.`,
+      smsEnqueued,
+      message: smsEnqueued
+        ? `Member ${result.member.memberNumber} created successfully. Temporary password sent via SMS.`
+        : `Member ${result.member.memberNumber} created successfully, but SMS enqueue failed. Share the temporary password with the member manually.`,
     };
   }
 
@@ -408,9 +429,7 @@ export class OnboardingService {
       app.status !== ApplicationStatus.SUBMITTED &&
       app.status !== ApplicationStatus.PENDING_REVIEW
     ) {
-      throw new BadRequestException(
-        `Cannot reject application in status: ${app.status}`,
-      );
+      throw new BadRequestException(`Cannot reject application in status: ${app.status}`);
     }
 
     const updated = await this.prisma.memberApplication.update({
@@ -478,9 +497,9 @@ export class OnboardingService {
 
   private generateTempPassword(): string {
     const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789@#$!';
-    return Array.from({ length: 12 }, () =>
-      chars[Math.floor(Math.random() * chars.length)],
-    ).join('');
+    return Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join(
+      '',
+    );
   }
 
   private async auditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {

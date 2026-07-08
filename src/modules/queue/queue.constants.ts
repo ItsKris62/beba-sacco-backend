@@ -308,6 +308,7 @@ export interface SmsJobPayload {
     | 'PASSWORD_RESET_OTP'
     | 'FIRST_LOGIN_PIN'
     | 'TEMP_PASSWORD'
+    | 'LOGIN_OTP'
     | 'GUARANTOR_INVITE'
     | 'GUARANTOR_REMINDER'
     | 'REPAYMENT_REMINDER'

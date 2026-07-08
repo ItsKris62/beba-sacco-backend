@@ -13,7 +13,14 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiSecurity, ApiHeader } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+  ApiSecurity,
+  ApiHeader,
+} from '@nestjs/swagger';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
@@ -31,6 +38,8 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { PasswordResetRequestDto } from './dto/password-reset-request.dto';
 import { PasswordResetVerifyDto } from './dto/password-reset-verify.dto';
 import { VerifyPinDto } from './dto/verify-pin.dto';
+import { VerifyLoginOtpDto } from './dto/verify-login-otp.dto';
+import { ResendLoginOtpDto } from './dto/resend-login-otp.dto';
 import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
 import { ResetPasswordConfirmDto } from './dto/reset-password-confirm.dto';
 import type { AuthenticatedUser, JwtPayload } from './strategies/jwt.strategy';
@@ -80,9 +89,7 @@ export class AuthController {
 
   private getRefreshCookiePath(): string {
     const apiPrefix =
-      this.configService.get<string>('app.apiPrefix') ??
-      process.env.API_PREFIX ??
-      'api/v1';
+      this.configService.get<string>('app.apiPrefix') ?? process.env.API_PREFIX ?? 'api/v1';
     return `/${apiPrefix.replace(/^\/+|\/+$/g, '')}/auth`;
   }
 
@@ -162,7 +169,9 @@ export class AuthController {
       this.setRefreshCookie(res, data.refreshToken);
       return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
     } catch (error) {
-      this.logger.error(`Login failed for tenant ${req?.tenant?.id}: ${error instanceof Error ? error.message : error}`);
+      this.logger.error(
+        `Login failed for tenant ${req?.tenant?.id}: ${error instanceof Error ? error.message : error}`,
+      );
       throw error;
     }
   }
@@ -196,6 +205,67 @@ export class AuthController {
     const data = await this.authService.verifyPin(dto, req.tenant.id, req.ip);
     this.setRefreshCookie(res, data.refreshToken);
     return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
+  }
+
+  // ─────────────────────────── VERIFY LOGIN OTP ───────────────────────────
+
+  @Public()
+  @Post('verify-login-otp')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ global: { limit: 5, ttl: 60_000 } }) // 5 attempts per minute per IP
+  @ApiOperation({
+    summary: 'Verify the phone-verification OTP after a first-time temp-password login',
+    description:
+      'Required when POST /auth/login responds with requiresPhoneVerification: true. ' +
+      'Verifies the 6-digit SMS code and, on success, returns access + refresh tokens ' +
+      'exactly like POST /auth/login. requiresPasswordChange will be true — the client ' +
+      'must immediately call PATCH /auth/change-password to set a permanent password.',
+  })
+  @ApiResponse({ status: 200, type: LoginResponseDto })
+  @ApiResponse({ status: 401, description: 'Invalid phone number or code' })
+  @ApiResponse({ status: 429, description: 'Too many attempts' })
+  async verifyLoginOtp(
+    @Body() dto: VerifyLoginOtpDto,
+    @Req() req: TenantRequest,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ success: boolean; data: LoginResponseDto; error: null }> {
+    if (!req.tenant?.id) {
+      throw new BadRequestException('Missing X-Tenant-ID header');
+    }
+    const data = await this.authService.verifyLoginOtp(dto, req.tenant.id, req.ip);
+    this.setRefreshCookie(res, data.refreshToken);
+    return { success: true, data: { ...data, migrateRefreshToken: true }, error: null };
+  }
+
+  // ─────────────────────────── RESEND LOGIN OTP ───────────────────────────
+
+  @Public()
+  @Post('resend-login-otp')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ global: { limit: 5, ttl: 60_000 } }) // 5 attempts per minute per IP
+  @ApiOperation({
+    summary: 'Resend the phone-verification OTP',
+    description:
+      'Regenerates and re-sends the 6-digit SMS code. Always returns a generic success ' +
+      'response regardless of whether the phone is registered, to avoid leaking account existence.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'If the phone is registered, a new code has been sent.',
+  })
+  @ApiResponse({ status: 429, description: 'Too many attempts' })
+  async resendLoginOtp(
+    @Body() dto: ResendLoginOtpDto,
+    @Req() req: TenantRequest,
+  ): Promise<{ success: boolean; message: string }> {
+    if (!req.tenant?.id) {
+      throw new BadRequestException('Missing X-Tenant-ID header');
+    }
+    await this.authService.resendLoginOtp(dto, req.tenant.id, req.ip);
+    return {
+      success: true,
+      message: 'If the phone number is registered, a new code has been sent.',
+    };
   }
 
   // ─────────────────────────── REGISTER ───────────────────────────
@@ -453,7 +523,10 @@ export class AuthController {
       'Users with mustChangePassword=true must call this before accessing other endpoints.',
   })
   @ApiResponse({ status: 200, description: 'Password changed successfully' })
-  @ApiResponse({ status: 400, description: 'currentPassword required, or confirmPassword mismatch' })
+  @ApiResponse({
+    status: 400,
+    description: 'currentPassword required, or confirmPassword mismatch',
+  })
   @ApiResponse({ status: 401, description: 'Current password is incorrect' })
   async changePassword(
     @Body() dto: ChangePasswordDto,

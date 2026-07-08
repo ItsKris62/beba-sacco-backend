@@ -33,17 +33,21 @@ export class SmsService {
 
   /**
    * Enqueue an SMS job for asynchronous delivery via BullMQ.
+   * Returns whether the job was successfully queued — actual delivery still
+   * happens later, off the request path, via SmsProcessor.
    */
-  async enqueueSms(payload: SmsJobPayload, ctx: string): Promise<void> {
+  async enqueueSms(payload: SmsJobPayload, ctx: string): Promise<boolean> {
     try {
       await this.smsQueue.add('send', payload, {
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
       });
+      return true;
     } catch (err: unknown) {
       this.logger.error(
         `[SmsQueue] enqueue failed [${ctx}]: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 

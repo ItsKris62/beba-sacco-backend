@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { UnauthorizedException, ConflictException } from '@nestjs/common';
+import { UnauthorizedException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { getQueueToken } from '@nestjs/bullmq';
 import { AccountStatus, TenantStatus, UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
@@ -145,6 +145,7 @@ describe('AuthService', () => {
     emailVerified: false,
     phone: '254712345678',
     phoneNumber: null,
+    phoneVerified: true,
   };
 
   beforeEach(async () => {
@@ -313,6 +314,150 @@ describe('AuthService', () => {
       expect(mockAuditService.create).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'AUTH.LOGIN.FAILED', tenantId: TENANT_ID }),
       );
+    });
+  });
+
+  // ─── login — phone verification gate ──────────────────────────
+
+  describe('login — phone verification gate', () => {
+    it('requires phone verification for a temp-password account with an unverified phone', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        mustChangePassword: true,
+        phoneVerified: false,
+      });
+      jest.mocked(argon2.verify).mockResolvedValueOnce(true);
+
+      await expect(
+        service.login({ email: baseUser.email, password: 'TempPass123!' }, TENANT_ID, '127.0.0.1'),
+      ).rejects.toThrow(ForbiddenException);
+
+      expect(mockOtpService.generate).toHaveBeenCalledWith(baseUser.phone);
+      expect(mockSmsService.enqueueSms).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'LOGIN_OTP', phone: baseUser.phone }),
+        expect.any(String),
+      );
+      // No tokens should have been issued
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
+    });
+
+    it('does NOT gate an account that already has a verified phone, even with mustChangePassword true', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        mustChangePassword: true,
+        phoneVerified: true,
+      });
+      mockPrismaService.user.update.mockResolvedValue({ ...baseUser, refreshToken: 'hashed-refresh' });
+      jest.mocked(argon2.verify).mockResolvedValueOnce(true);
+      jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
+
+      const result = await service.login(
+        { email: baseUser.email, password: 'Pass123!' },
+        TENANT_ID,
+        '127.0.0.1',
+      );
+
+      expect(result.accessToken).toBe('access.jwt.token');
+      expect(mockOtpService.generate).not.toHaveBeenCalled();
+    });
+
+    it('does NOT gate an already-onboarded account (mustChangePassword false) regardless of phoneVerified — prevents locking out existing users', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        mustChangePassword: false,
+        phoneVerified: false,
+      });
+      mockPrismaService.user.update.mockResolvedValue({ ...baseUser, refreshToken: 'hashed-refresh' });
+      jest.mocked(argon2.verify).mockResolvedValueOnce(true);
+      jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
+
+      const result = await service.login(
+        { email: baseUser.email, password: 'Pass123!' },
+        TENANT_ID,
+        '127.0.0.1',
+      );
+
+      expect(result.accessToken).toBe('access.jwt.token');
+      expect(mockOtpService.generate).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── verifyLoginOtp ────────────────────────────────────────────
+
+  describe('verifyLoginOtp', () => {
+    it('issues tokens and marks phoneVerified true on a valid code', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        mustChangePassword: true,
+        phoneVerified: false,
+      });
+      mockPrismaService.user.update.mockResolvedValue({});
+      mockOtpService.validate.mockResolvedValueOnce(true);
+      jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
+
+      const result = await service.verifyLoginOtp(
+        { phone: baseUser.phone, otp: '482913' },
+        TENANT_ID,
+        '127.0.0.1',
+      );
+
+      expect(result.accessToken).toBe('access.jwt.token');
+      expect(result.requiresPasswordChange).toBe(true);
+      expect(mockOtpService.validate).toHaveBeenCalledWith(baseUser.phone, '482913');
+      expect(mockPrismaService.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: baseUser.id },
+          data: expect.objectContaining({ phoneVerified: true }),
+        }),
+      );
+    });
+
+    it('throws UnauthorizedException on an invalid or expired code', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({ ...baseUser, phoneVerified: false });
+      mockOtpService.validate.mockResolvedValueOnce(false);
+
+      await expect(
+        service.verifyLoginOtp({ phone: baseUser.phone, otp: '000000' }, TENANT_ID, '127.0.0.1'),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
+    });
+
+    it('throws UnauthorizedException when the phone does not match any user', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.verifyLoginOtp({ phone: '254799999999', otp: '482913' }, TENANT_ID, '127.0.0.1'),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockOtpService.validate).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── resendLoginOtp ────────────────────────────────────────────
+
+  describe('resendLoginOtp', () => {
+    it('regenerates and re-sends the OTP for a registered phone', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({ id: baseUser.id });
+
+      await service.resendLoginOtp({ phone: baseUser.phone }, TENANT_ID, '127.0.0.1');
+
+      expect(mockOtpService.generate).toHaveBeenCalledWith(baseUser.phone);
+      expect(mockSmsService.enqueueSms).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'LOGIN_OTP', phone: baseUser.phone }),
+        expect.any(String),
+      );
+    });
+
+    it('silently no-ops for an unregistered phone (no enumeration)', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.resendLoginOtp({ phone: '254799999999' }, TENANT_ID, '127.0.0.1'),
+      ).resolves.toBeUndefined();
+
+      expect(mockOtpService.generate).not.toHaveBeenCalled();
+      expect(mockSmsService.enqueueSms).not.toHaveBeenCalled();
     });
   });
 

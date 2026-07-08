@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsEnum, IsString, Matches } from 'class-validator';
+import { IsEmail, IsEnum, IsNotEmpty, IsPhoneNumber, IsString } from 'class-validator';
 import { UserRole } from '@prisma/client';
 
 /**
@@ -34,11 +34,12 @@ export class CreateUserDto {
   @ApiProperty({
     example: '+254712345678',
     description:
-      'Required — a temporary login PIN is sent to this number via SMS. ' +
-      'The user logs in with phone + PIN and is then forced to set a permanent password.',
+      'Required — a server-generated temporary password is sent to this number via SMS. ' +
+      'The user logs in with the temp password, verifies their phone via a 6-digit SMS OTP, ' +
+      'and is then forced to set a permanent password.',
   })
-  @IsString()
-  @Matches(/^\+?[1-9]\d{7,14}$/, { message: 'Provide a valid phone number' })
+  @IsNotEmpty({ message: 'Phone number is required for temporary password delivery' })
+  @IsPhoneNumber('KE', { message: 'Must be a valid Kenyan phone number' })
   phone!: string;
 
   @ApiProperty({

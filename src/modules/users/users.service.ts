@@ -1,11 +1,15 @@
 import {
-  Injectable, Logger, NotFoundException, ConflictException,
-  ForbiddenException, BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ConflictException,
+  ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { randomBytes, randomInt } from 'crypto';
+import { randomInt } from 'crypto';
 import * as argon2 from 'argon2';
 import { UserRole, AccountStatus, PinPurpose } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -17,6 +21,7 @@ import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 import { PinService } from '../pin/pin.service';
+import { SmsService } from '../sms/sms.service';
 
 const TEMP_PASSWORD_UPPER = 'ABCDEFGHJKMNPQRSTUVWXYZ';
 const TEMP_PASSWORD_LOWER = 'abcdefghjkmnpqrstuvwxyz';
@@ -52,6 +57,7 @@ export class UsersService {
     private readonly audit: AuditService,
     private readonly idempotency: IdempotencyService,
     private readonly pinService: PinService,
+    private readonly smsService: SmsService,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
@@ -60,17 +66,22 @@ export class UsersService {
     this.emailQueue
       .add('send', payload, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } })
       .catch((e: unknown) =>
-        this.logger.error(`[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`),
+        this.logger.error(
+          `[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`,
+        ),
       );
   }
 
   // ─── CREATE (admin channel) ──────────────────────────────────
 
   /**
-   * Create a staff/member account. No password is ever accepted from the admin —
-   * a temporary login PIN is generated server-side and sent to `dto.phone` via SMS.
-   * The user logs in with phone + PIN (POST /auth/verify-pin), then is forced to
-   * set a permanent password (mustChangePassword + pinLoginRequired both start true).
+   * Create a staff/member account. No password is ever typed by the admin —
+   * a temporary password is generated server-side and sent to `dto.phone` via SMS
+   * (the admin also receives it in this response as a fallback, in case the SMS
+   * fails to send). The user logs in with the temp password (POST /auth/login),
+   * is then required to verify their phone via a 6-digit SMS OTP before tokens are
+   * issued (AuthService.login()'s mustChangePassword + !phoneVerified gate), and
+   * finally must set a permanent password (mustChangePassword starts true).
    *
    * Role restrictions:
    *   - SUPER_ADMIN cannot be assigned via this endpoint (platform-only role)
@@ -90,9 +101,7 @@ export class UsersService {
     // Role hierarchy enforcement — DTO validation only confirms dto.role is an
     // assignable role in general; it does not know the actor. That check happens here.
     if (!canCreateUserWithRole(actor.role, dto.role)) {
-      throw new ForbiddenException(
-        `${actor.role} cannot create accounts with role ${dto.role}`,
-      );
+      throw new ForbiddenException(`${actor.role} cannot create accounts with role ${dto.role}`);
     }
 
     const existing = await this.prisma.user.findFirst({
@@ -101,11 +110,8 @@ export class UsersService {
     });
     if (existing) throw new ConflictException('Email already registered');
 
-    // Unusable, never-communicated placeholder — the account has no real password
-    // until the user completes PIN verification + change-password. login() also
-    // hard-rejects pinLoginRequired accounts regardless of this hash (defense in depth).
-    const placeholderSecret = randomBytes(32).toString('hex');
-    const passwordHash = await argon2.hash(placeholderSecret, {
+    const temporaryPassword = this.generateTempPassword();
+    const passwordHash = await argon2.hash(temporaryPassword, {
       type: argon2.argon2id,
       memoryCost: 65536,
       timeCost: 3,
@@ -123,17 +129,18 @@ export class UsersService {
         role: dto.role,
         accountStatus: AccountStatus.ACTIVE,
         mustChangePassword: true,
-        pinLoginRequired: true,
         createdById: actor.id,
       },
       select: USER_SELECT,
     });
 
-    const issued = await this.pinService.generateAndIssuePin(
-      user.id,
-      tenantId,
-      PinPurpose.FIRST_LOGIN,
-      ipAddress,
+    const smsEnqueued = await this.smsService.enqueueSms(
+      {
+        type: 'TEMP_PASSWORD',
+        phone: dto.phone,
+        message: `Your Beba SACCO temporary password is ${temporaryPassword}. You must verify your phone and change it on first login.`,
+      },
+      `users.create:${user.id}`,
     );
 
     await this.auditSafe({
@@ -142,15 +149,23 @@ export class UsersService {
       action: 'USER.CREATED',
       entityType: 'User',
       entityId: user.id,
-      newValue: { email: user.email, role: user.role, accountStatus: user.accountStatus, createdById: actor.id },
-      metadata: { ipAddress },
+      newValue: {
+        email: user.email,
+        role: user.role,
+        accountStatus: user.accountStatus,
+        createdById: actor.id,
+      },
+      metadata: { ipAddress, smsEnqueued },
       ipAddress,
     });
 
     return {
       success: true,
-      message: 'User created. PIN sent to phone.',
-      expiresAt: issued.expiresAt,
+      message: smsEnqueued
+        ? 'User created. Temporary password sent via SMS.'
+        : 'User created, but SMS enqueue failed. Share the temporary password with the user manually.',
+      temporaryPassword,
+      smsEnqueued,
       user,
     };
   }
@@ -159,7 +174,13 @@ export class UsersService {
 
   async findAll(
     tenantId: string,
-    opts: { page?: number; limit?: number; search?: string; role?: UserRole; accountStatus?: AccountStatus } = {},
+    opts: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      role?: UserRole;
+      accountStatus?: AccountStatus;
+    } = {},
   ) {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
@@ -311,11 +332,7 @@ export class UsersService {
 
     // Idempotency check
     if (dto.idempotencyKey) {
-      const idem = await this.idempotency.checkAndReserve(
-        dto.idempotencyKey,
-        tenantId,
-        3600,
-      );
+      const idem = await this.idempotency.checkAndReserve(dto.idempotencyKey, tenantId, 3600);
       if (idem.status === 'COMPLETED') {
         return idem.result;
       }
@@ -343,7 +360,12 @@ export class UsersService {
       entityType: 'User',
       entityId: id,
       oldValue: { accountStatus: oldStatus },
-      newValue: { accountStatus: updated.accountStatus, approvedById: actor.id, approvedAt: updated.approvedAt, reason: dto.reason },
+      newValue: {
+        accountStatus: updated.accountStatus,
+        approvedById: actor.id,
+        approvedAt: updated.approvedAt,
+        reason: dto.reason,
+      },
       metadata: { ipAddress, actorRole: actor.role },
       ipAddress,
     });
@@ -370,7 +392,8 @@ export class UsersService {
       select: { id: true, accountStatus: true, role: true },
     });
     if (!target) throw new NotFoundException('User not found');
-    if (target.accountStatus !== AccountStatus.ACTIVE) throw new BadRequestException('User is not active');
+    if (target.accountStatus !== AccountStatus.ACTIVE)
+      throw new BadRequestException('User is not active');
 
     if (id === actor.id) {
       throw new ForbiddenException('Cannot deactivate your own account');
@@ -486,7 +509,9 @@ export class UsersService {
     }
 
     if (!canManageRole(actor.role, target.role)) {
-      throw new ForbiddenException(`${actor.role} cannot reveal a PIN for a ${target.role} account`);
+      throw new ForbiddenException(
+        `${actor.role} cannot reveal a PIN for a ${target.role} account`,
+      );
     }
 
     // Reveal always triggers a fresh SMS (Option B) — same abuse cap as resend-pin.
@@ -528,7 +553,9 @@ export class UsersService {
     }
 
     if (!canManageRole(actor.role, target.role)) {
-      throw new ForbiddenException(`${actor.role} cannot resend a PIN for a ${target.role} account`);
+      throw new ForbiddenException(
+        `${actor.role} cannot resend a PIN for a ${target.role} account`,
+      );
     }
 
     // SMS costs money — cap regardless of how many different users this admin targets.
@@ -569,7 +596,15 @@ export class UsersService {
   ) {
     const target = await this.prisma.user.findFirst({
       where: { id, tenantId },
-      select: { id: true, email: true, firstName: true, lastName: true, role: true },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        phone: true,
+        phoneNumber: true,
+      },
     });
     if (!target) throw new NotFoundException('User not found');
 
@@ -603,6 +638,27 @@ export class UsersService {
       },
     });
 
+    // Best-effort SMS notification — enqueue never throws (SmsService catches
+    // internally), so this can't fail the request. `smsEnqueued` reflects whether
+    // the job was queued, not final delivery. If it fails to queue, the admin
+    // still gets the plaintext password below so the user isn't locked out.
+    const phone = target.phone ?? target.phoneNumber;
+    let smsEnqueued = false;
+    if (phone) {
+      smsEnqueued = await this.smsService.enqueueSms(
+        {
+          type: 'TEMP_PASSWORD',
+          phone,
+          message: `Your Beba SACCO temporary password is ${temporaryPassword}. You must change it on your next login.`,
+        },
+        `users.temp_password:${id}`,
+      );
+    } else {
+      this.logger.warn(
+        `Temp password generated for user=${id} but no phone on file — SMS not sent`,
+      );
+    }
+
     await this.auditSafe({
       tenantId,
       actorId: actor.id,
@@ -614,6 +670,7 @@ export class UsersService {
         targetRole: target.role,
         requestedBy: actor.id,
         actorRole: actor.role,
+        smsEnqueued,
         ipAddress,
       },
       ipAddress,
@@ -622,6 +679,7 @@ export class UsersService {
     return {
       success: true,
       temporaryPassword,
+      smsEnqueued,
       user: {
         id: target.id,
         email: target.email,
@@ -629,8 +687,9 @@ export class UsersService {
         lastName: target.lastName,
         role: target.role,
       },
-      message:
-        'Temporary password generated. This value is shown once and the user must change it on next login.',
+      message: smsEnqueued
+        ? 'Temporary password generated and sent via SMS. This value is also shown once here.'
+        : 'Temporary password generated, but SMS enqueue failed. Share this value with the user manually.',
     };
   }
 
@@ -654,12 +713,15 @@ export class UsersService {
     });
 
     for (const user of warningUsers) {
-      this.enqueueEmail({
-        type: 'ACCOUNT_DELETION_WARNING' as any, // Remember to add this to your EmailJobPayload type union
-        to: user.email,
-        firstName: user.firstName,
-        saccoName: 'Beba SACCO',
-      }, `users.deletion_warning:${user.id}`);
+      this.enqueueEmail(
+        {
+          type: 'ACCOUNT_DELETION_WARNING' as any, // Remember to add this to your EmailJobPayload type union
+          to: user.email,
+          firstName: user.firstName,
+          saccoName: 'Beba SACCO',
+        },
+        `users.deletion_warning:${user.id}`,
+      );
     }
 
     if (warningUsers.length > 0) {
@@ -694,16 +756,22 @@ export class UsersService {
         action: 'USER.DELETED_STALE',
         entityType: 'User',
         entityId: user.id,
-        metadata: { email: user.email, reason: 'PENDING account older than 30 days automatically deleted' },
+        metadata: {
+          email: user.email,
+          reason: 'PENDING account older than 30 days automatically deleted',
+        },
       });
 
       // Send final deletion notification
-      this.enqueueEmail({
-        type: 'ACCOUNT_DELETED' as any,
-        to: user.email,
-        firstName: user.firstName,
-        saccoName: 'Beba SACCO',
-      }, `users.deleted:${user.id}`);
+      this.enqueueEmail(
+        {
+          type: 'ACCOUNT_DELETED' as any,
+          to: user.email,
+          firstName: user.firstName,
+          saccoName: 'Beba SACCO',
+        },
+        `users.deleted:${user.id}`,
+      );
     }
 
     this.logger.log(`Successfully deleted ${result.count} stale PENDING accounts.`);
@@ -711,12 +779,17 @@ export class UsersService {
 
   // ─── PRIVATE HELPERS ─────────────────────────────────────────
 
-  async disableUser2fa(userId: string, tenantId: string, actor: { id: string }, ipAddress?: string) {
+  async disableUser2fa(
+    userId: string,
+    tenantId: string,
+    actor: { id: string },
+    ipAddress?: string,
+  ) {
     const user = await this.prisma.user.findUnique({ where: { id: userId, tenantId } });
     if (!user) {
       throw new NotFoundException('User not found');
     }
-    
+
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
     if ((tenant?.settings as any)?.security?.require2FA === true) {
       throw new ForbiddenException('Tenant policy requires 2FA. You cannot disable it.');

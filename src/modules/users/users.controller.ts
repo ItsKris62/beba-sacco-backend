@@ -1,11 +1,25 @@
 import {
-  Controller, Get, Post, Patch, Param, Body,
-  Query, HttpCode, HttpStatus, ParseUUIDPipe, Req,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Param,
+  Body,
+  Query,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+  Req,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import {
-  ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
-  ApiResponse, ApiQuery, ApiHeader,
+  ApiTags,
+  ApiBearerAuth,
+  ApiSecurity,
+  ApiOperation,
+  ApiResponse,
+  ApiQuery,
+  ApiHeader,
 } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Request } from 'express';
@@ -36,14 +50,17 @@ export class UsersController {
   @ApiOperation({
     summary: 'Create a staff or member account',
     description:
-      'Creates a user and sends a temporary login PIN via SMS (mustChangePassword = true, ' +
-      'pinLoginRequired = true). The response never contains the PIN. ' +
+      'Creates a user with a server-generated temporary password, sent via SMS ' +
+      '(mustChangePassword = true). The response also returns the plaintext temporary ' +
+      'password once, as a fallback in case SMS delivery fails. On first login the user ' +
+      'must verify their phone via a 6-digit SMS OTP (enforced by POST /auth/login) before ' +
+      'tokens are issued, then set a permanent password. ' +
       'TENANT_ADMIN can create any tenant-level role. ' +
       'MANAGER can create LOAN_OFFICER, ACCOUNTANT, TELLER, MEMBER, CHAIRMAN, or AUDITOR accounts. ' +
       'SUPER_ADMIN is never assignable via this endpoint. ' +
       'For MEMBER self-registration, use POST /auth/register instead.',
   })
-  @ApiResponse({ status: 201, description: 'User created. PIN sent to phone.' })
+  @ApiResponse({ status: 201, description: 'User created. Temporary password sent via SMS.' })
   @ApiResponse({ status: 403, description: 'Insufficient role to create this account type' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
   create(
@@ -81,8 +98,7 @@ export class UsersController {
     // SUPER_ADMIN: use their own tenantId (platform tenant) so they always see
     // platform-level staff users regardless of which X-Tenant-ID the frontend sends.
     // Non-SUPER_ADMIN roles are always scoped to the tenant from the header.
-    const effectiveTenantId =
-      actor.role === UserRole.SUPER_ADMIN ? actor.tenantId : tenant.id;
+    const effectiveTenantId = actor.role === UserRole.SUPER_ADMIN ? actor.tenantId : tenant.id;
     return this.usersService.findAll(effectiveTenantId, { page, limit, search, role });
   }
 
@@ -99,8 +115,7 @@ export class UsersController {
   ) {
     // For SUPER_ADMIN looking up a specific user, search across all tenants
     // by passing the actor's own tenantId as a fallback so cross-tenant lookups work.
-    const effectiveTenantId =
-      actor.role === UserRole.SUPER_ADMIN ? actor.tenantId : tenant.id;
+    const effectiveTenantId = actor.role === UserRole.SUPER_ADMIN ? actor.tenantId : tenant.id;
     return this.usersService.findOne(id, effectiveTenantId);
   }
 
@@ -219,8 +234,10 @@ export class UsersController {
     summary: 'Generate a new temporary password',
     description:
       'Generates a new server-side temporary password, stores only its Argon2id hash, ' +
-      'sets mustChangePassword = true, invalidates existing sessions, and returns the plaintext value once. ' +
-      'Use this when the original temporary password was lost before first login.',
+      'sets mustChangePassword = true, invalidates existing sessions, enqueues an SMS to the ' +
+      'user with the new password, and also returns the plaintext value once (so the admin is ' +
+      'not blocked if the SMS fails to queue). Use this when the original temporary password was ' +
+      'lost before first login.',
   })
   @ApiResponse({
     status: 200,
@@ -229,6 +246,7 @@ export class UsersController {
       example: {
         success: true,
         temporaryPassword: 'Q8m#2tLk9@Pa',
+        smsEnqueued: true,
         user: {
           id: '550e8400-e29b-41d4-a716-446655440000',
           email: 'member@example.com',
@@ -237,7 +255,7 @@ export class UsersController {
           role: 'MEMBER',
         },
         message:
-          'Temporary password generated. This value is shown once and the user must change it on next login.',
+          'Temporary password generated and sent via SMS. This value is also shown once here.',
       },
     },
   })
@@ -262,7 +280,7 @@ export class UsersController {
     summary: 'Reveal the first-login PIN for a user (admin fallback)',
     description:
       'Only valid while the user has not yet completed PIN onboarding. ' +
-      'Never returns a previously-issued PIN — always revokes it and issues + SMS\'s a brand ' +
+      "Never returns a previously-issued PIN — always revokes it and issues + SMS's a brand " +
       'new one, so no plaintext PIN is ever stored at rest. Recorded in the audit trail. ' +
       'Rate-limited to 5 per hour per admin (SMS costs money), on top of the 5/min IP throttle.',
   })
