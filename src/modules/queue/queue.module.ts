@@ -126,8 +126,17 @@ export function shouldRegisterQueueProcessors(options: QueueModuleOptions = {}):
     return true;
   }
 
-  // Web-mode processor providers are a local fallback only. In a dedicated
-  // worker runtime, QueueModule.forRoot({ mode: 'worker' }) supplies processors.
+  // Web-mode processor providers are a local fallback only, for setups with no
+  // separate worker process (e.g. local dev). When a dedicated worker service
+  // is deployed (render.yaml sets HAS_DEDICATED_WORKER=true on the web service),
+  // the web process must NOT also register BullMQ Workers — each one opens its
+  // own blocking Redis connection, and doubling up on every queue against a
+  // connection-limited Redis instance is what caused web-service ECONNRESET
+  // storms / deploy timeouts when a dedicated worker was already running them.
+  if (process.env.HAS_DEDICATED_WORKER === 'true') {
+    return false;
+  }
+
   return !isWorkerRuntime();
 }
 

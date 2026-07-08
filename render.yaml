@@ -29,6 +29,12 @@ services:
         value: production
       - key: API_PREFIX
         value: api
+      # beba-worker (below) already runs every BullMQ processor. Without this,
+      # the web service also registers them as a "local fallback," doubling
+      # every queue's Redis connections and exhausting beba-redis's connection
+      # limit on boot (ECONNRESET storm / deploy timeout).
+      - key: HAS_DEDICATED_WORKER
+        value: "true"
       - key: APP_URL
         value: https://your-production-frontend-domain.com
       - key: FRONTEND_URL
