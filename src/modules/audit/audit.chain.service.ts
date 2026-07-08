@@ -194,8 +194,8 @@ export class AuditChainService {
     tenantId: string,
   ): Promise<ChainHeadRow> {
     await tx.$executeRaw(Prisma.sql`
-      INSERT INTO "AuditChainHead" ("tenantId", "lastHash", sequence)
-      VALUES (${tenantId}, ${GENESIS_HASH}, 0)
+      INSERT INTO "AuditChainHead" ("tenantId", "lastHash", sequence, "updatedAt")
+      VALUES (${tenantId}, ${GENESIS_HASH}, 0, NOW())
       ON CONFLICT ("tenantId") DO NOTHING
     `);
 

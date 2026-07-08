@@ -760,6 +760,7 @@ export class AuthService {
         phone: registerDto.phone,
         role: UserRole.MEMBER,
         tenantId,
+        accountStatus: AccountStatus.ACTIVE,
         mustChangePassword: false,
         lastPasswordChangeAt: new Date(),
       },

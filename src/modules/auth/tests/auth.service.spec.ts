@@ -514,6 +514,15 @@ describe('AuthService', () => {
       expect(String(mockPrismaService.user.create.mock.calls[0][0].data.passwordHash)).toMatch(
         /^\$argon2id\$/,
       );
+      expect(mockPrismaService.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            role: UserRole.MEMBER,
+            accountStatus: AccountStatus.ACTIVE,
+            mustChangePassword: false,
+          }),
+        }),
+      );
     });
     // TODO: assert role is always MEMBER regardless of what is passed
     it.todo('always creates user with MEMBER role');
