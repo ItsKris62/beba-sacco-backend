@@ -44,7 +44,9 @@ export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
         tls: parsed.protocol === 'rediss:' ? { rejectUnauthorized: false } : undefined,
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
+        retryStrategy: (times: number) => Math.min(times * 500, 10_000),
       });
+      this.attachErrorHandler(this.redisClient);
       return;
     }
 
@@ -56,13 +58,27 @@ export class DeadLetterAlertProcessor implements OnModuleInit, OnModuleDestroy {
         tls: bullTls ? { rejectUnauthorized: false } : undefined,
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
+        retryStrategy: (times: number) => Math.min(times * 500, 10_000),
       });
+      this.attachErrorHandler(this.redisClient);
       return;
     }
 
     this.logger.warn(
       'DLQ monitor disabled: Bull Redis is not configured. Set BULL_REDIS_URL or BULL_REDIS_HOST; refusing to use app Redis for BullMQ metrics.',
     );
+  }
+
+  /**
+   * Attach an error listener immediately after client construction. ioredis
+   * (and, transitively, the underlying net.Socket) crashes the whole Node
+   * process on an unhandled 'error' event — e.g. ECONNRESET when Render
+   * resets an idle TCP connection. Every raw ioredis client needs one.
+   */
+  private attachErrorHandler(client: Redis): void {
+    client.on('error', (err: Error) => {
+      this.logger.warn(`DLQ monitor Redis error (non-fatal): ${err.message}`);
+    });
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)
