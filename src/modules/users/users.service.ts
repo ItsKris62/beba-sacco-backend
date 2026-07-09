@@ -19,9 +19,10 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { IdempotencyService } from '../../common/services/idempotency.service';
-import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
+import { QUEUE_NAMES, EmailJobPayload, TEMP_PASSWORD_PLACEHOLDER } from '../queue/queue.constants';
 import { PinService } from '../pin/pin.service';
 import { SmsService } from '../sms/sms.service';
+import { EncryptionService, EncryptedPayload } from '../zero-trust/encryption/encryption.service';
 
 const TEMP_PASSWORD_UPPER = 'ABCDEFGHJKMNPQRSTUVWXYZ';
 const TEMP_PASSWORD_LOWER = 'abcdefghjkmnpqrstuvwxyz';
@@ -58,6 +59,7 @@ export class UsersService {
     private readonly idempotency: IdempotencyService,
     private readonly pinService: PinService,
     private readonly smsService: SmsService,
+    private readonly encryption: EncryptionService,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
@@ -76,12 +78,14 @@ export class UsersService {
 
   /**
    * Create a staff/member account. No password is ever typed by the admin —
-   * a temporary password is generated server-side and sent to `dto.phone` via SMS
-   * (the admin also receives it in this response as a fallback, in case the SMS
-   * fails to send). The user logs in with the temp password (POST /auth/login),
-   * is then required to verify their phone via a 6-digit SMS OTP before tokens are
-   * issued (AuthService.login()'s mustChangePassword + !phoneVerified gate), and
-   * finally must set a permanent password (mustChangePassword starts true).
+   * a temporary password is generated server-side, sent to `dto.phone` via SMS,
+   * and stored only as an Argon2id hash (for login) plus an AES-256-GCM encrypted
+   * blob (for admin recovery via GET /users/:id/reveal-temp-password if the SMS
+   * fails to send — the plaintext is never returned in this response). The user
+   * logs in with the temp password (POST /auth/login), is then required to verify
+   * their phone via a 6-digit SMS OTP before tokens are issued (AuthService.login()'s
+   * mustChangePassword + !phoneVerified gate, unless SMS_OTP_BYPASS_ADMIN_CREATED is
+   * enabled), and finally must set a permanent password (mustChangePassword starts true).
    *
    * Role restrictions:
    *   - SUPER_ADMIN cannot be assigned via this endpoint (platform-only role)
@@ -117,12 +121,15 @@ export class UsersService {
       timeCost: 3,
       parallelism: 1,
     });
+    const encryptedPayload = await this.encryption.encrypt(temporaryPassword, tenantId);
+    const tempPasswordEncrypted = JSON.stringify(encryptedPayload);
 
     const user = await this.prisma.user.create({
       data: {
         tenantId,
         email: dto.email.toLowerCase(),
         passwordHash,
+        tempPasswordEncrypted,
         firstName: dto.firstName,
         lastName: dto.lastName,
         phone: dto.phone,
@@ -138,7 +145,9 @@ export class UsersService {
       {
         type: 'TEMP_PASSWORD',
         phone: dto.phone,
-        message: `Your Beba SACCO temporary password is ${temporaryPassword}. You must verify your phone and change it on first login.`,
+        message: `Your Beba SACCO temporary password is ${TEMP_PASSWORD_PLACEHOLDER}. You must verify your phone and change it on first login.`,
+        encryptedPayload: tempPasswordEncrypted,
+        tenantId,
       },
       `users.create:${user.id}`,
     );
@@ -163,8 +172,7 @@ export class UsersService {
       success: true,
       message: smsEnqueued
         ? 'User created. Temporary password sent via SMS.'
-        : 'User created, but SMS enqueue failed. Share the temporary password with the user manually.',
-      temporaryPassword,
+        : 'User created, but SMS enqueue failed. An admin can retrieve it via GET /users/:id/reveal-temp-password.',
       smsEnqueued,
       user,
     };
@@ -627,11 +635,14 @@ export class UsersService {
       timeCost: 3,
       parallelism: 1,
     });
+    const encryptedPayload = await this.encryption.encrypt(temporaryPassword, tenantId);
+    const tempPasswordEncrypted = JSON.stringify(encryptedPayload);
 
     await this.prisma.user.update({
       where: { id },
       data: {
         passwordHash,
+        tempPasswordEncrypted,
         mustChangePassword: true,
         lastPasswordChangeAt: new Date(),
         refreshToken: null,
@@ -640,8 +651,8 @@ export class UsersService {
 
     // Best-effort SMS notification — enqueue never throws (SmsService catches
     // internally), so this can't fail the request. `smsEnqueued` reflects whether
-    // the job was queued, not final delivery. If it fails to queue, the admin
-    // still gets the plaintext password below so the user isn't locked out.
+    // the job was queued, not final delivery. If it fails to queue, the admin can
+    // still retrieve the value via GET /users/:id/reveal-temp-password.
     const phone = target.phone ?? target.phoneNumber;
     let smsEnqueued = false;
     if (phone) {
@@ -649,7 +660,9 @@ export class UsersService {
         {
           type: 'TEMP_PASSWORD',
           phone,
-          message: `Your Beba SACCO temporary password is ${temporaryPassword}. You must change it on your next login.`,
+          message: `Your Beba SACCO temporary password is ${TEMP_PASSWORD_PLACEHOLDER}. You must change it on your next login.`,
+          encryptedPayload: tempPasswordEncrypted,
+          tenantId,
         },
         `users.temp_password:${id}`,
       );
@@ -678,7 +691,6 @@ export class UsersService {
 
     return {
       success: true,
-      temporaryPassword,
       smsEnqueued,
       user: {
         id: target.id,
@@ -688,9 +700,62 @@ export class UsersService {
         role: target.role,
       },
       message: smsEnqueued
-        ? 'Temporary password generated and sent via SMS. This value is also shown once here.'
-        : 'Temporary password generated, but SMS enqueue failed. Share this value with the user manually.',
+        ? 'Temporary password generated and sent via SMS. An admin can also retrieve it via GET /users/:id/reveal-temp-password.'
+        : 'Temporary password generated, but SMS enqueue failed. Retrieve it via GET /users/:id/reveal-temp-password.',
     };
+  }
+
+  // ─── ADMIN "REVEAL TEMP PASSWORD" FALLBACK ────────────────────
+
+  /**
+   * Admin fallback to retrieve the current temporary password when SMS delivery
+   * failed (or was never sent). Decrypts the AES-256-GCM blob stored alongside the
+   * Argon2id hash — the plaintext is never persisted anywhere else. Once the member
+   * sets their own password (PATCH /auth/change-password), tempPasswordEncrypted is
+   * cleared and this endpoint stops working for that account.
+   */
+  async revealTemporaryPassword(
+    id: string,
+    tenantId: string,
+    actor: { id: string; role: UserRole },
+    ipAddress?: string,
+  ) {
+    const target = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+      select: { id: true, role: true, tempPasswordEncrypted: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    if (!target.tempPasswordEncrypted) {
+      throw new BadRequestException(
+        'This user has already set their own password. No temporary password is available to reveal.',
+      );
+    }
+
+    if (!canManageRole(actor.role, target.role)) {
+      throw new ForbiddenException(
+        `${actor.role} cannot reveal a temporary password for a ${target.role} account`,
+      );
+    }
+
+    // Same abuse cap as reveal-pin — SMS/decryption cost aside, this is a plaintext
+    // credential disclosure endpoint and should be rate-limited accordingly.
+    await this.pinService.assertIssuanceRateLimit(`reveal-temp-password:admin:${actor.id}`, 5, 3600);
+
+    const payload = JSON.parse(target.tempPasswordEncrypted) as EncryptedPayload;
+    const temporaryPassword = await this.encryption.decrypt(payload, tenantId);
+
+    await this.auditSafe({
+      tenantId,
+      actorId: actor.id,
+      action: 'USER.TEMPORARY_PASSWORD_REVEALED',
+      entityType: 'User',
+      entityId: target.id,
+      metadata: { ipAddress },
+      ipAddress,
+    });
+
+    return { temporaryPassword };
   }
 
   @Cron('0 2 * * *', { timeZone: 'Africa/Nairobi' })

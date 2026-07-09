@@ -290,7 +290,13 @@ export class AuthService {
     // !phoneVerified) so already-onboarded accounts — which also default to
     // phoneVerified=false unless they went through this or the legacy PIN flow —
     // are never affected; this only ever fires for genuinely new accounts.
-    if (user.mustChangePassword && !user.phoneVerified) {
+    // SMS_OTP_BYPASS_ADMIN_CREATED (off by default) skips this gate entirely — the
+    // account still lands on the mustChangePassword-forced /change-password step via
+    // the existing JwtAuthGuard enforcement, it just never has to clear phone
+    // verification first. Does not touch OTP generation/verification/resend below.
+    const bypassOtpForAdminCreated =
+      this.configService.get<string>('app.features.smsOtpBypassAdminCreated') === 'true';
+    if (user.mustChangePassword && !user.phoneVerified && !bypassOtpForAdminCreated) {
       const rawPhone = user.phone ?? user.phoneNumber;
       if (!rawPhone) {
         throw new UnauthorizedException('No phone number on file for verification');
@@ -1648,6 +1654,10 @@ export class AuthService {
         data: {
           passwordHash: newHash,
           mustChangePassword: false,
+          // Bounds how long an admin-issued temp password remains revealable via
+          // GET /users/:id/reveal-temp-password — once the member sets their own
+          // password, the encrypted value is no longer needed.
+          tempPasswordEncrypted: null,
           lastPasswordChangeAt: new Date(),
           refreshToken: null,
           ...(user.pinLoginRequired && { pinLoginRequired: false, phoneVerified: true }),

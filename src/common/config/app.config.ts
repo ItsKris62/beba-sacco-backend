@@ -133,6 +133,8 @@ export default registerAs('app', () => ({
     // PIN-based flow (/auth/request-password-reset + /auth/reset-password/confirm).
     // Off by default — flip to 'true' only if an un-migrated client still needs them.
     legacyAuthEndpointsEnabled: process.env.FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED ?? 'false',
+    // Phase 2 will wire this into the login phone-verification gate. Not read anywhere yet.
+    smsOtpBypassAdminCreated: process.env.SMS_OTP_BYPASS_ADMIN_CREATED ?? 'false',
   },
 
   // Multi-Tenancy

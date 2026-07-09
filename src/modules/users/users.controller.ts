@@ -51,10 +51,11 @@ export class UsersController {
     summary: 'Create a staff or member account',
     description:
       'Creates a user with a server-generated temporary password, sent via SMS ' +
-      '(mustChangePassword = true). The response also returns the plaintext temporary ' +
-      'password once, as a fallback in case SMS delivery fails. On first login the user ' +
-      'must verify their phone via a 6-digit SMS OTP (enforced by POST /auth/login) before ' +
-      'tokens are issued, then set a permanent password. ' +
+      '(mustChangePassword = true). The plaintext password is never returned in this ' +
+      'response — if SMS delivery fails, retrieve it via GET /users/:id/reveal-temp-password. ' +
+      'On first login the user must verify their phone via a 6-digit SMS OTP (enforced by ' +
+      'POST /auth/login, unless SMS_OTP_BYPASS_ADMIN_CREATED is enabled) before tokens are ' +
+      'issued, then set a permanent password. ' +
       'TENANT_ADMIN can create any tenant-level role. ' +
       'MANAGER can create LOAN_OFFICER, ACCOUNTANT, TELLER, MEMBER, CHAIRMAN, or AUDITOR accounts. ' +
       'SUPER_ADMIN is never assignable via this endpoint. ' +
@@ -233,19 +234,19 @@ export class UsersController {
   @ApiOperation({
     summary: 'Generate a new temporary password',
     description:
-      'Generates a new server-side temporary password, stores only its Argon2id hash, ' +
-      'sets mustChangePassword = true, invalidates existing sessions, enqueues an SMS to the ' +
-      'user with the new password, and also returns the plaintext value once (so the admin is ' +
-      'not blocked if the SMS fails to queue). Use this when the original temporary password was ' +
-      'lost before first login.',
+      'Generates a new server-side temporary password, stores its Argon2id hash plus an ' +
+      'AES-256-GCM encrypted copy (for admin recovery), sets mustChangePassword = true, ' +
+      'invalidates existing sessions, and enqueues an SMS to the user with the new password. ' +
+      'The plaintext is never returned in this response — retrieve it via ' +
+      'GET /users/:id/reveal-temp-password if the SMS fails to queue. Use this when the ' +
+      'original temporary password was lost before first login.',
   })
   @ApiResponse({
     status: 200,
-    description: 'Temporary password generated and returned once',
+    description: 'Temporary password generated',
     schema: {
       example: {
         success: true,
-        temporaryPassword: 'Q8m#2tLk9@Pa',
         smsEnqueued: true,
         user: {
           id: '550e8400-e29b-41d4-a716-446655440000',
@@ -255,7 +256,7 @@ export class UsersController {
           role: 'MEMBER',
         },
         message:
-          'Temporary password generated and sent via SMS. This value is also shown once here.',
+          'Temporary password generated and sent via SMS. An admin can also retrieve it via GET /users/:id/reveal-temp-password.',
       },
     },
   })
@@ -269,6 +270,40 @@ export class UsersController {
   ) {
     return this.usersService.generateTemporaryPassword(id, tenant.id, actor, req.ip);
   }
+
+  // ─── REVEAL TEMP PASSWORD (ADMIN FALLBACK) ────────────────────
+
+  @Get(':id/reveal-temp-password')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Roles(UserRole.TENANT_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reveal the current temporary password (admin fallback)',
+    description:
+      'Decrypts and returns the temporary password set by the most recent create or ' +
+      'generate-temporary-password call. Only works until the member sets their own ' +
+      'password via PATCH /auth/change-password, at which point the encrypted value is ' +
+      'cleared and this endpoint returns an error. Rate-limited to 5 per hour per admin ' +
+      '(plaintext credential disclosure), on top of the 5/min IP throttle.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Temporary password decrypted and returned',
+    schema: { example: { temporaryPassword: 'Q8m#2tLk9@Pa' } },
+  })
+  @ApiResponse({ status: 400, description: 'User has already set their own password' })
+  @ApiResponse({ status: 403, description: 'Insufficient role' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  @ApiResponse({ status: 429, description: 'Too many reveal requests — try again later' })
+  revealTemporaryPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.usersService.revealTemporaryPassword(id, tenant.id, actor, req.ip);
+  }
+
   // ─── REVEAL PIN (ADMIN FALLBACK) ──────────────────────────────
 
   @Post(':id/reveal-pin')

@@ -58,6 +58,7 @@ import { MetricsModule } from '../metrics/metrics.module';
 import { SmsProcessor } from '../sms/sms.processor';
 import { RepaymentReminderProcessor } from '../notifications/processors/repayment-reminder.processor';
 import { GuarantorRecoveryProcessor } from '../notifications/processors/guarantor-recovery.processor';
+import { EncryptionService } from '../zero-trust/encryption/encryption.service';
 
 export type QueueModuleMode = 'web' | 'worker';
 
@@ -398,6 +399,8 @@ class QueueStartupDiagnostics implements OnModuleInit {
     PlunkService,
     AlertsService,
     GuarantorValidationService,
+    // Needed by SmsProcessor to decrypt TEMP_PASSWORD job payloads at send time.
+    EncryptionService,
     ...getQueueProcessorProviders({ mode: 'web' }),
   ],
   exports: [BullModule, ...getQueueProcessorProviders({ mode: 'web' })],
@@ -408,7 +411,12 @@ export class QueueModule {
 
     return {
       module: QueueModule,
-      providers: [{ provide: QUEUE_MODULE_MODE, useValue: options.mode ?? 'web' }, ...providers],
+      providers: [
+        { provide: QUEUE_MODULE_MODE, useValue: options.mode ?? 'web' },
+        // Needed by SmsProcessor to decrypt TEMP_PASSWORD job payloads at send time.
+        EncryptionService,
+        ...providers,
+      ],
       exports: [BullModule, ...providers],
     };
   }

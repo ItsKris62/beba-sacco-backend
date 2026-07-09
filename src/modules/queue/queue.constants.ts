@@ -303,6 +303,13 @@ export interface PasswordResetOtpEmailPayload extends BaseEmailPayload {
 
 // ─── SMS job payloads ─────────────────────────────────────────────────────────
 
+/**
+ * Placeholder token substituted with the decrypted temp password by SmsProcessor,
+ * immediately before send. Keeps the plaintext out of the Redis-backed job payload
+ * (and therefore out of Bull Board) between enqueue and delivery.
+ */
+export const TEMP_PASSWORD_PLACEHOLDER = '{{TEMP_PASSWORD}}';
+
 export interface SmsJobPayload {
   type:
     | 'PASSWORD_RESET_OTP'
@@ -318,7 +325,12 @@ export interface SmsJobPayload {
     | 'LOAN_REJECTED'
     | 'LOAN_PENDING_APPROVAL';
   phone: string;
+  /** For TEMP_PASSWORD jobs, contains TEMP_PASSWORD_PLACEHOLDER instead of the plaintext. */
   message: string;
+  /** TEMP_PASSWORD only: JSON-stringified EncryptedPayload, decrypted by SmsProcessor at send time. */
+  encryptedPayload?: string;
+  /** TEMP_PASSWORD only: tenant scope needed to derive the decryption key. */
+  tenantId?: string;
 }
 
 export interface MemberApprovedEmailPayload extends BaseEmailPayload {

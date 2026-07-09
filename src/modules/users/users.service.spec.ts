@@ -19,6 +19,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
   const manager = { id: 'actor-id', role: UserRole.MANAGER };
 
   let smsServiceMock: any;
+  let encryptionMock: any;
 
   beforeEach(() => {
     prismaMock = {
@@ -36,14 +37,26 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       generateAndIssuePin: jest.fn(),
       validatePin: jest.fn(),
       regenerateAndRevealPin: jest.fn(),
+      assertIssuanceRateLimit: jest.fn().mockResolvedValue(undefined),
     } as any;
     smsServiceMock = { enqueueSms: jest.fn().mockResolvedValue(true) };
+    encryptionMock = {
+      encrypt: jest.fn().mockResolvedValue({
+        ciphertext: 'ciphertext',
+        iv: 'iv',
+        tag: 'tag',
+        keyId: 'key-1',
+        algorithm: 'aes-256-gcm',
+      }),
+      decrypt: jest.fn().mockResolvedValue('decrypted-temp-password'),
+    };
     service = new UsersService(
       prismaMock,
       auditMock,
       {} as any,
       pinServiceMock,
       smsServiceMock,
+      encryptionMock,
       { add: jest.fn() } as any,
     );
   });
@@ -64,17 +77,27 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       const result = await service.create(newUserDto, 'tenant-1', manager);
 
       expect(result.success).toBe(true);
-      expect(typeof result.temporaryPassword).toBe('string');
-      expect(result.temporaryPassword.length).toBeGreaterThanOrEqual(12);
+      expect((result as any).temporaryPassword).toBeUndefined(); // never returned — use reveal-temp-password
       expect(result.smsEnqueued).toBe(true);
 
       const { data } = prismaMock.user.create.mock.calls[0][0];
       expect(data.passwordHash).toMatch(/^\$argon2id\$/);
       expect(data.mustChangePassword).toBe(true);
       expect(data.pinLoginRequired).toBeUndefined(); // no longer set — PIN flow retired for new accounts
+      expect(typeof data.tempPasswordEncrypted).toBe('string');
+      expect(JSON.parse(data.tempPasswordEncrypted)).toEqual(
+        await encryptionMock.encrypt.mock.results[0].value,
+      );
+      expect(encryptionMock.encrypt).toHaveBeenCalledWith(expect.any(String), 'tenant-1');
 
       expect(smsServiceMock.enqueueSms).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'TEMP_PASSWORD', phone: newUserDto.phone }),
+        expect.objectContaining({
+          type: 'TEMP_PASSWORD',
+          phone: newUserDto.phone,
+          message: expect.stringContaining('{{TEMP_PASSWORD}}'),
+          encryptedPayload: data.tempPasswordEncrypted,
+          tenantId: 'tenant-1',
+        }),
         expect.any(String),
       );
     });
@@ -88,7 +111,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
 
       expect(result.success).toBe(true);
       expect(result.smsEnqueued).toBe(false);
-      expect(typeof result.temporaryPassword).toBe('string');
+      expect((result as any).temporaryPassword).toBeUndefined();
     });
 
     it('blocks MANAGER from creating a TENANT_ADMIN account', async () => {
@@ -163,6 +186,54 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       prismaMock.user.findFirst.mockResolvedValue(makeTarget(UserRole.TENANT_ADMIN));
       await expect(
         service.generateTemporaryPassword('target-id', 'tenant-1', manager),
+      ).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe('revealTemporaryPassword()', () => {
+    it('decrypts and returns the temp password for a revealable target', async () => {
+      prismaMock.user.findFirst.mockResolvedValue({
+        id: 'target-id',
+        role: UserRole.LOAN_OFFICER,
+        tempPasswordEncrypted: JSON.stringify({ ciphertext: 'c', iv: 'i', tag: 't', keyId: 'k', algorithm: 'aes-256-gcm' }),
+      });
+
+      const result = await service.revealTemporaryPassword('target-id', 'tenant-1', manager);
+
+      expect(result).toEqual({ temporaryPassword: 'decrypted-temp-password' });
+      expect(encryptionMock.decrypt).toHaveBeenCalledWith(
+        { ciphertext: 'c', iv: 'i', tag: 't', keyId: 'k', algorithm: 'aes-256-gcm' },
+        'tenant-1',
+      );
+      expect(auditMock.create).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'USER.TEMPORARY_PASSWORD_REVEALED', entityId: 'target-id' }),
+      );
+      // Never logs the decrypted value itself
+      const auditCall = auditMock.create.mock.calls[0][0];
+      expect(JSON.stringify(auditCall)).not.toContain('decrypted-temp-password');
+    });
+
+    it('rejects when the temp password has already been cleared (user set their own password)', async () => {
+      prismaMock.user.findFirst.mockResolvedValue({
+        id: 'target-id',
+        role: UserRole.LOAN_OFFICER,
+        tempPasswordEncrypted: null,
+      });
+
+      await expect(
+        service.revealTemporaryPassword('target-id', 'tenant-1', manager),
+      ).rejects.toThrow('already set their own password');
+    });
+
+    it('blocks MANAGER from revealing a temp password for a TENANT_ADMIN target', async () => {
+      prismaMock.user.findFirst.mockResolvedValue({
+        id: 'target-id',
+        role: UserRole.TENANT_ADMIN,
+        tempPasswordEncrypted: JSON.stringify({ ciphertext: 'c', iv: 'i', tag: 't', keyId: 'k', algorithm: 'aes-256-gcm' }),
+      });
+
+      await expect(
+        service.revealTemporaryPassword('target-id', 'tenant-1', manager),
       ).rejects.toThrow(ForbiddenException);
     });
   });

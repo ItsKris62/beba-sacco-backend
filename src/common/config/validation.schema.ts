@@ -186,6 +186,7 @@ export const validationSchema = Joi.object({
       'any.required': 'ENABLE_PRODUCT_RULES is required and must be true',
     }),
   FEATURE_EMAIL_VERIFICATION_ENFORCED: Joi.boolean().truthy('true').falsy('false').default(true),
+  SMS_OTP_BYPASS_ADMIN_CREATED: Joi.boolean().truthy('true').falsy('false').default(false),
 
   // ── Multi-Tenancy ──────────────────────────────────────────────────────────
   DEFAULT_TENANT_ID: Joi.string().optional(),
