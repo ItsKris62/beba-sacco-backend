@@ -44,6 +44,7 @@ import { maskPhone } from '../mpesa/utils/mpesa.utils';
 import { RedisService } from '../../common/services/redis.service';
 import { PasswordPolicyService } from './password-policy.service';
 import { PinService } from '../pin/pin.service';
+import { normalizePhone } from '../data-import/utils/phone-normalizer';
 
 /** JWT payload shape for password-reset tokens (separate from access tokens) */
 interface PasswordResetPayload {
@@ -290,10 +291,14 @@ export class AuthService {
     // phoneVerified=false unless they went through this or the legacy PIN flow —
     // are never affected; this only ever fires for genuinely new accounts.
     if (user.mustChangePassword && !user.phoneVerified) {
-      const phone = user.phone ?? user.phoneNumber;
-      if (!phone) {
+      const rawPhone = user.phone ?? user.phoneNumber;
+      if (!rawPhone) {
         throw new UnauthorizedException('No phone number on file for verification');
       }
+      // Normalize to 254XXXXXXXXX so the client always sees/round-trips one
+      // canonical format, regardless of how the number is stored (stored
+      // members may still have local 0XXXXXXXXX from admin-created accounts).
+      const phone = normalizePhone(rawPhone).normalized ?? rawPhone;
       const otp = await this.otpService.generate(phone);
       await this.smsService.enqueueSms(
         {
@@ -571,6 +576,21 @@ export class AuthService {
   // ─────────────────────────── VERIFY LOGIN OTP (phone verification) ───────────────────────────
 
   /**
+   * Given an already-normalized 254XXXXXXXXX phone, return every raw format a
+   * User row might have it stored in (254XXXXXXXXX or local 0XXXXXXXXX), so a
+   * Prisma `in` lookup matches regardless of which convention was used when
+   * the row was created. Existing data predates the 254-everywhere fix, so
+   * this stays needed until stored numbers are backfilled.
+   */
+  private phoneLookupVariants(canonicalPhone: string): string[] {
+    const variants = new Set<string>([canonicalPhone]);
+    if (canonicalPhone.startsWith('254') && canonicalPhone.length === 12) {
+      variants.add(`0${canonicalPhone.slice(3)}`);
+    }
+    return Array.from(variants);
+  }
+
+  /**
    * Verify the 6-digit SMS OTP required after a first-time temp-password login
    * (see the mustChangePassword + !phoneVerified gate in login()). On success,
    * marks the phone verified and issues a full session, exactly like login().
@@ -582,13 +602,17 @@ export class AuthService {
   ): Promise<LoginResponseDto> {
     await this.assertTenantAcceptsLogin(tenantId);
 
-    const normalizedPhone = dto.phone.trim().replace(/^\+/, '');
+    // dto.phone arrives as the canonical 254XXXXXXXXX format (echoed back from
+    // login()'s response), but stored User rows may still be in local
+    // 0XXXXXXXXX format — match against both so the lookup works either way.
+    const normalizedPhone = normalizePhone(dto.phone).normalized ?? dto.phone.trim().replace(/^\+/, '');
+    const lookupPhones = this.phoneLookupVariants(normalizedPhone);
 
     const candidate = await tenantAsyncStorage.run(undefined, () =>
       this.prisma.user.findFirst({
         where: {
           AND: [
-            { OR: [{ phone: normalizedPhone }, { phoneNumber: normalizedPhone }] },
+            { OR: [{ phone: { in: lookupPhones } }, { phoneNumber: { in: lookupPhones } }] },
             { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] },
           ],
         },
@@ -680,13 +704,14 @@ export class AuthService {
     tenantId: string,
     ipAddress?: string,
   ): Promise<void> {
-    const normalizedPhone = dto.phone.trim().replace(/^\+/, '');
+    const normalizedPhone = normalizePhone(dto.phone).normalized ?? dto.phone.trim().replace(/^\+/, '');
+    const lookupPhones = this.phoneLookupVariants(normalizedPhone);
 
     const candidate = await tenantAsyncStorage.run(undefined, () =>
       this.prisma.user.findFirst({
         where: {
           AND: [
-            { OR: [{ phone: normalizedPhone }, { phoneNumber: normalizedPhone }] },
+            { OR: [{ phone: { in: lookupPhones } }, { phoneNumber: { in: lookupPhones } }] },
             { OR: [{ tenantId }, { role: UserRole.SUPER_ADMIN }] },
           ],
         },

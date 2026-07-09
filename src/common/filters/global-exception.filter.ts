@@ -25,6 +25,7 @@ interface HttpExceptionBody {
   message?: string | string[];
   error?: string;
   statusCode?: number;
+  [key: string]: unknown;
 }
 
 @Catch()
@@ -39,6 +40,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     let status: number;
     let detail: string | string[];
     let errorCode: string;
+    let extraFields: Record<string, unknown> | undefined;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -51,6 +53,15 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         const typed = body as HttpExceptionBody;
         detail = typed.message ?? exception.message;
         errorCode = typed.error ?? exception.name;
+        // Preserve any application-specific signal fields (e.g.
+        // requiresPhoneVerification, phone, requires2FA, setupToken) that
+        // callers pass via `throw new HttpException({ ...custom }, status)`.
+        // Without this, those fields were silently dropped and the client
+        // had no way to distinguish "needs 2FA" from a generic 403.
+        const { message: _m, error: _e, statusCode: _s, ...rest } = typed;
+        if (Object.keys(rest).length > 0) {
+          extraFields = rest;
+        }
       }
     } else if (exception instanceof Error) {
       status = HttpStatus.INTERNAL_SERVER_ERROR;
@@ -83,7 +94,8 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       problem.stack = exception.stack;
     }
 
-    response.status(status).type('application/problem+json').json(problem);
+    const responseBody = extraFields ? { ...problem, ...extraFields } : problem;
+    response.status(status).type('application/problem+json').json(responseBody);
   }
 
   private correlationId(request: Request): string | undefined {
