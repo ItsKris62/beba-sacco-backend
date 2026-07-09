@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Observable } from 'rxjs';
-import { tap } from 'rxjs/operators';
+import { tap } from 'rxjs';
 import { TinybirdService } from '../../modules/analytics/tinybird.service';
 import { AuditService } from '../../modules/audit/audit.service'; // Assuming path
 import { tenantAsyncStorage } from '../services/tenant-context.service';
