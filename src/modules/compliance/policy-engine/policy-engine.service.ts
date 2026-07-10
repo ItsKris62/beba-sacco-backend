@@ -280,7 +280,7 @@ export class PolicyEngineService {
       { tenantId },
       {
         repeat: { every: 60 * 60 * 1000 }, // 1 hour
-        jobId: `compliance:hourly:${tenantId}`,
+        jobId: `compliance.hourly.${tenantId}`,
       },
     );
   }

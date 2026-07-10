@@ -109,7 +109,7 @@ export class GuarantorRecoveryProcessor extends WorkerHost {
         executeAfterIso: executionDate.toISOString(),
       },
       {
-        jobId: `${GUARANTOR_DEBIT_JOB}:${payload.tenantId}:${payload.loanId}`,
+        jobId: `${GUARANTOR_DEBIT_JOB}.${payload.tenantId}.${payload.loanId}`,
         delay: Decimal.max(new Decimal(executionDate.getTime()).minus(new Date().getTime()), new Decimal(0)).toNumber(),
         attempts: 3,
         backoff: { type: 'exponential', delay: 10000 },

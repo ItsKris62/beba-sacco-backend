@@ -49,7 +49,7 @@ export class CronOrchestratorService {
           'accrue-tenant',
           { tenantId: tenant.id, accrualDate },
           {
-            jobId: `interest-accrual:${tenant.id}:${accrualDate}`,
+            jobId: `interest-accrual.${tenant.id}.${accrualDate}`,
             attempts: 3,
             backoff: { type: 'exponential', delay: 10000 },
             removeOnComplete: true,

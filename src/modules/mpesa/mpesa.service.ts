@@ -246,7 +246,7 @@ export class MpesaService {
     userId: string,
     tenantId: string,
   ): Promise<MpesaTransactionStatusDto> {
-    const transaction = await this.prisma.client.mpesaTransaction.findFirst({
+    const transaction = await this.prisma.mpesaTransaction.findFirst({
       where: {
         checkoutRequestId,
         tenantId,
@@ -366,7 +366,7 @@ export class MpesaService {
       { referenceId, referenceType, tenantId, conversationId: darajaResp.ConversationID },
       {
         delay: 30 * 60 * 1000,
-        jobId: `b2c-timeout:${darajaResp.ConversationID}`,
+        jobId: `b2c-timeout.${darajaResp.ConversationID}`,
         removeOnComplete: true,
         removeOnFail: { age: 86400, count: 50 },
       },

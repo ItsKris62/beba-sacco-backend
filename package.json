@@ -36,6 +36,8 @@
         "seed:super-admin": "ts-node -r tsconfig-paths/register src/database/seeds/seed-super-admin.ts",
         "import:members": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/import-members.ts",
         "seed:loan": "ts-node -r tsconfig-paths/register prisma/seed-loan-workflow.ts",
+        "seed:e2e": "ts-node -r tsconfig-paths/register prisma/seed-e2e-test-data.ts",
+        "e2e:create-pending-deposit": "ts-node --transpile-only -r tsconfig-paths/register scripts/e2e-create-pending-deposit.ts",
         "sentry:sourcemaps": "sentry-cli sourcemaps inject --org veriwoks --project kolwa-beba-app ./dist && sentry-cli sourcemaps upload --org veriwoks --project kolwa-beba-app ./dist",
         "bullmq:repeatables:clean": "node scripts/clean-stale-repeatables.js",
         "backfill:accounts": "ts-node --transpile-only -r tsconfig-paths/register src/database/scripts/backfill-missing-accounts.ts"

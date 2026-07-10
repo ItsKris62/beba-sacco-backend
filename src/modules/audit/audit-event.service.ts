@@ -51,7 +51,12 @@ export class AuditEventService {
 
     try {
       await this.auditQueue.add('persist-audit-event', payload, {
-        jobId: `audit:${payload.tenantId}:${payload.correlationId}:${payload.action}:${Date.now()}`,
+        // BullMQ rejects ':' in custom job IDs ("Custom Id cannot contain :") —
+        // this used to silently fail every audit-event enqueue on every
+        // request until the bullmq security-patch bump (see Task 1 security
+        // sprint) started actually enforcing it. '.' matches the delimiter
+        // convention already used by QUEUE_NAMES elsewhere in this codebase.
+        jobId: `audit.${payload.tenantId}.${payload.correlationId}.${payload.action}.${Date.now()}`,
         attempts: 5,
         backoff: { type: 'exponential', delay: 1000 },
         removeOnComplete: { age: 86400, count: 1000 },

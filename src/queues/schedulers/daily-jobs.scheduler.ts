@@ -32,7 +32,11 @@ export class DailyJobsScheduler implements OnModuleInit {
         { source: 'daily-repeatable-scheduler' },
         {
           repeat: { pattern: '0 0 * * *', tz: EAT_TIME_ZONE },
-          jobId: 'apply-daily-penalties:daily-midnight-eat',
+          // BullMQ rejects ':' in custom job IDs — see audit-event.service.ts
+          // for the full explanation. This one is worse than most: a rejected
+          // jobId here means the repeatable cron registration itself throws,
+          // so daily penalty application never gets scheduled at all.
+          jobId: 'apply-daily-penalties.daily-midnight-eat',
           attempts: 3,
           backoff: { type: 'exponential', delay: 10000 },
           removeOnComplete: true,
@@ -44,7 +48,7 @@ export class DailyJobsScheduler implements OnModuleInit {
         { source: 'daily-repeatable-scheduler' },
         {
           repeat: { pattern: '0 0 * * *', tz: EAT_TIME_ZONE },
-          jobId: 'process-guarantor-forfeiture:daily-midnight-eat',
+          jobId: 'process-guarantor-forfeiture.daily-midnight-eat',
           attempts: 3,
           backoff: { type: 'exponential', delay: 10000 },
           removeOnComplete: true,

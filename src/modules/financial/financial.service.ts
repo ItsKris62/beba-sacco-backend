@@ -293,9 +293,9 @@ export class FinancialService {
           daysElapsed,
           correlationId,
         },
-        requestId: `audit:INTEREST.ACCRUAL:${loan.tenantId}:${loan.id}:${accrualDateStr}`,
+        requestId: `audit.INTEREST.ACCRUAL.${loan.tenantId}.${loan.id}.${accrualDateStr}`,
       },
-      `audit:INTEREST.ACCRUAL:${loan.tenantId}:${loan.id}:${accrualDateStr}`,
+      `audit.INTEREST.ACCRUAL.${loan.tenantId}.${loan.id}.${accrualDateStr}`,
       correlationId,
     );
   }

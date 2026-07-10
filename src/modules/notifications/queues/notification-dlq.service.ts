@@ -45,7 +45,7 @@ export class NotificationDlqService {
       },
       {
         ...NOTIFICATION_DLQ_JOB_OPTIONS,
-        jobId: `${channel}:${job.id ?? job.data.dedupeKey}`,
+        jobId: `${channel}.${job.id ?? job.data.dedupeKey}`,
       },
     );
   }

@@ -5,9 +5,14 @@ export const TENANT_SCOPED_MODELS = [
   'TenantCounter',
   'User',
   'AuditLog',
+  'PinVerification',
+  'AuditEvent',
+  'AuditChainHead',
+  'AuditArchiveManifest',
   'Member',
   'Document',
   'Account',
+  'AccountTypePolicy',
   'LoanProduct',
   'Loan',
   'LoanGuarantor',
@@ -25,6 +30,7 @@ export const TENANT_SCOPED_MODELS = [
   'CbkReturn',
   'ApiClient',
   'NotificationLog',
+  'NotificationPreference',
   'ComplianceAlert',
   'RiskScore',
   'FeatureSnapshot',
@@ -51,6 +57,8 @@ export const TENANT_SCOPED_MODELS = [
   'TicketAttachment',
   'Incident',
   'InAppNotification',
+  'GLAccount',
+  'JournalEntry',
 ] as const;
 
 export const TENANT_EXEMPT_MODELS = [
@@ -66,6 +74,11 @@ export const TENANT_EXEMPT_MODELS = [
   'MemberStage',
   'RefreshSession',
   'DataConsent',
+  // GLPosting has no tenantId column of its own — it's only transitively
+  // tenant-scoped via its parent JournalEntry/GLAccount. Adding it to
+  // TENANT_SCOPED_MODELS would make the extension inject a nonexistent
+  // `tenantId` into every where/data payload, breaking every query.
+  'GLPosting',
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];

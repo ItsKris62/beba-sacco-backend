@@ -158,9 +158,9 @@ export class ReconciliationService {
                 },
                 mpesaTransactionId: mpesaTxn.id,
               },
-              requestId: `audit:RECON.FLAG_PENDING:${tenantId}:${mpesaTxn.id}:${settlementDate}`,
+              requestId: `audit.RECON.FLAG_PENDING.${tenantId}.${mpesaTxn.id}.${settlementDate}`,
             },
-            `audit:RECON.FLAG_PENDING:${tenantId}:${mpesaTxn.id}:${settlementDate}`,
+            `audit.RECON.FLAG_PENDING.${tenantId}.${mpesaTxn.id}.${settlementDate}`,
             correlationId,
           );
           autoResolved++;
@@ -233,9 +233,9 @@ export class ReconciliationService {
           totalDaraja: totalDaraja.toNumber(),
           totalPosted: totalPosted.toNumber(),
         },
-        requestId: `audit:RECON.COMPLETE:${tenantId}:${settlementDate}`,
+        requestId: `audit.RECON.COMPLETE.${tenantId}.${settlementDate}`,
       },
-      `audit:RECON.COMPLETE:${tenantId}:${settlementDate}`,
+      `audit.RECON.COMPLETE.${tenantId}.${settlementDate}`,
       correlationId,
     );
 

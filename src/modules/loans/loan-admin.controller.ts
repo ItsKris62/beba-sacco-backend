@@ -273,7 +273,7 @@ export class LoanAdminController {
     description: 'Recovery notice job queued',
     schema: {
       example: {
-        jobId: 'guarantor-recovery-notice:tenant-id:loan-id',
+        jobId: 'guarantor-recovery-notice.tenant-id.loan-id',
       },
     },
   })

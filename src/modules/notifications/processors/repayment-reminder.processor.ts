@@ -40,7 +40,7 @@ export class RepaymentReminderProcessor extends WorkerHost {
       REPAYMENT_REMINDER_SCAN_JOB,
       { runDateIso },
       {
-        jobId: `${REPAYMENT_REMINDER_SCAN_JOB}:${runDateIso}`,
+        jobId: `${REPAYMENT_REMINDER_SCAN_JOB}.${runDateIso}`,
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
       },

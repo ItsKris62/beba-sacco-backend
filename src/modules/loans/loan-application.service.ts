@@ -1295,7 +1295,7 @@ export class LoanApplicationService {
           {
             delay: 24 * 60 * 60 * 1000,
             attempts: 2,
-            jobId: `guarantor-reminder-24h:${loanId}:${item.memberId}`,
+            jobId: `guarantor-reminder-24h.${loanId}.${item.memberId}`,
           },
         )
         .catch((e: unknown) => this.logger.error('Failed to enqueue 24h guarantor reminder', e));
@@ -1306,7 +1306,7 @@ export class LoanApplicationService {
           {
             delay: 48 * 60 * 60 * 1000,
             attempts: 2,
-            jobId: `guarantor-reminder-48h:${loanId}:${item.memberId}`,
+            jobId: `guarantor-reminder-48h.${loanId}.${item.memberId}`,
           },
         )
         .catch((e: unknown) => this.logger.error('Failed to enqueue 48h guarantor reminder', e));

@@ -92,7 +92,7 @@ describe('Tier 4 audit logging', () => {
           }),
         }),
         expect.objectContaining({
-          jobId: 'audit:INTEREST.ACCRUAL:tenant-uuid-1:loan-uuid-1:2026-05-08',
+          jobId: 'audit.INTEREST.ACCRUAL.tenant-uuid-1.loan-uuid-1.2026-05-08',
           attempts: 1,
         }),
       );
@@ -161,7 +161,7 @@ describe('Tier 4 audit logging', () => {
           newValue: { status: TransactionStatus.RECON_PENDING },
         }),
         expect.objectContaining({
-          jobId: 'audit:RECON.FLAG_PENDING:tenant-uuid-1:mpesa-uuid-1:2026-05-08',
+          jobId: 'audit.RECON.FLAG_PENDING.tenant-uuid-1.mpesa-uuid-1.2026-05-08',
         }),
       );
     });
@@ -186,7 +186,7 @@ describe('Tier 4 audit logging', () => {
           }),
         }),
         expect.objectContaining({
-          jobId: 'audit:RECON.COMPLETE:tenant-uuid-1:2026-05-08',
+          jobId: 'audit.RECON.COMPLETE.tenant-uuid-1.2026-05-08',
         }),
       );
     });

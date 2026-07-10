@@ -44,14 +44,14 @@ export class SupportModule implements OnModuleInit {
     if (!isWorkerRuntime()) return;
 
     await this.workflowQueue.add('check-sla', {}, {
-      jobId: 'check-sla:system:every-5-minutes',
+      jobId: 'check-sla.system.every-5-minutes',
       repeat: { pattern: '*/5 * * * *' }, // Every 5 mins
       removeOnComplete: true,
       removeOnFail: true,
     });
 
     await this.workflowQueue.add('auto-close', {}, {
-      jobId: 'auto-close:system:hourly',
+      jobId: 'auto-close.system.hourly',
       repeat: { pattern: '0 * * * *' }, // Hourly
       removeOnComplete: true,
       removeOnFail: true,

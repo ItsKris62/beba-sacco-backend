@@ -77,7 +77,7 @@ export class LoanRecoveryService {
       throw new BadRequestException(`GUARANTOR_RECOVERY_NOTICE_REQUIRES_T${gracePeriod}_DEFAULT`);
     }
 
-    const jobId = `${GUARANTOR_RECOVERY_NOTICE_JOB}:${tenantId}:${loanId}`;
+    const jobId = `${GUARANTOR_RECOVERY_NOTICE_JOB}.${tenantId}.${loanId}`;
     await this.guarantorRecoveryQueue.add(
       GUARANTOR_RECOVERY_NOTICE_JOB,
       {

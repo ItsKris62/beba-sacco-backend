@@ -2,9 +2,15 @@ export const NOTIFICATION_QUEUE_NAMES = {
   EMAIL_QUEUE: 'email-queue',
   SMS_QUEUE: 'sms-queue',
   IN_APP_QUEUE: 'in-app-queue',
-  EMAIL_DLQ: 'failed:email-queue',
-  SMS_DLQ: 'failed:sms-queue',
-  IN_APP_DLQ: 'failed:in-app-queue',
+  // Bare colon-namespaced names ('failed:email-queue') are rejected outright
+  // by the current bullmq version ("Queue name cannot contain :") — this was
+  // a full-app-boot blocker, invisible until something actually instantiated
+  // NotificationsQueueModule end-to-end. Matches the `.dlq` suffix convention
+  // used by every other dead-letter queue in this codebase (e.g.
+  // QUEUE_NAMES.MPESA_CALLBACK_DLQ = 'mpesa.callback.dlq').
+  EMAIL_DLQ: 'email-queue.dlq',
+  SMS_DLQ: 'sms-queue.dlq',
+  IN_APP_DLQ: 'in-app-queue.dlq',
 } as const;
 
 export type NotificationQueueName =
