@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import type { IncomingMessage } from 'http';
 import { ConfigModule } from '@nestjs/config';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { LoggerModule } from 'nestjs-pino';
 import { SentryModule } from '@sentry/nestjs/setup';
@@ -26,6 +27,7 @@ import { Phase6Module } from './modules/admin/phase6/phase6.module';
   imports: [
     SentryModule.forRoot(),
     ScheduleModule.forRoot(),
+    EventEmitterModule.forRoot(),
     ConfigModule.forRoot({
       isGlobal: true,
       load: [appConfig],

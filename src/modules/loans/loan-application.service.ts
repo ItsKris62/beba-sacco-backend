@@ -9,6 +9,7 @@ import {
   Inject,
   forwardRef,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import {
@@ -27,6 +28,7 @@ import { Queue } from 'bullmq';
 import { Request } from 'express';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { DOMAIN_EVENTS, DomainEventName } from '../../common/constants/events';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { MemberApplyLoanDto, GuarantorNominationDto } from './dto/member-apply-loan.dto';
@@ -109,6 +111,7 @@ export class LoanApplicationService {
     @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
     private readonly auditQueue: Queue<AuditLogJobPayload>,
     private readonly smsService: SmsService,
+    private readonly eventEmitter: EventEmitter2,
     @Inject(forwardRef(() => LoansService))
     private readonly loansService: LoansService,
   ) {}
@@ -510,12 +513,10 @@ export class LoanApplicationService {
       cause?: { code?: string; constraint?: string };
     };
     const code = dbError.code ?? dbError.meta?.code ?? dbError.cause?.code;
-    const constraint =
-      dbError.constraint ?? dbError.meta?.constraint ?? dbError.cause?.constraint;
+    const constraint = dbError.constraint ?? dbError.meta?.constraint ?? dbError.cause?.constraint;
 
     return code === '23505' && constraint === 'loan_one_open_per_member';
   }
-
 
   private async _doMemberApply(
     dto: MemberApplyLoanDto,
@@ -798,6 +799,15 @@ export class LoanApplicationService {
           correlationId,
         },
       });
+      this.emitDomainEvent(DOMAIN_EVENTS.LOAN.APPLICATION_RECEIVED, {
+        tenantId,
+        loanId: txResult.loan.id,
+        memberId,
+        principalAmount: txResult.principalAmount,
+        loanProductId: dto.loanProductId,
+        appliedBy: userId,
+        correlationId,
+      });
 
       const guarantorMemberIds = txResult.guarantorNotifications.map(
         (guarantor) => guarantor.memberId,
@@ -808,6 +818,7 @@ export class LoanApplicationService {
               where: { id: { in: guarantorMemberIds }, tenantId },
               select: {
                 id: true,
+                userId: true,
                 user: { select: { email: true, firstName: true, phone: true, phoneNumber: true } },
               },
             })
@@ -815,6 +826,15 @@ export class LoanApplicationService {
       const guarantorMemberMap = new Map(guarantorMembers.map((member) => [member.id, member]));
 
       for (const guarantor of txResult.guarantorNotifications) {
+        const guarantorMember = guarantorMemberMap.get(guarantor.memberId);
+        this.emitDomainEvent(DOMAIN_EVENTS.GUARANTOR.REQUESTED, {
+          tenantId,
+          loanId: txResult.loan.id,
+          guarantorUserId: guarantorMember?.userId ?? guarantor.memberId,
+          guarantorMemberId: guarantor.memberId,
+          guaranteedAmount: guarantor.guaranteedAmount,
+        });
+
         await this.guarantorExpiryQueue
           .add(
             'guarantor-expiry-check',
@@ -827,8 +847,6 @@ export class LoanApplicationService {
             },
           )
           .catch((e: unknown) => this.logger.error('Failed to enqueue guarantor expiry', e));
-
-        const guarantorMember = guarantorMemberMap.get(guarantor.memberId);
 
         if (guarantorMember?.user?.email) {
           this.enqueueEmail(
@@ -1173,7 +1191,7 @@ export class LoanApplicationService {
       guarantorMemberIds.length > 0
         ? await this.prisma.member.findMany({
             where: { id: { in: guarantorMemberIds }, tenantId },
-            select: { id: true, user: { select: { email: true, firstName: true } } },
+            select: { id: true, userId: true, user: { select: { email: true, firstName: true } } },
           })
         : [];
     const guarantorMemberMap = new Map(guarantorMembers.map((member) => [member.id, member]));
@@ -1232,6 +1250,13 @@ export class LoanApplicationService {
 
       // Notify guarantor
       const guarantorMember = guarantorMemberMap.get(item.memberId);
+      this.emitDomainEvent(DOMAIN_EVENTS.GUARANTOR.REQUESTED, {
+        tenantId,
+        loanId,
+        guarantorUserId: guarantorMember?.userId ?? item.memberId,
+        guarantorMemberId: item.memberId,
+        guaranteedAmount: item.guaranteedAmount,
+      });
 
       const borrowerName =
         [loan.member?.user?.firstName, loan.member?.user?.lastName].filter(Boolean).join(' ') ||
@@ -1491,14 +1516,7 @@ export class LoanApplicationService {
     }
 
     if (targetStatus === LoanStatus.APPROVED) {
-      return this.loansService.approve(
-        loanId,
-        tenantId,
-        actor.id,
-        dto.reason,
-        req.ip,
-        userAgent,
-      );
+      return this.loansService.approve(loanId, tenantId, actor.id, dto.reason, req.ip, userAgent);
     }
 
     if (targetStatus === LoanStatus.REJECTED) {
@@ -1561,7 +1579,28 @@ export class LoanApplicationService {
       })
       .catch((e: unknown) => this.logger.error('Audit write failed', e));
 
+    this.emitDomainEvent(DOMAIN_EVENTS.LOAN.STATUS_CHANGED, {
+      tenantId,
+      loanId,
+      memberId: loan.memberId,
+      oldStatus,
+      newStatus: targetStatus,
+      actorId: actor.id,
+      reason: dto.reason,
+      correlationId,
+    });
+
     return updated;
+  }
+
+  private emitDomainEvent(eventName: DomainEventName, payload: Record<string, unknown>): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Domain event emit failed (${eventName}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   // ─── ADMIN: GUARANTOR EXPOSURE CHECK ───────────────────────────────────────

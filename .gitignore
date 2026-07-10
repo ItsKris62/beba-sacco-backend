@@ -70,6 +70,9 @@ pids/
 temp/
 tmp/
 
+# ─── CLI remediation reports (may contain member/loan data) ───────────────────
+remediation-*.json
+
 # ─── Misc ─────────────────────────────────────────────────────────────────────
 
 

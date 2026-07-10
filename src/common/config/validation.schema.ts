@@ -58,7 +58,9 @@ export const validationSchema = Joi.object({
   REDIS_PORT: Joi.number().default(6379),
   REDIS_PASSWORD: Joi.string().allow('').optional(),
   REDIS_TLS: Joi.boolean().default(false),
-  REDIS_URL: Joi.string().uri({ scheme: ['redis', 'rediss'] }).optional(),
+  REDIS_URL: Joi.string()
+    .uri({ scheme: ['redis', 'rediss'] })
+    .optional(),
   UPSTASH_REDIS_REST_URL: Joi.string().uri().optional(),
   UPSTASH_REDIS_REST_TOKEN: Joi.string().allow('').optional(),
 
@@ -165,6 +167,10 @@ export const validationSchema = Joi.object({
   PLUNK_FROM_EMAIL: Joi.string().email().required(),
   PLUNK_FROM_NAME: Joi.string().default('Beba SACCO'),
   EMAIL_IGNORE_DELIVERY_FAILURES: Joi.boolean().truthy('true').falsy('false').default(false),
+  SENDGRID_API_KEY: Joi.string().optional(),
+  SENDGRID_FROM_EMAIL: Joi.string().email().optional(),
+  SENDGRID_FROM_NAME: Joi.string().optional(),
+  NOTIFICATION_MOCK_MODE: Joi.boolean().truthy('true').falsy('false').default(false),
 
   // ── CORS & Security ────────────────────────────────────────────────────────
   CORS_ORIGIN: Joi.string().required(),
@@ -211,12 +217,16 @@ export const validationSchema = Joi.object({
     then: Joi.required(),
     otherwise: Joi.optional(),
   }),
+  AFRICASTALKING_USERNAME: Joi.string().optional(),
   AFRICAS_TALKING_API_KEY: Joi.string().when('NODE_ENV', {
     is: 'production',
     then: Joi.required(),
     otherwise: Joi.optional(),
   }),
+  AFRICASTALKING_API_KEY: Joi.string().optional(),
   AFRICAS_TALKING_SENDER_ID: Joi.string().optional(),
+  AFRICASTALKING_SENDER: Joi.string().optional(),
+  AFRICASTALKING_SENDER_ID: Joi.string().optional(),
   SMS_IGNORE_DELIVERY_FAILURES: Joi.boolean().truthy('true').falsy('false').default(false),
 
   // ── BullMQ Worker Concurrency ──────────────────────────────────────────────
@@ -225,4 +235,3 @@ export const validationSchema = Joi.object({
   BULLMQ_CONCURRENCY_LEDGER: Joi.number().integer().default(2),
   BULLMQ_CONCURRENCY_WEBHOOK: Joi.number().integer().default(10),
 });
-

@@ -234,6 +234,7 @@ export class LoanRecoveryService {
 
         const balanceAfter = balanceBefore.minus(actualDeduction).toDecimalPlaces(4);
         const amount = actualDeduction.toString();
+        const remainingFrozenSavings = frozenSavings.minus(actualDeduction).toDecimalPlaces(4);
         const accountUpdate = await tx.account.updateMany({
           where: { id: account.id, tenantId, isActive: true, version: lockedAccount.version },
           data: {
@@ -252,6 +253,7 @@ export class LoanRecoveryService {
           data: {
             recoveredAmount: { increment: amount },
             recoveryDate,
+            ...(remainingFrozenSavings.lessThanOrEqualTo(0) && { holdReleasedAt: recoveryDate }),
           },
         });
 

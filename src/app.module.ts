@@ -1,5 +1,6 @@
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD, APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
@@ -94,6 +95,7 @@ import { AuditService } from './modules/audit/audit.service';
 
     // ── Cron Jobs ──────────────────────────────────────────────
     ScheduleModule.forRoot(),
+    EventEmitterModule.forRoot(),
 
     // ── Configuration ──────────────────────────────────────────
     ConfigModule.forRoot({
@@ -121,8 +123,8 @@ import { AuditService } from './modules/audit/audit.service';
     ThrottlerModule.forRoot([
       {
         name: 'global',
-        ttl: 60_000,  // 1 minute window
-        limit: 100,   // 100 requests per minute per IP
+        ttl: 60_000, // 1 minute window
+        limit: 100, // 100 requests per minute per IP
       },
     ]),
 
@@ -135,9 +137,9 @@ import { AuditService } from './modules/audit/audit.service';
     LoansHttpModule,
     LoanApplicationModule, // ✅ Registers LoanAdminController + exports LoanApplicationService
     MpesaHttpModule,
-    AuditHttpModule,     // Must be imported so AuditService is resolvable by AuditInterceptor
+    AuditHttpModule, // Must be imported so AuditService is resolvable by AuditInterceptor
     QueueModule,
-    BullBoardModule,  // must come after QueueModule so the shared BullMQ root connection is ready
+    BullBoardModule, // must come after QueueModule so the shared BullMQ root connection is ready
     StorageModule,
     DocumentsHttpModule,
     AnalyticsModule,

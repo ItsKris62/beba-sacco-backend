@@ -7,6 +7,7 @@ import {
   NotImplementedException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import {
@@ -24,6 +25,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { DOMAIN_EVENTS, DomainEventName } from '../../common/constants/events';
 import { RedisService } from '../../common/services/redis.service';
 import { CacheService } from '../../common/services/cache.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
@@ -78,6 +80,7 @@ export class LoansService {
     private readonly ledger: LedgerService,
     private readonly approvalChain: ApprovalChainService,
     private readonly riskScorer: BehavioralRiskScorerService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -97,6 +100,16 @@ export class LoansService {
           `[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`,
         ),
       );
+  }
+
+  private emitDomainEvent(eventName: DomainEventName, payload: Record<string, unknown>): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Domain event emit failed (${eventName}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   // ─── LOAN PRODUCTS ───────────────────────────────────────────
@@ -312,7 +325,13 @@ export class LoansService {
 
   async findAll(
     tenantId: string,
-    opts: { memberId?: string; status?: LoanStatus; cursor?: string; page?: number; limit?: number } = {},
+    opts: {
+      memberId?: string;
+      status?: LoanStatus;
+      cursor?: string;
+      page?: number;
+      limit?: number;
+    } = {},
   ) {
     const limit = Math.min(100, Math.max(1, Number(opts.limit ?? 20)));
 
@@ -337,7 +356,7 @@ export class LoansService {
 
     const hasMore = loans.length > limit;
     const pageRows = hasMore ? loans.slice(0, limit) : loans;
-    const nextCursor = hasMore ? pageRows[pageRows.length - 1]?.id ?? null : null;
+    const nextCursor = hasMore ? (pageRows[pageRows.length - 1]?.id ?? null) : null;
 
     // Guarantor coverage for the whole page in one groupBy - never loop-and-query per loan.
     const loanIds = pageRows.map((loan) => loan.id);
@@ -527,6 +546,23 @@ export class LoansService {
       });
 
       return approvedLoan;
+    });
+
+    this.emitDomainEvent(DOMAIN_EVENTS.LOAN.STATUS_CHANGED, {
+      tenantId,
+      loanId: id,
+      memberId: loan.memberId,
+      oldStatus: loan.status,
+      newStatus: LoanStatus.APPROVED,
+      actorId: approvedBy,
+    });
+    this.emitDomainEvent(DOMAIN_EVENTS.LOAN.APPROVED, {
+      tenantId,
+      loanId: id,
+      memberId: loan.memberId,
+      oldStatus: loan.status,
+      newStatus: LoanStatus.APPROVED,
+      actorId: approvedBy,
     });
 
     // Notify member of approval
@@ -852,6 +888,24 @@ export class LoansService {
       { isolationLevel: 'Serializable' as const },
     );
 
+    this.emitDomainEvent(DOMAIN_EVENTS.LOAN.STATUS_CHANGED, {
+      tenantId,
+      loanId: id,
+      memberId: loan.memberId,
+      oldStatus: loan.status,
+      newStatus: disbursalResult.loan.status,
+      actorId: disbursedBy,
+    });
+    this.emitDomainEvent(DOMAIN_EVENTS.LOAN.DISBURSED, {
+      tenantId,
+      loanId: id,
+      memberId: loan.memberId,
+      oldStatus: loan.status,
+      newStatus: disbursalResult.loan.status,
+      actorId: disbursedBy,
+      transactionRef: reference,
+    });
+
     // Notify member of disbursement (after transaction commits)
     const memberUser = loan.member?.user;
     if (memberUser?.email) {
@@ -996,6 +1050,25 @@ export class LoansService {
       { isolationLevel: 'Serializable' as const },
     );
 
+    this.emitDomainEvent(DOMAIN_EVENTS.LOAN.STATUS_CHANGED, {
+      tenantId,
+      loanId: id,
+      memberId: loan.memberId,
+      oldStatus: loan.status,
+      newStatus: LoanStatus.REJECTED,
+      actorId: rejectedBy,
+      reason: dto.reason,
+    });
+    this.emitDomainEvent(DOMAIN_EVENTS.LOAN.REJECTED, {
+      tenantId,
+      loanId: id,
+      memberId: loan.memberId,
+      oldStatus: loan.status,
+      newStatus: LoanStatus.REJECTED,
+      actorId: rejectedBy,
+      reason: dto.reason,
+    });
+
     // Notify member of rejection
     const rejectMemberUser = loan.member?.user;
     if (rejectMemberUser?.email) {
@@ -1050,6 +1123,7 @@ export class LoansService {
   ) {
     const guarantor = await this.prisma.loanGuarantor.findFirst({
       where: { loanId, memberId, tenantId },
+      include: { member: { select: { userId: true } } },
     });
     if (!guarantor) throw new NotFoundException('LoanGuarantor record not found for this loan');
 
@@ -1078,6 +1152,21 @@ export class LoansService {
         ipAddress,
       })
       .catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+    const guarantorPayload = {
+      tenantId,
+      loanId,
+      guarantorUserId: guarantor.member.userId,
+      guarantorMemberId: memberId,
+      status: newStatus,
+    };
+    this.emitDomainEvent(DOMAIN_EVENTS.GUARANTOR.RESPONSE_RECEIVED, guarantorPayload);
+    this.emitDomainEvent(
+      newStatus === GuarantorStatus.ACCEPTED
+        ? DOMAIN_EVENTS.GUARANTOR.ACCEPTED
+        : DOMAIN_EVENTS.GUARANTOR.REJECTED,
+      guarantorPayload,
+    );
 
     // Check if minimum coverage is now met to auto-advance to PENDING_REVIEW
     await this.checkAndAdvanceLoanStatus(loanId, tenantId);
@@ -1217,7 +1306,10 @@ export class LoansService {
             transaction: existingReplay,
             reference,
             paidAt: existingReplay.createdAt,
-            newOutstandingBalance: Math.max(0, new Decimal(currentLoan.outstandingBalance.toString()).toNumber()),
+            newOutstandingBalance: Math.max(
+              0,
+              new Decimal(currentLoan.outstandingBalance.toString()).toNumber(),
+            ),
             allocation: { toPenalties: 0, toInterest: 0, toPrincipal: 0 },
           };
         }
@@ -1420,6 +1512,24 @@ export class LoansService {
     );
 
     // Notify member after the transaction commits — fire-and-forget
+    if (repayResult.loan.status === LoanStatus.FULLY_PAID) {
+      this.emitDomainEvent(DOMAIN_EVENTS.LOAN.STATUS_CHANGED, {
+        tenantId,
+        loanId,
+        memberId: loan.memberId,
+        oldStatus: LoanStatus.ACTIVE,
+        newStatus: LoanStatus.FULLY_PAID,
+        actorId: processedBy,
+      });
+      this.emitDomainEvent(DOMAIN_EVENTS.LOAN.REPAID, {
+        tenantId,
+        loanId,
+        memberId: loan.memberId,
+        amountPaid: parseFloat(repayResult.transaction.amount.toString()),
+        transactionRef: repayResult.reference,
+      });
+    }
+
     if (repayMemberUser?.user?.email) {
       this.enqueueEmail(
         {

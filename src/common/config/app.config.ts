@@ -106,11 +106,25 @@ export default registerAs('app', () => ({
     fromName: process.env.PLUNK_FROM_NAME || 'Beba SACCO',
   },
 
+  sendGrid: {
+    apiKey: process.env.SENDGRID_API_KEY,
+    fromEmail:
+      process.env.SENDGRID_FROM_EMAIL || process.env.PLUNK_FROM_EMAIL || 'noreply@beba-sacco.com',
+    fromName: process.env.SENDGRID_FROM_NAME || process.env.PLUNK_FROM_NAME || 'Beba SACCO',
+  },
+
+  notifications: {
+    mockMode: process.env.NOTIFICATION_MOCK_MODE === 'true',
+  },
+
   // Africa's Talking SMS
   africasTalking: {
-    username: process.env.AFRICAS_TALKING_USERNAME,
-    apiKey: process.env.AFRICAS_TALKING_API_KEY,
-    senderId: process.env.AFRICAS_TALKING_SENDER_ID,
+    username: process.env.AFRICAS_TALKING_USERNAME || process.env.AFRICASTALKING_USERNAME,
+    apiKey: process.env.AFRICAS_TALKING_API_KEY || process.env.AFRICASTALKING_API_KEY,
+    senderId:
+      process.env.AFRICAS_TALKING_SENDER_ID ||
+      process.env.AFRICASTALKING_SENDER_ID ||
+      process.env.AFRICASTALKING_SENDER,
   },
 
   // Security

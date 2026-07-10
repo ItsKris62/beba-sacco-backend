@@ -1,5 +1,6 @@
 import { Processor, WorkerHost, InjectQueue } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomUUID } from 'crypto';
 import {
   AccountType,
@@ -13,6 +14,7 @@ import {
 import { Job, Queue } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { RedisService } from '../../../common/services/redis.service';
+import { DOMAIN_EVENTS, DomainEventName } from '../../../common/constants/events';
 import { toDecimal } from '../../../common/utils/decimal.util';
 import { AuditService as AuditLogService } from '../../audit/audit.service';
 import { LedgerService } from '../../accounting/ledger.service';
@@ -27,7 +29,9 @@ import {
 } from '../queue.constants';
 
 interface ForfeitureNotification {
+  tenantId: string;
   guarantorMemberId: string;
+  guarantorUserId: string;
   loanId: string;
   loanNumber: string;
   amountForfeited: Prisma.Decimal;
@@ -50,8 +54,19 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
     private readonly smsQueue: Queue<SmsJobPayload>,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
+    private readonly eventEmitter: EventEmitter2,
   ) {
     super();
+  }
+
+  private emitDomainEvent(eventName: DomainEventName, payload: Record<string, unknown>): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Domain event emit failed (${eventName}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async process(job: Job): Promise<{ processedLoans: number; totalForfeited: string }> {
@@ -85,6 +100,13 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
       // as failed — a financial transaction that has already been applied.
       for (const notification of result.notifications) {
         await this.notifyGuarantor(notification);
+        this.emitDomainEvent(DOMAIN_EVENTS.GUARANTOR.FORFEITED, {
+          tenantId: notification.tenantId,
+          loanId: notification.loanId,
+          guarantorUserId: notification.guarantorUserId,
+          guarantorMemberId: notification.guarantorMemberId,
+          amountSlashed: notification.amountForfeited.toNumber(),
+        });
       }
     }
 
@@ -194,7 +216,13 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
               member: {
                 select: {
                   user: {
-                    select: { email: true, firstName: true, phone: true, phoneNumber: true },
+                    select: {
+                      id: true,
+                      email: true,
+                      firstName: true,
+                      phone: true,
+                      phoneNumber: true,
+                    },
                   },
                 },
               },
@@ -254,9 +282,13 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
           account.id,
           recoveryAttemptId,
         );
-        const existingForfeiture = await tx.transaction.findFirst({ where: { tenantId, reference } });
+        const existingForfeiture = await tx.transaction.findFirst({
+          where: { tenantId, reference },
+        });
         if (existingForfeiture) {
-          this.logger.warn(`Guarantor forfeiture already posted for reference=${reference} — skipping`);
+          this.logger.warn(
+            `Guarantor forfeiture already posted for reference=${reference} — skipping`,
+          );
           continue;
         }
 
@@ -351,7 +383,9 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
 
         totalForfeited = totalForfeited.plus(amount).toDecimalPlaces(4);
         notifications.push({
+          tenantId,
           guarantorMemberId: guarantor.memberId,
+          guarantorUserId: guarantor.member.user.id,
           loanId,
           loanNumber: loan.loanNumber,
           amountForfeited: amount,

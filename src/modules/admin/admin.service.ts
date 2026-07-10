@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import {
@@ -16,6 +17,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { DOMAIN_EVENTS, DomainEventName } from '../../common/constants/events';
 import { RedisService } from '../../common/services/redis.service';
 import { CacheService } from '../../common/services/cache.service';
 import { QUEUE_NAMES, type EmailJobPayload } from '../queue/queue.constants';
@@ -57,7 +59,18 @@ export class AdminService {
     private readonly redis: RedisService,
     private readonly cache: CacheService,
     @InjectQueue(QUEUE_NAMES.EMAIL) private readonly emailQueue: Queue,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
+
+  private emitDomainEvent(eventName: DomainEventName, payload: Record<string, unknown>): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Domain event emit failed (${eventName}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   // ─── DASHBOARD STATS ─────────────────────────────────────────
 
@@ -324,7 +337,9 @@ export class AdminService {
     const where = {
       tenantId,
       ...(opts.accountStatus && { user: { accountStatus: opts.accountStatus } }),
-      ...(opts.recentlyActive && { user: { lastLoginAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } } }),
+      ...(opts.recentlyActive && {
+        user: { lastLoginAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+      }),
       ...(opts.search && {
         OR: [
           { memberNumber: { contains: opts.search, mode: 'insensitive' as const } },
@@ -482,19 +497,20 @@ export class AdminService {
       const reviewedAt = new Date();
       const updated = await tx.member.update({
         where: { id: memberId },
-        data: dto.action === ReviewAction.APPROVE
-          ? {
-              kycStatus: KycStatus.APPROVED,
-              kycReviewedAt: reviewedAt,
-              kycReviewedByUserId: actor.id,
-              kycRejectionReason: null,
-            }
-          : {
-              kycStatus: KycStatus.REJECTED,
-              kycReviewedAt: reviewedAt,
-              kycReviewedByUserId: actor.id,
-              kycRejectionReason: dto.reason!.trim(),
-            },
+        data:
+          dto.action === ReviewAction.APPROVE
+            ? {
+                kycStatus: KycStatus.APPROVED,
+                kycReviewedAt: reviewedAt,
+                kycReviewedByUserId: actor.id,
+                kycRejectionReason: null,
+              }
+            : {
+                kycStatus: KycStatus.REJECTED,
+                kycReviewedAt: reviewedAt,
+                kycReviewedByUserId: actor.id,
+                kycRejectionReason: dto.reason!.trim(),
+              },
         select: {
           id: true,
           memberNumber: true,
@@ -555,7 +571,29 @@ export class AdminService {
       });
     });
 
+    const kycStatus = dto.action === ReviewAction.APPROVE ? KycStatus.APPROVED : KycStatus.REJECTED;
+    this.emitDomainEvent(DOMAIN_EVENTS.KYC.STATUS_CHANGED, {
+      tenantId,
+      memberId,
+      kycStatus,
+      actorId: actor.id,
+    });
+    this.emitDomainEvent(
+      dto.action === ReviewAction.APPROVE ? DOMAIN_EVENTS.KYC.APPROVED : DOMAIN_EVENTS.KYC.REJECTED,
+      {
+        tenantId,
+        memberId,
+        kycStatus,
+        actorId: actor.id,
+      },
+    );
+
     if (dto.action === ReviewAction.APPROVE) {
+      this.emitDomainEvent(DOMAIN_EVENTS.MEMBER.ACCOUNT_ACTIVATED, {
+        tenantId,
+        memberId,
+        actorId: actor.id,
+      });
       await this.emailQueue
         .add('send', {
           type: 'MEMBER_APPROVED',
@@ -839,6 +877,36 @@ export class AdminService {
 
       return { member: memberUpdate, stageTransition };
     });
+
+    if (effectiveVerified !== undefined || aliasStatus) {
+      this.emitDomainEvent(DOMAIN_EVENTS.KYC.STATUS_CHANGED, {
+        tenantId,
+        memberId,
+        kycStatus: result.member.kycStatus,
+        actorId: updatedBy,
+      });
+      if (result.member.kycStatus === KycStatus.APPROVED) {
+        this.emitDomainEvent(DOMAIN_EVENTS.KYC.APPROVED, {
+          tenantId,
+          memberId,
+          kycStatus: result.member.kycStatus,
+          actorId: updatedBy,
+        });
+        this.emitDomainEvent(DOMAIN_EVENTS.MEMBER.ACCOUNT_ACTIVATED, {
+          tenantId,
+          memberId,
+          actorId: updatedBy,
+        });
+      }
+      if (result.member.kycStatus === KycStatus.REJECTED) {
+        this.emitDomainEvent(DOMAIN_EVENTS.KYC.REJECTED, {
+          tenantId,
+          memberId,
+          kycStatus: result.member.kycStatus,
+          actorId: updatedBy,
+        });
+      }
+    }
 
     if (effectiveVerified === true) {
       recordSaccoMetric('sacco.kyc.approved', 1, {
