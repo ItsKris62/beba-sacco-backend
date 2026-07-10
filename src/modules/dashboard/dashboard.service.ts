@@ -3,50 +3,6 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
 
-export interface DashboardStats {
-  totalMembers: number;
-  activeMembers: number;
-  pendingKyc: number;
-  totalLoansCount: number;
-  activeLoansCount: number;
-  totalDisbursed: number;
-  totalRepaid: number;
-  outstandingBalance: number;
-  defaultedLoans: number;
-  defaultRate: number;
-  collectionRate: number;
-  totalSavings: number;
-  welfareCollected: number;
-  welfareDeficit: number;
-  recentDisbursements: RecentDisbursement[];
-  repaymentHeatmap: RepaymentHeatmapEntry[];
-  stageWelfareTable: StageWelfareEntry[];
-  generatedAt: string;
-  cachedUntil: string;
-}
-
-export interface RecentDisbursement {
-  loanId: string;
-  memberNumber: string;
-  principal: number;
-  disbursedAt: string;
-  status: string;
-}
-
-export interface RepaymentHeatmapEntry {
-  dayNumber: number;
-  totalPaid: number;
-  count: number;
-}
-
-export interface StageWelfareEntry {
-  stageName: string;
-  weekNumber: number;
-  amountCollected: number;
-  weeklyTarget: number;
-  deficit: number;
-}
-
 export interface DashboardReports {
   loansByStatus: Array<{ status: string; count: number; totalAmount: number }>;
   savingsByWeek: Array<{ weekNumber: number; totalAmount: number; memberCount: number }>;
@@ -54,8 +10,6 @@ export interface DashboardReports {
   generatedAt: string;
 }
 
-const CACHE_TTL_SECONDS = 15 * 60;
-const CACHE_KEY = (tenantId: string) => `DASH:STATS:${tenantId}:v2`;
 const MEMBER_DASH_CACHE_KEY = (tenantId: string, userId: string) =>
   `DASH:MEMBER:${tenantId}:${userId}:v3`;
 const MEMBER_DASH_STALE_KEY = (tenantId: string, userId: string) =>
@@ -69,25 +23,6 @@ export class DashboardService {
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
   ) {}
-
-  async getStats(tenantId: string): Promise<DashboardStats> {
-    const cacheKey = CACHE_KEY(tenantId);
-    const cached = await this.redis.getJson<DashboardStats>(cacheKey);
-    if (cached) {
-      this.logger.debug(`Dashboard stats cache HIT for tenant ${tenantId}`);
-      return cached;
-    }
-
-    this.logger.debug(`Dashboard stats cache MISS for tenant ${tenantId} – computing…`);
-    const stats = await this.computeStats(tenantId);
-    await this.redis.setJson(cacheKey, stats, CACHE_TTL_SECONDS);
-    return stats;
-  }
-
-  async invalidateCache(tenantId: string): Promise<void> {
-    await this.redis.del(CACHE_KEY(tenantId));
-    this.logger.debug(`Dashboard cache invalidated for tenant ${tenantId}`);
-  }
 
   async getReports(tenantId: string): Promise<DashboardReports> {
     const [loansByStatus, savingsByWeek, topDefaulters] = await Promise.all([
@@ -264,156 +199,6 @@ export class DashboardService {
       this.redis.setJson(staleKey, data, 60 * 60),
     ]);
     return { data, partial: warnings.length > 0 };
-  }
-
-  private async computeStats(tenantId: string): Promise<DashboardStats> {
-    const now = new Date();
-    const cachedUntil = new Date(now.getTime() + CACHE_TTL_SECONDS * 1000);
-
-    const [
-      memberStats,
-      loanAggregates,
-      defaultedCount,
-      totalLoansCount,
-      activeLoansCount,
-      savingsTotal,
-      welfareStats,
-      recentDisbursements,
-      repaymentHeatmap,
-      stageWelfareTable,
-    ] = await Promise.all([
-      this.getMemberStats(tenantId),
-      this.getLoanAggregates(tenantId),
-      this.prisma.loan.count({ where: { tenantId, status: 'DEFAULTED' } }),
-      this.prisma.loan.count({ where: { tenantId } }),
-      this.prisma.loan.count({ where: { tenantId, status: { in: ['DISBURSED', 'ACTIVE'] } } }),
-      this.getSavingsTotal(tenantId),
-      this.getWelfareStats(tenantId),
-      this.getRecentDisbursements(tenantId),
-      this.getRepaymentHeatmap(tenantId),
-      this.getStageWelfareTable(tenantId),
-    ]);
-
-    const totalDisbursed = Number(loanAggregates._sum.principalAmount ?? 0);
-    const totalRepaid = Number(loanAggregates._sum.totalRepaid ?? 0);
-    const outstandingBalance = Number(loanAggregates._sum.outstandingBalance ?? 0);
-    const defaultRate = totalLoansCount > 0 ? (defaultedCount / totalLoansCount) * 100 : 0;
-    const collectionRate = totalDisbursed > 0 ? (totalRepaid / totalDisbursed) * 100 : 0;
-
-    return {
-      totalMembers: memberStats.total,
-      activeMembers: memberStats.active,
-      pendingKyc: memberStats.pendingKyc,
-      totalLoansCount,
-      activeLoansCount,
-      totalDisbursed,
-      totalRepaid,
-      outstandingBalance,
-      defaultedLoans: defaultedCount,
-      defaultRate: Math.round(defaultRate * 100) / 100,
-      collectionRate: Math.round(collectionRate * 100) / 100,
-      totalSavings: savingsTotal,
-      welfareCollected: welfareStats.collected,
-      welfareDeficit: welfareStats.deficit,
-      recentDisbursements,
-      repaymentHeatmap,
-      stageWelfareTable,
-      generatedAt: now.toISOString(),
-      cachedUntil: cachedUntil.toISOString(),
-    };
-  }
-
-  private async getMemberStats(
-    tenantId: string,
-  ): Promise<{ total: number; active: number; pendingKyc: number }> {
-    const [total, active, pendingKyc] = await Promise.all([
-      this.prisma.member.count({ where: { tenantId } }),
-      this.prisma.member.count({ where: { tenantId, isActive: true } }),
-      this.prisma.member.count({ where: { tenantId, kycStatus: 'PENDING_REVIEW' } }),
-    ]);
-    return { total, active, pendingKyc };
-  }
-
-  private async getLoanAggregates(tenantId: string) {
-    return this.prisma.loan.aggregate({
-      where: { tenantId },
-      _sum: { principalAmount: true, totalRepaid: true, outstandingBalance: true },
-    });
-  }
-
-  private async getSavingsTotal(tenantId: string): Promise<number> {
-    const result = await this.prisma.savingsRecord.aggregate({
-      where: { tenantId },
-      _sum: { amount: true },
-    });
-    return Number(result._sum.amount ?? 0);
-  }
-
-  private async getWelfareStats(tenantId: string): Promise<{ collected: number; deficit: number }> {
-    const result = await this.prisma.groupWelfareCollection.aggregate({
-      where: { tenantId },
-      _sum: { amountCollected: true, deficit: true },
-    });
-    return {
-      collected: Number(result._sum.amountCollected ?? 0),
-      deficit: Number(result._sum.deficit ?? 0),
-    };
-  }
-
-  private async getRecentDisbursements(tenantId: string): Promise<RecentDisbursement[]> {
-    const loans = await this.prisma.loan.findMany({
-      where: { tenantId, status: { in: ['DISBURSED', 'ACTIVE'] } },
-      orderBy: { disbursedAt: 'desc' },
-      take: 10,
-      select: {
-        id: true,
-        principalAmount: true,
-        disbursedAt: true,
-        status: true,
-        member: { select: { memberNumber: true } },
-      },
-    });
-
-    return loans.map((l) => ({
-      loanId: l.id,
-      memberNumber: l.member.memberNumber,
-      principal: Number(l.principalAmount),
-      disbursedAt: l.disbursedAt?.toISOString() ?? '',
-      status: l.status,
-    }));
-  }
-
-  private async getRepaymentHeatmap(tenantId: string): Promise<RepaymentHeatmapEntry[]> {
-    const result = await this.prisma.loanRepayment.groupBy({
-      by: ['dayNumber'],
-      where: { tenantId },
-      _sum: { amountPaid: true },
-      _count: { id: true },
-      orderBy: { dayNumber: 'asc' },
-    });
-
-    return result.map((r) => ({
-      dayNumber: r.dayNumber,
-      totalPaid: Number(r._sum.amountPaid ?? 0),
-      count: r._count.id,
-    }));
-  }
-
-  private async getStageWelfareTable(tenantId: string): Promise<StageWelfareEntry[]> {
-    const collections = await this.prisma.groupWelfareCollection.findMany({
-      where: { tenantId },
-      orderBy: [{ weekNumber: 'desc' }],
-      take: 20,
-      include: { group: { select: { name: true, weeklyTarget: true } } },
-    });
-
-    return collections.map((c) => ({
-      stageName: c.group.name,
-      weekNumber: c.weekNumber,
-      amountCollected: Number(c.amountCollected),
-      weeklyTarget: Number(c.group.weeklyTarget),
-      deficit: Number(c.deficit),
-    }));
   }
 
   private async getLoansByStatus(
