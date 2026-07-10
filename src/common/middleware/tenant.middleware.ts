@@ -25,6 +25,13 @@ const TENANT_SKIP_PATTERNS = [
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TENANT_CACHE_TTL_SECONDS = 300;
 
+function shouldSkipTenantResolution(req: Request): boolean {
+  const candidates = [req.path, req.originalUrl, req.baseUrl, req.url].filter(Boolean);
+  return candidates.some((candidate) =>
+    TENANT_SKIP_PATTERNS.some((pattern) => candidate.includes(pattern)),
+  );
+}
+
 type TenantRequestConfig = {
   id: string;
   name: string;
@@ -65,7 +72,7 @@ export class TenantMiddleware implements NestMiddleware {
     _res: Response,
     next: NextFunction,
   ): Promise<void> {
-    if (TENANT_SKIP_PATTERNS.some((pattern) => req.path.includes(pattern))) {
+    if (shouldSkipTenantResolution(req)) {
       next();
       return;
     }
