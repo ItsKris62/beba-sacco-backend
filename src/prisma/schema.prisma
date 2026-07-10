@@ -464,6 +464,7 @@ model LoanGuarantor {
   @@unique([loanId, memberId])
   @@unique([tenantId, loanId, memberId])
   @@index([tenantId, status])
+  @@index([tenantId, status, holdReleasedAt])
   @@index([tenantId, memberId])
   @@index([tenantId, loanId, status])
   @@index([loanId])
@@ -496,6 +497,7 @@ model Transaction {
 
   @@unique([tenantId, reference])
   @@index([tenantId, accountId])
+  @@index([tenantId, accountId, type, createdAt])
   @@index([tenantId, loanId])
   @@index([tenantId, status, createdAt])
   @@index([reference])
@@ -1635,6 +1637,7 @@ enum GuarantorStatus {
   ACCEPTED
   REJECTED
   EXPIRED
+  RELEASED
 
   @@schema("public")
 }

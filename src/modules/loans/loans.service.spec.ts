@@ -3,6 +3,7 @@ import { LoansService } from './loans.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../../common/services/redis.service';
+import { CacheService } from '../../common/services/cache.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DisbursementGateService } from '../../loans/disbursement-gate.service';
 import { ProductRuleService } from './product-rule.service';
@@ -30,6 +31,7 @@ const APPLY_DTO = {
 const mockPrisma = {} as unknown as PrismaService;
 const mockAudit = { create: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
 const mockRedis = {} as unknown as RedisService;
+const mockCache = {} as unknown as CacheService;
 const mockIdempotency = {} as unknown as IdempotencyService;
 const mockEmailQueue = { add: jest.fn().mockResolvedValue({}) };
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue({}) };
@@ -46,6 +48,7 @@ function makeService(): LoansService {
     mockPrisma,
     mockAudit,
     mockRedis,
+    mockCache,
     mockIdempotency,
     mockGuarantorQueue as never,
     mockEmailQueue as never,

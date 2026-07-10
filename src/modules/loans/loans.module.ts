@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { LoansService } from './loans.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -14,6 +14,7 @@ import { LoanRepaymentService } from './loan-repayment.service';
 import { LoanRecoveryService } from './loan-recovery.service';
 import { AccountingModule } from '../accounting/accounting.module';
 import { FraudModule } from '../fraud/fraud.module';
+import { LoanApplicationModule } from './loan-application.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { FraudModule } from '../fraud/fraud.module';
     IntegrationsModule,
     AccountingModule,
     FraudModule,
+    forwardRef(() => LoanApplicationModule),
     BullModule.registerQueue(
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },
       { name: QUEUE_NAMES.EMAIL },

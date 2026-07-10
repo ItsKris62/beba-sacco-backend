@@ -10,26 +10,27 @@ import { LedgerService } from '../../accounting/ledger.service';
 // accrueInterestForLoan() uses this.prisma.$transaction(async (tx) => {
 //   tx.transaction.findFirst × 1–2 (idempotency pre-check per leg)
 //   tx.transaction.create  × 1 (interest), optionally × 2 (penalty)
-//   tx.account.update      × 1–2
-//   tx.account.findUnique  × 0–1 (re-read before penalty)
+//   tx.$queryRaw           × 1–2 (SELECT ... FOR UPDATE)
+//   tx.account.updateMany  × 1–2 (CAS version check)
 //   tx.loan.update         × 1
 // }), and calls this.ledger.post{Interest,Penalty}...Entry() for the GL leg.
 
 type TxClient = {
+  $queryRaw: jest.Mock;
   transaction: { create: jest.Mock; findFirst: jest.Mock };
-  account: { update: jest.Mock; findUnique: jest.Mock };
+  account: { updateMany: jest.Mock };
   loan: { update: jest.Mock };
 };
 
 function buildTxClient(): TxClient {
   return {
+    $queryRaw: jest.fn().mockResolvedValue([{ balance: '10000.0000', version: 0 }]),
     transaction: {
       create: jest.fn().mockResolvedValue({ id: 'txn-1' }),
       findFirst: jest.fn().mockResolvedValue(null), // no existing accrual — not a replay
     },
     account: {
-      update: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue({ balance: '10000.0000' }),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     loan: { update: jest.fn().mockResolvedValue({}) },
   };

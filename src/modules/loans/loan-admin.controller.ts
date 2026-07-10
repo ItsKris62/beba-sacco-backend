@@ -22,7 +22,7 @@ import {
   ApiProperty,
   ApiPropertyOptional,
 } from '@nestjs/swagger';
-import { UserRole } from '@prisma/client';
+import { LoanStatus, UserRole } from '@prisma/client';
 import { IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 import { Decimal } from 'decimal.js';
 import { Request } from 'express';
@@ -31,7 +31,7 @@ import { LoansService } from './loans.service';
 import { LoanReviewService } from './loan-review.service';
 import { LoanRecoveryService } from './loan-recovery.service';
 import { UpdateLoanStatusDto, AdminLoanStatus } from './dto/update-loan-status.dto';
-import { ReviewLoanDto } from './dto/review-loan.dto';
+import { ReviewLoanAction, ReviewLoanDto } from './dto/review-loan.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { LoanStateGuard } from './decorators/loan-state-guard.decorator';
 import { LoanStateTransitionGuard } from './guards/loan-state-transition.guard';
@@ -127,8 +127,9 @@ export class LoanAdminController {
   @ApiOperation({
     summary: 'Update loan application status',
     description:
-      '**Workflow transitions** (PENDING_GUARANTORS, PENDING_REVIEW, APPROVED, REJECTED): ' +
-      'update the loan status only, no financial operations.\n\n' +
+      '**Workflow transitions** (PENDING_GUARANTORS, PENDING_REVIEW): update the loan status only.\n\n' +
+      '**APPROVED / REJECTED**: routed through LoansService.approve()/reject() so dual-approval ' +
+      'initialization and guarantor hold release logic are enforced.\n\n' +
       "**DISBURSED**: triggers real financial disbursement — credits the member's FOSA " +
       'account with netDisbursement = principalAmount - processingFee inside a Serializable transaction. ' +
       'The ledger stores a gross LOAN_DISBURSEMENT credit and a separate FEE_CHARGE debit. ' +
@@ -227,6 +228,16 @@ export class LoanAdminController {
   })
   @ApiResponse({ status: 400, description: 'Invalid action or loan state' })
   @ApiResponse({ status: 409, description: 'Duplicate request processing' })
+  @UseGuards(LoanStateTransitionGuard)
+  @LoanStateGuard({
+    loanIdParam: 'id',
+    targetStatusBodyField: 'action',
+    targetStatusMap: {
+      [ReviewLoanAction.APPROVE]: LoanStatus.APPROVED,
+      [ReviewLoanAction.DECLINE]: LoanStatus.REJECTED,
+      [ReviewLoanAction.DISBURSE]: LoanStatus.DISBURSED,
+    },
+  })
   async reviewLoan(
     @Param('id', ParseUUIDPipe) loanId: string,
     @Body() dto: ReviewLoanDto,

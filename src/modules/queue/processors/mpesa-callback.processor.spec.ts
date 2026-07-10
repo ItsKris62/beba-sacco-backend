@@ -1,6 +1,7 @@
 import { MpesaCallbackProcessor } from './mpesa-callback.processor';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { TransactionStatus, MpesaTxType, MpesaTriggerSource } from '@prisma/client';
+import { JournalEntryType, LoanStatus, TransactionStatus, MpesaTxType, MpesaTriggerSource } from '@prisma/client';
+import { Decimal } from 'decimal.js';
 import { Queue } from 'bullmq';
 import { Job } from 'bullmq';
 import type { AuditService } from '../../audit/audit.service';
@@ -40,6 +41,8 @@ function makePrisma(overrides: Partial<{
   transactionCreate: jest.Mock;
   transactionUpdate: jest.Mock;
   accountUpdate: jest.Mock;
+  loanFindUnique: jest.Mock;
+  loanUpdate: jest.Mock;
   auditLogCreate: jest.Mock;
 }>= {}) {
   return {
@@ -67,7 +70,11 @@ function makePrisma(overrides: Partial<{
       },
       account: {
         update: overrides.accountUpdate ?? jest.fn().mockResolvedValue({}),
-        findFirst: jest.fn().mockResolvedValue(null),
+        findFirst: overrides.accountFindFirst ?? jest.fn().mockResolvedValue(null),
+      },
+      loan: {
+        findUnique: overrides.loanFindUnique ?? jest.fn().mockResolvedValue(null),
+        update: overrides.loanUpdate ?? jest.fn().mockResolvedValue({}),
       },
       transaction: {
         // postLedgerEntry calls findFirst to check for duplicate references (Layer 3)
@@ -95,6 +102,9 @@ const mockLedger = {
 // ─── Suite ───────────────────────────────────────────────────────────────────
 
 describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
 
   // ── Duplicate guard ────────────────────────────────────────────────────
 
@@ -216,5 +226,79 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       }),
     );
     expect(accountFindFirst).not.toHaveBeenCalled();
+  });
+
+  it('routes B2C loan disbursement through LedgerService.postEntry without direct balance writes', async () => {
+    const transactionCreate = jest.fn().mockResolvedValue({ id: 'direct-ledger-tx' });
+    const accountUpdate = jest.fn().mockResolvedValue({});
+    const transactionUpdate = jest.fn().mockResolvedValue({});
+    const loanUpdate = jest.fn().mockResolvedValue({});
+    const prisma = makePrisma({
+      transactionCreate,
+      accountUpdate,
+      transactionUpdate,
+      accountFindFirst: jest.fn().mockResolvedValue({ id: 'fosa-1' }),
+      loanFindUnique: jest.fn().mockResolvedValue({
+        id: 'loan-1',
+        memberId: 'member-1',
+        status: LoanStatus.APPROVED,
+      }),
+      loanUpdate,
+    });
+
+    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq);
+    await (processor as unknown as {
+      postDisbursementLedger(params: {
+        tenantId: string;
+        loanId: string;
+        memberId?: string;
+        amount: Decimal;
+        receipt: string;
+        mpesaTxId: string;
+        rawPayload: Record<string, never>;
+        resultCode: number;
+        resultDesc: string;
+        transactionDate: Date;
+      }): Promise<void>;
+    }).postDisbursementLedger({
+      tenantId: 'tenant-1',
+      loanId: 'loan-1',
+      memberId: 'member-1',
+      amount: new Decimal(2500),
+      receipt: 'RCT123',
+      mpesaTxId: 'mpesa-tx-1',
+      rawPayload: {},
+      resultCode: 0,
+      resultDesc: 'Success',
+      transactionDate: new Date('2026-07-10T09:00:00.000Z'),
+    });
+
+    expect(mockLedger.postEntry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: 'tenant-1',
+        reference: 'MPESA-B2C-RCT123',
+        journalType: JournalEntryType.LOAN_DISBURSEMENT,
+        accountId: 'fosa-1',
+        amount: expect.any(Decimal),
+        direction: 'CREDIT',
+        description: 'M-Pesa B2C disbursement – RCT123',
+        loanId: 'loan-1',
+        tx: expect.any(Object),
+      }),
+    );
+    expect(transactionCreate).not.toHaveBeenCalled();
+    expect(accountUpdate).not.toHaveBeenCalled();
+    expect(loanUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'loan-1' },
+        data: expect.objectContaining({ status: LoanStatus.DISBURSED }),
+      }),
+    );
+    expect(transactionUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'mpesa-tx-1' },
+        data: expect.objectContaining({ transactionId: 'ledger-tx-1' }),
+      }),
+    );
   });
 });

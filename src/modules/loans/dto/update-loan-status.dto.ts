@@ -22,6 +22,7 @@ export class UpdateLoanStatusDto {
     enum: AdminLoanStatus,
     description:
       'New status to transition the loan application to. ' +
+      'APPROVED and REJECTED are routed through hardened approval/rejection flows. ' +
       'DISBURSED triggers real financial disbursement (FOSA credit); all other values are workflow-only transitions.',
     example: 'APPROVED',
   })
@@ -29,7 +30,7 @@ export class UpdateLoanStatusDto {
   status!: AdminLoanStatus;
 
   @ApiPropertyOptional({
-    description: 'Reason for the status change (required for REJECTED)',
+    description: 'Reason for the status change',
     example: 'Insufficient guarantor coverage after 72h expiry',
   })
   @IsOptional()

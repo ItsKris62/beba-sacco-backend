@@ -822,12 +822,13 @@ export class MpesaCallbackProcessor extends WorkerHost {
   }): Promise<void> {
     const reference = `MPESA-B2C-${params.receipt}`;
 
+    // MpesaService.executeB2cDisbursement() currently rejects LOAN_DISBURSEMENT
+    // requests before Daraja dispatch, so this B2C callback branch is dormant for
+    // loan disbursements today. Keep it ledger-routed so lifting that feature gate
+    // cannot reintroduce direct Account.balance writes.
     const txClient = this.prisma.direct ?? this.prisma;
     const auditData = await txClient.$transaction(
       async (tx): Promise<{ balanceBefore: string; balanceAfter: string; loanStatusChanged: boolean } | null> => {
-        const dup = await tx.transaction.findFirst({ where: { tenantId: params.tenantId, reference } });
-        if (dup) return null;
-
         const loan = await tx.loan.findUnique({
           where: { id: params.loanId },
           select: { id: true, memberId: true, status: true },
@@ -836,35 +837,22 @@ export class MpesaCallbackProcessor extends WorkerHost {
 
         const fosa = await tx.account.findFirst({
           where: { memberId: loan.memberId, tenantId: params.tenantId, accountType: 'FOSA', isActive: true },
-          select: { id: true, balance: true },
+          select: { id: true },
         });
 
         const fosaId = fosa?.id ?? (await this.getFosaAccountId(tx, loan.memberId, params.tenantId));
-        const balanceBefore = new Decimal(fosa?.balance.toString() ?? '0');
-        const balanceAfter = balanceBefore.plus(params.amount);
 
-        const ledgerTx = await tx.transaction.create({
-          data: {
-            tenantId: params.tenantId,
-            accountId: fosaId,
-            loanId: params.loanId,
-            type: TransactionType.LOAN_DISBURSEMENT,
-            status: TransactionStatus.COMPLETED,
-            amount: params.amount.toDecimalPlaces(4).toString(),
-            balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-            balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
-            reference,
-            description: `M-Pesa B2C disbursement – ${params.receipt}`,
-            processedBy: 'MPESA_SYSTEM',
-          },
+        const { transaction: ledgerTx } = await this.ledger.postEntry({
+          tx,
+          tenantId: params.tenantId,
+          reference,
+          journalType: JournalEntryType.LOAN_DISBURSEMENT,
+          accountId: fosaId,
+          amount: params.amount,
+          direction: 'CREDIT',
+          description: `M-Pesa B2C disbursement – ${params.receipt}`,
+          loanId: params.loanId,
         });
-
-        if (fosa) {
-          await tx.account.update({
-            where: { id: fosa.id },
-            data: { balance: balanceAfter.toDecimalPlaces(4).toString() },
-          });
-        }
 
         const loanStatusChanged = loan.status === LoanStatus.APPROVED;
         if (loanStatusChanged) {
@@ -892,8 +880,8 @@ export class MpesaCallbackProcessor extends WorkerHost {
         });
 
         return {
-          balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-          balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+          balanceBefore: new Decimal(ledgerTx.balanceBefore.toString()).toDecimalPlaces(4).toString(),
+          balanceAfter: new Decimal(ledgerTx.balanceAfter.toString()).toDecimalPlaces(4).toString(),
           loanStatusChanged,
         };
       },
@@ -986,11 +974,11 @@ export class MpesaCallbackProcessor extends WorkerHost {
     tenantId: string,
   ): Promise<string> {
     const acc = await tx.account.findFirst({
-      where: { memberId, tenantId, isActive: true },
+      where: { memberId, tenantId, accountType: 'FOSA', isActive: true },
       select: { id: true },
     });
     if (acc) return acc.id;
-    throw new Error(`No active account for member ${memberId} in tenant ${tenantId}`);
+    throw new Error(`No active FOSA account for member ${memberId} in tenant ${tenantId}`);
   }
 }
 

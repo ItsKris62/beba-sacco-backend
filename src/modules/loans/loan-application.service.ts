@@ -6,6 +6,8 @@ import {
   ConflictException,
   ForbiddenException,
   InternalServerErrorException,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
@@ -32,6 +34,7 @@ import { AdminLoanStatus } from './dto/update-loan-status.dto';
 import { GuarantorValidationService } from './guarantor-validation.service';
 import { ProductRuleService } from './product-rule.service';
 import { SmsService } from '../sms/sms.service';
+import { LoansService } from './loans.service';
 import {
   QUEUE_NAMES,
   GuarantorExpiryJobPayload,
@@ -106,6 +109,8 @@ export class LoanApplicationService {
     @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
     private readonly auditQueue: Queue<AuditLogJobPayload>,
     private readonly smsService: SmsService,
+    @Inject(forwardRef(() => LoansService))
+    private readonly loansService: LoansService,
   ) {}
 
   // ─── DOMAIN EVENT PUBLISHER ────────────────────────────────────────────────
@@ -1470,6 +1475,7 @@ export class LoanApplicationService {
     const oldStatus = loan.status;
     const correlationId = (req.headers['x-request-id'] as string) ?? uuidv4();
     const targetStatus = dto.status as unknown as LoanStatus;
+    const userAgent = req.get?.('user-agent') ?? (req.headers['user-agent'] as string | undefined);
 
     if (!canTransition(oldStatus, targetStatus)) {
       throw new BadRequestException(`Cannot transition from ${oldStatus} to ${targetStatus}`);
@@ -1484,17 +1490,41 @@ export class LoanApplicationService {
       );
     }
 
-    // Validate state transitions (workflow-only — no financial operations)
+    if (targetStatus === LoanStatus.APPROVED) {
+      return this.loansService.approve(
+        loanId,
+        tenantId,
+        actor.id,
+        dto.reason,
+        req.ip,
+        userAgent,
+      );
+    }
+
+    if (targetStatus === LoanStatus.REJECTED) {
+      if (!dto.reason) {
+        throw new BadRequestException('Reason is required when rejecting a loan');
+      }
+      return this.loansService.reject(
+        loanId,
+        { reason: dto.reason },
+        tenantId,
+        actor.id,
+        req.ip,
+        userAgent,
+      );
+    }
+
+    // Validate state transitions (workflow-only)
     const validTransitions: Record<string, string[]> = {
-      [LoanStatus.DRAFT]: [LoanStatus.PENDING_GUARANTORS, LoanStatus.REJECTED],
+      [LoanStatus.DRAFT]: [LoanStatus.PENDING_GUARANTORS],
       [LoanStatus.PENDING_GUARANTORS]: [
         LoanStatus.PENDING_REVIEW,
         LoanStatus.PENDING_APPROVAL,
-        LoanStatus.REJECTED,
         LoanStatus.REJECTED_GUARANTOR_DECLINE,
       ],
-      [LoanStatus.PENDING_REVIEW]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
-      [LoanStatus.PENDING_APPROVAL]: [LoanStatus.APPROVED, LoanStatus.REJECTED],
+      [LoanStatus.PENDING_REVIEW]: [],
+      [LoanStatus.PENDING_APPROVAL]: [],
       // APPROVED → DISBURSED is intentionally absent: handled by LoansService.disburse()
     };
 
@@ -1503,11 +1533,6 @@ export class LoanApplicationService {
       throw new BadRequestException(
         `Cannot transition from "${oldStatus}" to "${dto.status}". Valid transitions: ${allowedNext.join(', ')}`,
       );
-    }
-
-    // Reason required for rejection
-    if (targetStatus === LoanStatus.REJECTED && !dto.reason) {
-      throw new BadRequestException('Reason is required when rejecting a loan');
     }
 
     const updated = await this.prisma.loan.update({
@@ -1535,60 +1560,6 @@ export class LoanApplicationService {
         requestId: correlationId,
       })
       .catch((e: unknown) => this.logger.error('Audit write failed', e));
-
-    if (targetStatus === LoanStatus.APPROVED || targetStatus === LoanStatus.REJECTED) {
-      await this.publishEvent({
-        type: targetStatus === LoanStatus.APPROVED ? 'LoanApproved' : 'LoanRejected',
-        payload: {
-          loanId,
-          tenantId,
-          oldStatus,
-          newStatus: dto.status,
-          actorId: actor.id,
-          reason: dto.reason,
-          correlationId,
-        },
-      });
-    }
-
-    // Notify member
-    if (loan.member?.user?.email) {
-      const emailType =
-        targetStatus === LoanStatus.APPROVED
-          ? 'LOAN_APPROVED'
-          : targetStatus === LoanStatus.REJECTED
-            ? 'LOAN_REJECTED'
-            : null;
-      if (emailType) {
-        this.enqueueEmail(
-          {
-            type: emailType,
-            to: loan.member.user.email,
-            firstName: loan.member.user.firstName,
-            loanNumber: loan.loanNumber,
-            ...(targetStatus === LoanStatus.REJECTED && { reason: dto.reason }),
-          } as EmailJobPayload,
-          `loan.statusChange:${loanId}`,
-        );
-      }
-    }
-    const applicantPhone = loan.member?.user?.phone ?? loan.member?.user?.phoneNumber;
-    if (
-      applicantPhone &&
-      (targetStatus === LoanStatus.APPROVED || targetStatus === LoanStatus.REJECTED)
-    ) {
-      void this.smsService.enqueueSms(
-        {
-          type: targetStatus === LoanStatus.APPROVED ? 'LOAN_APPROVED' : 'LOAN_REJECTED',
-          phone: applicantPhone,
-          message:
-            targetStatus === LoanStatus.APPROVED
-              ? `Beba SACCO: Loan ${loan.loanNumber} has been approved. You will be notified on disbursement.`
-              : `Beba SACCO: Loan ${loan.loanNumber} was rejected.${dto.reason ? ` Reason: ${dto.reason}` : ''}`,
-        },
-        `loan.statusSms:${loanId}:${targetStatus}`,
-      );
-    }
 
     return updated;
   }

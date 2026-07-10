@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { LoanApplicationService } from './loan-application.service';
 import { LoanReviewService } from './loan-review.service';
@@ -26,15 +26,14 @@ import { SmsModule } from '../sms/sms.module';
  * - Admin oversight (status changes, exposure checks)
  * - Domain event publishing to BullMQ
  *
- * LoansModule is imported to expose LoansService to LoanAdminController so that
- * PATCH /admin/loans/:id/status with DISBURSED routes through the real financial
- * disbursement pipeline instead of a status-only update.
- * No circular dependency: LoansModule does not import LoanApplicationModule.
+ * LoansModule is imported via forwardRef because LoanApplicationService delegates
+ * APPROVED/REJECTED status updates to LoansService while this module still owns
+ * the admin workflow controller.
  */
 @Module({
   imports: [
     AuditModule,
-    LoansModule,
+    forwardRef(() => LoansModule),
     SmsModule,
     BullModule.registerQueue(
       { name: QUEUE_NAMES.LOAN_GUARANTOR_REMINDER },

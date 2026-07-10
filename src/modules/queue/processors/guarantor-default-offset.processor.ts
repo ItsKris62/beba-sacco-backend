@@ -1,5 +1,6 @@
 import { Processor, WorkerHost, InjectQueue } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import {
   AccountType,
   GuarantorStatus,
@@ -21,6 +22,7 @@ import {
   PROCESS_GUARANTOR_FORFEITURE_JOB,
   QUEUE_NAMES,
   SmsJobPayload,
+  guarantorForfeitureReference,
   guarantorForfeitureLockKey,
 } from '../queue.constants';
 
@@ -163,6 +165,8 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
     tenantId: string,
     jobId?: string,
   ): Promise<{ forfeited: Prisma.Decimal; notifications: ForfeitureNotification[] }> {
+    const recoveryAttemptId = jobId ? `${jobId}-${randomUUID()}` : randomUUID();
+
     return this.prisma.$transaction(async (tx) => {
       const loan = await tx.loan.findFirst({
         where: {
@@ -242,11 +246,14 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
           continue;
         }
 
-        // Deterministic reference — defense-in-depth alongside the distributed
-        // lock and the holdReleasedAt:null filter above: if this exact guarantor
-        // was already forfeited for this loan (e.g. a retried job), skip instead
-        // of posting a second debit.
-        const reference = `GUAR_FORFEIT-${tenantId}-${loanId}-${account.id}`;
+        // Shared format with LoanRecoveryService. The attempt suffix prevents one
+        // partial forfeiture from blocking later recovery attempts.
+        const reference = guarantorForfeitureReference(
+          tenantId,
+          loanId,
+          account.id,
+          recoveryAttemptId,
+        );
         const existingForfeiture = await tx.transaction.findFirst({ where: { tenantId, reference } });
         if (existingForfeiture) {
           this.logger.warn(`Guarantor forfeiture already posted for reference=${reference} — skipping`);

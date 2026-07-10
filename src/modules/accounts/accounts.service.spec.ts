@@ -206,7 +206,7 @@ describe('AccountsService', () => {
 
       const result = await service.transfer(
         'fosa-1',
-        { destinationAccountId: 'bosa-1', amount: 300 },
+        { destinationAccountId: 'bosa-1', amount: 300, idempotencyKey: 'idem-transfer-001' },
         TENANT_ID,
         ACTOR_ID,
       );
@@ -217,6 +217,7 @@ describe('AccountsService', () => {
           fromAccountId: 'fosa-1',
           toAccountId: 'bosa-1',
           actorId: ACTOR_ID,
+          reference: `XFER-${TENANT_ID}-idem-transfer-001`,
         }),
       );
       expect(result.newSourceBalance).toBe(700);
@@ -228,7 +229,7 @@ describe('AccountsService', () => {
 
     it('rejects transferring an account to itself before touching the DB', async () => {
       await expect(
-        service.transfer('fosa-1', { destinationAccountId: 'fosa-1', amount: 100 }, TENANT_ID, ACTOR_ID),
+        service.transfer('fosa-1', { destinationAccountId: 'fosa-1', amount: 100, idempotencyKey: 'idem-self' }, TENANT_ID, ACTOR_ID),
       ).rejects.toThrow(BadRequestException);
 
       expect(mockPrisma.account.findFirst).not.toHaveBeenCalled();
@@ -238,7 +239,7 @@ describe('AccountsService', () => {
       mockPrisma.account.findFirst.mockResolvedValueOnce(null);
 
       await expect(
-        service.transfer('fosa-1', { destinationAccountId: 'bosa-1', amount: 100 }, TENANT_ID, ACTOR_ID),
+        service.transfer('fosa-1', { destinationAccountId: 'bosa-1', amount: 100, idempotencyKey: 'idem-missing-source' }, TENANT_ID, ACTOR_ID),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -248,7 +249,7 @@ describe('AccountsService', () => {
         .mockResolvedValueOnce({ id: 'bosa-1', memberId: 'member-2' });
 
       await expect(
-        service.transfer('fosa-1', { destinationAccountId: 'bosa-1', amount: 100 }, TENANT_ID, ACTOR_ID),
+        service.transfer('fosa-1', { destinationAccountId: 'bosa-1', amount: 100, idempotencyKey: 'idem-cross-member' }, TENANT_ID, ACTOR_ID),
       ).rejects.toThrow(ForbiddenException);
 
       expect(mockLedger.postInternalTransfer).not.toHaveBeenCalled();

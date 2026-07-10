@@ -12,6 +12,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
 import { GuarantorValidationService } from './guarantor-validation.service';
 import { ProductRuleService } from './product-rule.service';
 import { SmsService } from '../sms/sms.service';
+import { LoansService } from './loans.service';
 
 /**
  * LoanApplicationService Unit Tests
@@ -71,6 +72,10 @@ describe('LoanApplicationService', () => {
     }),
   };
   const mockSms = { enqueueSms: jest.fn().mockResolvedValue(undefined) };
+  const mockLoansService = {
+    approve: jest.fn(),
+    reject: jest.fn(),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -88,6 +93,7 @@ describe('LoanApplicationService', () => {
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockQueue },
         { provide: getQueueToken(QUEUE_NAMES.AUDIT_LOG), useValue: mockQueue },
         { provide: SmsService, useValue: mockSms },
+        { provide: LoansService, useValue: mockLoansService },
       ],
     }).compile();
 
@@ -433,6 +439,62 @@ describe('LoanApplicationService', () => {
       await expect(
         service.updateStatus('l1', { status: 'REJECTED' as any }, 't1', { id: 'u1', role: UserRole.MANAGER, tenantId: 't1' } as any, mockReq),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    it('delegates APPROVED to LoansService.approve without a bare loan update', async () => {
+      prisma.loan.findFirst.mockResolvedValue({
+        id: 'l1',
+        status: LoanStatus.PENDING_REVIEW,
+        loanNumber: 'LN-1',
+        memberId: 'm1',
+      } as any);
+      mockLoansService.approve.mockResolvedValueOnce({ id: 'l1', status: LoanStatus.APPROVED });
+
+      await service.updateStatus(
+        'l1',
+        { status: 'APPROVED' as any, reason: 'Credit committee approved' },
+        't1',
+        { id: 'u1', role: UserRole.MANAGER, tenantId: 't1' } as any,
+        mockReq,
+      );
+
+      expect(mockLoansService.approve).toHaveBeenCalledWith(
+        'l1',
+        't1',
+        'u1',
+        'Credit committee approved',
+        '127.0.0.1',
+        'test',
+      );
+      expect(prisma.loan.update).not.toHaveBeenCalled();
+    });
+
+    it('delegates REJECTED to LoansService.reject without a bare loan update', async () => {
+      prisma.loan.findFirst.mockResolvedValue({
+        id: 'l1',
+        status: LoanStatus.PENDING_REVIEW,
+        loanNumber: 'LN-1',
+        memberId: 'm1',
+      } as any);
+      mockLoansService.reject.mockResolvedValueOnce({ id: 'l1', status: LoanStatus.REJECTED });
+
+      await service.updateStatus(
+        'l1',
+        { status: 'REJECTED' as any, reason: 'Insufficient guarantor coverage' },
+        't1',
+        { id: 'u1', role: UserRole.MANAGER, tenantId: 't1' } as any,
+        mockReq,
+      );
+
+      expect(mockLoansService.reject).toHaveBeenCalledWith(
+        'l1',
+        { reason: 'Insufficient guarantor coverage' },
+        't1',
+        'u1',
+        '127.0.0.1',
+        'test',
+      );
+      expect(prisma.loan.update).not.toHaveBeenCalled();
     });
   });
 });

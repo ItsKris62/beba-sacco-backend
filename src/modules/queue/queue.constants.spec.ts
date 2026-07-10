@@ -1,4 +1,4 @@
-import { QUEUE_NAMES } from './queue.constants';
+import { QUEUE_NAMES, guarantorForfeitureReference } from './queue.constants';
 
 describe('QUEUE_NAMES', () => {
   it('uses BullMQ-safe queue names', () => {
@@ -14,5 +14,13 @@ describe('QUEUE_NAMES', () => {
         throw new Error(`${key} must not be empty`);
       }
     }
+  });
+});
+
+describe('guarantorForfeitureReference', () => {
+  it('includes a recovery attempt suffix after tenant, loan, and account ids', () => {
+    expect(
+      guarantorForfeitureReference('tenant-1', 'loan-1', 'account-1', 'attempt-1'),
+    ).toBe('GUAR_FORFEIT-tenant-1-loan-1-account-1-attempt-1');
   });
 });

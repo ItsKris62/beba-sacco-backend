@@ -1,9 +1,10 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, Optional } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import {
   AccountType,
   LoanStatus,
+  Prisma,
   TransactionType,
   TransactionStatus,
   InterestType,
@@ -173,8 +174,6 @@ export class FinancialService {
       // so a GL-code resolution failure rolls back the balance debit too. Never
       // silently drain a balance with no GL trace.
       if (dailyInterest.gt(0)) {
-        const balBefore = new Decimal(fosaAccount.balance.toString());
-        const balAfter = balBefore.minus(dailyInterest); // debit from FOSA
         // Deterministic — never uuid() here. A retried accrual job must land on the
         // exact same reference so LedgerService's replay check (and the pre-check
         // below) can catch it, instead of double-charging the member.
@@ -184,6 +183,12 @@ export class FinancialService {
           where: { tenantId: loan.tenantId, reference: interestReference },
         });
         if (!existingInterest) {
+          const { balanceBefore, balanceAfter } = await this.debitAccountWithCas(
+            tx,
+            fosaAccount.id,
+            dailyInterest,
+          );
+
           const interestTxn = await tx.transaction.create({
             data: {
               tenantId: loan.tenantId,
@@ -192,17 +197,12 @@ export class FinancialService {
               type: TransactionType.INTEREST_ACCRUAL,
               status: TransactionStatus.COMPLETED,
               amount: dailyInterest.toDecimalPlaces(4).toString(),
-              balanceBefore: balBefore.toDecimalPlaces(4).toString(),
-              balanceAfter: balAfter.toDecimalPlaces(4).toString(),
+              balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+              balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
               reference: interestReference,
               description: `Daily interest accrual – ${accrualDateStr}`,
               processedBy: 'SYSTEM',
             },
-          });
-
-          await tx.account.update({
-            where: { id: fosaAccount.id },
-            data: { balance: balAfter.toDecimalPlaces(4).toString() },
           });
 
           await this.ledger.postInterestAccrualEntry({
@@ -225,12 +225,11 @@ export class FinancialService {
           where: { tenantId: loan.tenantId, reference: penaltyReference },
         });
         if (!existingPenalty) {
-          const refreshedAccount = await tx.account.findUnique({
-            where: { id: fosaAccount.id },
-            select: { balance: true },
-          });
-          const balBefore = new Decimal(refreshedAccount!.balance.toString());
-          const balAfter = balBefore.minus(dailyPenalty);
+          const { balanceBefore, balanceAfter } = await this.debitAccountWithCas(
+            tx,
+            fosaAccount.id,
+            dailyPenalty,
+          );
 
           const penaltyTxn = await tx.transaction.create({
             data: {
@@ -240,17 +239,12 @@ export class FinancialService {
               type: TransactionType.PENALTY,
               status: TransactionStatus.COMPLETED,
               amount: dailyPenalty.toDecimalPlaces(4).toString(),
-              balanceBefore: balBefore.toDecimalPlaces(4).toString(),
-              balanceAfter: balAfter.toDecimalPlaces(4).toString(),
+              balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+              balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
               reference: penaltyReference,
               description: `Overdue penalty – ${accrualDateStr}`,
               processedBy: 'SYSTEM',
             },
-          });
-
-          await tx.account.update({
-            where: { id: fosaAccount.id },
-            data: { balance: balAfter.toDecimalPlaces(4).toString() },
           });
 
           await this.ledger.postPenaltyDeductionEntry({
@@ -280,7 +274,7 @@ export class FinancialService {
           ...(staging === LoanStaging.NPL && loan.loanProduct && { status: LoanStatus.DEFAULTED }),
         },
       });
-    });
+    }, { isolationLevel: 'Serializable' as const });
 
     this.emitAuditLogNonBlocking(
       {
@@ -304,6 +298,37 @@ export class FinancialService {
       `audit:INTEREST.ACCRUAL:${loan.tenantId}:${loan.id}:${accrualDateStr}`,
       correlationId,
     );
+  }
+
+  private async debitAccountWithCas(
+    tx: Prisma.TransactionClient,
+    accountId: string,
+    amount: Decimal,
+  ): Promise<{ balanceBefore: Decimal; balanceAfter: Decimal }> {
+    const rows = await tx.$queryRaw<Array<{ balance: Prisma.Decimal; version: number }>>`
+      SELECT balance, version FROM "Account" WHERE id = ${accountId} FOR UPDATE
+    `;
+    const lockedAccount = rows[0];
+    if (!lockedAccount) {
+      throw new ConflictException('Concurrent balance modification, retry');
+    }
+
+    const balanceBefore = new Decimal(lockedAccount.balance.toString());
+    const balanceAfter = balanceBefore.minus(amount).toDecimalPlaces(4);
+
+    const updateResult = await tx.account.updateMany({
+      where: { id: accountId, version: lockedAccount.version },
+      data: {
+        balance: balanceAfter.toString(),
+        version: { increment: 1 },
+      },
+    });
+
+    if (updateResult.count === 0) {
+      throw new ConflictException('Concurrent balance modification, retry');
+    }
+
+    return { balanceBefore, balanceAfter };
   }
 
   private emitAuditLogNonBlocking(

@@ -52,8 +52,10 @@ describe('Loan workflow controllers', () => {
   };
   const loanApplicationService = {
     memberApply: jest.fn().mockResolvedValue({ id: loanId, status: LoanStatus.PENDING_GUARANTORS }),
-    updateStatus: jest.fn(async (_loanId: string, dto: { status: string }) => {
-      if (dto.status === 'REJECTED') throw new BadRequestException('Reason is required when rejecting a loan');
+    updateStatus: jest.fn(async (_loanId: string, dto: { status: string; reason?: string }) => {
+      if (dto.status === 'REJECTED' && !dto.reason) {
+        throw new BadRequestException('Reason is required when rejecting a loan');
+      }
       await smsService.enqueueSms(
         { type: 'LOAN_APPROVED', phone: '0712345678', message: 'Loan approved' },
         `loan.statusSms:${loanId}:APPROVED`,
@@ -143,7 +145,7 @@ describe('Loan workflow controllers', () => {
     );
   });
 
-  it('allows a loan officer to approve a loan and enqueues applicant SMS', async () => {
+  it('allows APPROVED on the status endpoint and delegates to service logic', async () => {
     prismaService.loan.findFirst.mockResolvedValueOnce({ status: LoanStatus.PENDING_APPROVAL });
 
     await request(app.getHttpServer())
@@ -165,14 +167,40 @@ describe('Loan workflow controllers', () => {
     );
   });
 
-  it('returns 400 when rejecting a loan without a reason', async () => {
+  it('allows a valid workflow status on the status endpoint', async () => {
+    prismaService.loan.findFirst.mockResolvedValueOnce({ status: LoanStatus.PENDING_GUARANTORS });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/admin/loans/${loanId}/status`)
+      .set('x-test-role', UserRole.LOAN_OFFICER)
+      .send({ status: 'PENDING_REVIEW' })
+      .expect(200);
+
+    expect(loanApplicationService.updateStatus).toHaveBeenCalledWith(
+      loanId,
+      { status: 'PENDING_REVIEW' },
+      tenantId,
+      expect.objectContaining({ role: UserRole.LOAN_OFFICER }),
+      expect.any(Object),
+    );
+  });
+
+  it('allows REJECTED with a reason on the status endpoint and delegates to service logic', async () => {
     prismaService.loan.findFirst.mockResolvedValueOnce({ status: LoanStatus.PENDING_APPROVAL });
 
     await request(app.getHttpServer())
       .patch(`/api/v1/admin/loans/${loanId}/status`)
       .set('x-test-role', UserRole.LOAN_OFFICER)
-      .send({ status: 'REJECTED', reason: '' })
-      .expect(400);
+      .send({ status: 'REJECTED', reason: 'Insufficient guarantor coverage' })
+      .expect(200);
+
+    expect(loanApplicationService.updateStatus).toHaveBeenCalledWith(
+      loanId,
+      { status: 'REJECTED', reason: 'Insufficient guarantor coverage' },
+      tenantId,
+      expect.objectContaining({ role: UserRole.LOAN_OFFICER }),
+      expect.any(Object),
+    );
   });
 
   it('returns 403 when a MEMBER role accesses admin loan routes', async () => {

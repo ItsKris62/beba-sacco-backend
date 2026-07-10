@@ -3,7 +3,6 @@ import {
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { JournalEntryType } from '@prisma/client';
-import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { LedgerService } from '../accounting/ledger.service';
@@ -254,7 +253,7 @@ export class AccountsService {
       throw new ForbiddenException('Internal transfers are only allowed between accounts of the same member');
     }
 
-    const reference = `XFER-${uuidv4()}`;
+    const reference = `XFER-${tenantId}-${dto.idempotencyKey}`;
     const { fromTransaction, toTransaction, journalEntry } = await this.ledger.postInternalTransfer({
       tenantId,
       fromAccountId: sourceAccountId,

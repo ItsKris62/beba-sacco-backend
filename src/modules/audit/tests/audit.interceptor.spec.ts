@@ -131,7 +131,7 @@ describe('AdminAuditController', () => {
       .expect(200)
       .expect(({ body }) => {
         expect(body.data).toEqual([{ id: 'audit-1', action: 'LOAN.APPLY' }]);
-        expect(body.meta).toEqual({ page: 1, limit: 20, total: 1, totalPages: 1 });
+        expect(body.meta).toEqual({ cursor: null, limit: 20 });
       });
 
     expect(auditService.findAll).toHaveBeenCalledWith(
@@ -139,7 +139,6 @@ describe('AdminAuditController', () => {
         tenantId: 'tenant-1',
         action: 'LOAN.APPLY',
         limit: 20,
-        offset: 0,
         crossTenant: true,
       }),
     );

@@ -27,6 +27,10 @@ describe('Admin transaction stats', () => {
     add: jest.fn(),
   };
 
+  const cache = {
+    invalidateTenantDashboard: jest.fn(),
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -43,6 +47,7 @@ describe('Admin transaction stats', () => {
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,
       redis as unknown as RedisService,
+      cache as never,
       emailQueue as never,
     );
 
@@ -77,6 +82,7 @@ describe('Admin transaction stats', () => {
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,
       redis as unknown as RedisService,
+      cache as never,
       emailQueue as never,
     );
     const controller = new AdminController(service);

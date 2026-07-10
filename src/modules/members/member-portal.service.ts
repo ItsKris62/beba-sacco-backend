@@ -757,6 +757,7 @@ export class MemberPortalService {
       {
         destinationAccountId: destAccount.id,
         amount: dto.amount,
+        idempotencyKey: dto.idempotencyKey,
         description: dto.narration ?? `Internal transfer ${dto.fromAccountType} → ${dto.toAccountType}`,
       },
       tenantId,

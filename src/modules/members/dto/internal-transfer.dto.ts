@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsNumber, IsOptional, IsString, MaxLength, Min, Validate, ValidatorConstraint, ValidatorConstraintInterface, ValidationArguments } from 'class-validator';
+import { IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, MaxLength, Min, Validate, ValidatorConstraint, ValidatorConstraintInterface, ValidationArguments } from 'class-validator';
 import { AccountType } from '@prisma/client';
 
 @ValidatorConstraint({ name: 'differentAccountTypes', async: false })
@@ -39,6 +39,15 @@ export class InternalTransferDto {
   @IsNumber()
   @Min(100, { message: 'Minimum transfer amount is KES 100' })
   amount!: number;
+
+  @ApiProperty({
+    description: 'Client-generated idempotency key for retry-safe transfer posting',
+    example: 'portal-transfer-20260710-001',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  idempotencyKey!: string;
 
   @ApiPropertyOptional({
     description: 'Optional narration for the transfer',

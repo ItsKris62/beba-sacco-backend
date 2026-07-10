@@ -7,6 +7,7 @@ import { LoansService } from '../loans.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { RedisService } from '../../../common/services/redis.service';
+import { CacheService } from '../../../common/services/cache.service';
 import { IdempotencyService } from '../../../common/services/idempotency.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { DisbursementGateService } from '../../../loans/disbursement-gate.service';
@@ -59,6 +60,7 @@ const mockPrisma = {
 
 const mockAudit = { create: jest.fn().mockResolvedValue(undefined) };
 const mockRedis = {};
+const mockCache = { invalidateTenantDashboard: jest.fn().mockResolvedValue(undefined) };
 const mockIdempotency = {};
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
 const mockEmailQueue = { add: jest.fn().mockResolvedValue(undefined) };
@@ -156,6 +158,7 @@ describe('LoansService.disburse() — schedule generation', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: AuditService, useValue: mockAudit },
         { provide: RedisService, useValue: mockRedis },
+        { provide: CacheService, useValue: mockCache },
         { provide: IdempotencyService, useValue: mockIdempotency },
         { provide: getQueueToken(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER), useValue: mockGuarantorQueue },
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },

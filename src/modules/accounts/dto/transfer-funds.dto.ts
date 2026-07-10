@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
+import { IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
 
 export class TransferFundsDto {
   @ApiProperty({ description: 'Destination account UUID (must belong to the same member)' })
@@ -10,6 +10,15 @@ export class TransferFundsDto {
   @IsNumber()
   @Min(0.01)
   amount!: number;
+
+  @ApiProperty({
+    description: 'Client-generated idempotency key for retry-safe transfer posting',
+    example: 'transfer-20260710-member-001',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  idempotencyKey!: string;
 
   @ApiPropertyOptional({ description: 'Optional narrative for the transfer' })
   @IsOptional()

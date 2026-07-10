@@ -510,5 +510,19 @@ export function guarantorForfeitureLockKey(tenantId: string, loanId: string): st
   return `lock:guarantor_forfeiture:${tenantId}:${loanId}`;
 }
 
+/**
+ * Unique ledger/reference id for one guarantor forfeiture attempt against one
+ * account. The recoveryAttemptId suffix allows later partial recoveries for the
+ * same loan/account to post without colliding with earlier partial collections.
+ */
+export function guarantorForfeitureReference(
+  tenantId: string,
+  loanId: string,
+  accountId: string,
+  recoveryAttemptId: string,
+): string {
+  return `GUAR_FORFEIT-${tenantId}-${loanId}-${accountId}-${recoveryAttemptId}`;
+}
+
 /** TTL for the guarantor-forfeiture lock — comfortably longer than one Serializable transaction over a loan's guarantor list, short enough that a crashed holder doesn't block the next run for long. */
 export const GUARANTOR_FORFEITURE_LOCK_TTL_SECONDS = 30;

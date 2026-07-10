@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { AccountType, GuarantorStatus, Prisma, TransactionStatus, TransactionType } from '@prisma/client';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -12,6 +12,7 @@ import {
   GUARANTOR_RECOVERY_NOTICE_JOB,
   InitiateGuarantorRecoveryJobPayload,
   QUEUE_NAMES,
+  guarantorForfeitureReference,
   guarantorForfeitureLockKey,
 } from '../queue/queue.constants';
 
@@ -145,7 +146,10 @@ export class LoanRecoveryService {
     defaultAmount: Decimal,
     actorId: string,
   ): Promise<{ recoverySummary: LoanRecoverySummary }> {
-    return this.prisma.$transaction(async (tx) => {
+    const recoveryAttemptId = randomUUID();
+    const txClient = this.prisma.direct ?? this.prisma;
+
+    return txClient.$transaction(async (tx) => {
       const loan = await tx.loan.findFirst({
         where: { id: loanId, tenantId },
         select: {
@@ -179,7 +183,7 @@ export class LoanRecoveryService {
 
       const accountType = loan.loanProduct.requiredAccountType ?? AccountType.FOSA;
       const allocations = await this.allocateRecovery(tx, tenantId, loan.guarantors, accountType, defaultAmount, new Decimal(loan.outstandingBalance.toString()));
-      const totalRecovered = allocations.reduce((sum, allocation) => sum.plus(allocation.deduction), new Decimal(0));
+      let totalRecovered = new Decimal(0);
       const recoveryDate = new Date();
 
       for (const allocation of allocations) {
@@ -192,22 +196,46 @@ export class LoanRecoveryService {
           continue;
         }
 
-        // Deterministic reference — same format as GuarantorDefaultOffsetProcessor
-        // uses, since both paths represent the same conceptual event (this
-        // guarantor's account forfeited for this loan). Defense-in-depth alongside
-        // the distributed lock and holdReleasedAt:null filter above: skip instead
-        // of posting (and debiting) a second time on a retried job.
-        const reference = `GUAR_FORFEIT-${tenantId}-${loanId}-${account.id}`;
+        // Shared format with GuarantorDefaultOffsetProcessor. The attempt suffix
+        // prevents one partial recovery from blocking later recovery attempts.
+        const reference = guarantorForfeitureReference(
+          tenantId,
+          loanId,
+          account.id,
+          recoveryAttemptId,
+        );
         const existingRecovery = await tx.transaction.findFirst({ where: { tenantId, reference } });
         if (existingRecovery) {
           continue;
         }
 
-        const balanceBefore = new Decimal(account.balance.toString());
-        const balanceAfter = balanceBefore.minus(allocation.deduction).toDecimalPlaces(4);
-        const amount = allocation.deduction.toDecimalPlaces(4).toString();
+        const lockedRows = await tx.$queryRaw<Array<{
+          balance: Prisma.Decimal;
+          frozenSavings: Prisma.Decimal;
+          version: number;
+        }>>`
+          SELECT balance, "frozenSavings", version FROM "Account" WHERE id = ${account.id} FOR UPDATE
+        `;
+        const lockedAccount = lockedRows[0];
+        if (!lockedAccount) {
+          throw new ConflictException('Concurrent balance modification, retry');
+        }
+
+        const balanceBefore = new Decimal(lockedAccount.balance.toString());
+        const frozenSavings = new Decimal(lockedAccount.frozenSavings.toString());
+        const actualDeduction = Decimal.min(
+          allocation.deduction,
+          balanceBefore,
+          frozenSavings,
+        ).toDecimalPlaces(4);
+        if (actualDeduction.lessThanOrEqualTo(0)) {
+          continue;
+        }
+
+        const balanceAfter = balanceBefore.minus(actualDeduction).toDecimalPlaces(4);
+        const amount = actualDeduction.toString();
         const accountUpdate = await tx.account.updateMany({
-          where: { id: account.id, tenantId, isActive: true },
+          where: { id: account.id, tenantId, isActive: true, version: lockedAccount.version },
           data: {
             balance: balanceAfter.toString(),
             frozenSavings: { decrement: amount },
@@ -216,9 +244,7 @@ export class LoanRecoveryService {
         });
 
         if (accountUpdate.count !== 1) {
-          throw new BadRequestException(
-            `RECOVERY_ACCOUNT_UPDATE_FAILED: guarantor ${allocation.guarantor.memberId} account was not updated`,
-          );
+          throw new ConflictException('Concurrent balance modification, retry');
         }
 
         const guarantorUpdate = await tx.loanGuarantor.updateMany({
@@ -258,7 +284,7 @@ export class LoanRecoveryService {
           tx,
           tenantId,
           reference,
-          amount: allocation.deduction,
+          amount: actualDeduction,
           accountType,
           transactionId: recoveryTxn.id,
           actorId,
@@ -276,10 +302,12 @@ export class LoanRecoveryService {
             loanNumber: loan.loanNumber,
             guarantorMemberId: allocation.guarantor.memberId,
             accountType,
-            recoveredAmount: allocation.deduction.toNumber(),
+            recoveredAmount: actualDeduction.toNumber(),
             recoveryDate: recoveryDate.toISOString(),
           },
         });
+
+        totalRecovered = totalRecovered.plus(actualDeduction);
       }
 
       if (totalRecovered.greaterThan(0)) {
@@ -299,7 +327,7 @@ export class LoanRecoveryService {
           remainingDebt: Decimal.max(defaultAmount.minus(totalRecovered), new Decimal(0)),
         },
       };
-    });
+    }, { isolationLevel: 'Serializable' as const });
   }
 
   private async allocateRecovery(
