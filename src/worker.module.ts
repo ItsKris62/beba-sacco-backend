@@ -17,6 +17,7 @@ import { DocumentsModule } from './modules/documents/documents.module';
 import { KycModule } from './modules/kyc/kyc.module';
 import { SupportModule } from './modules/support/support.module';
 import { Phase6Module } from './modules/admin/phase6/phase6.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 /**
  * WorkerModule boots the queue-processing dependency graph without creating an
@@ -69,6 +70,7 @@ import { Phase6Module } from './modules/admin/phase6/phase6.module';
     DocumentsModule,
     KycModule,
     SupportModule,
+    NotificationsModule,
     Phase6Module,
   ],
 })

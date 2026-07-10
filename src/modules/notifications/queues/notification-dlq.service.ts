@@ -2,14 +2,14 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
 import { NotificationChannel } from '@prisma/client';
 import { Job, Queue } from 'bullmq';
-import { NotificationPayload } from '../providers/notification-provider.interface';
+import { SendNotificationJobPayload } from './notification-job.types';
 import { NOTIFICATION_DLQ_JOB_OPTIONS, NOTIFICATION_QUEUE_NAMES } from './queue.constants';
 
 export interface NotificationDlqPayload {
   originalJobId?: string;
   channel: NotificationChannel;
   tenantId: string;
-  payload: NotificationPayload;
+  payload: SendNotificationJobPayload;
   failedReason?: string;
   attemptsMade: number;
   failedAt: string;
@@ -28,7 +28,7 @@ export class NotificationDlqService {
 
   async moveFailedJob(
     channel: NotificationChannel,
-    job: Job<NotificationPayload>,
+    job: Job<SendNotificationJobPayload>,
   ): Promise<Job<NotificationDlqPayload>> {
     const dlq = this.getDlq(channel);
 
@@ -43,7 +43,10 @@ export class NotificationDlqService {
         attemptsMade: job.attemptsMade,
         failedAt: new Date().toISOString(),
       },
-      NOTIFICATION_DLQ_JOB_OPTIONS,
+      {
+        ...NOTIFICATION_DLQ_JOB_OPTIONS,
+        jobId: `${channel}:${job.id ?? job.data.dedupeKey}`,
+      },
     );
   }
 
