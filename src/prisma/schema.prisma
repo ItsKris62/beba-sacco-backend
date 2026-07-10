@@ -74,6 +74,7 @@ model User {
   firstName              String
   lastName               String
   phone                  String?
+  profileImageKey        String?
   emailVerified          Boolean           @default(false)
   refreshToken           String?
   lastLoginAt            DateTime?

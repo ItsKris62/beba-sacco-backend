@@ -272,12 +272,17 @@ export class MembersService {
     if (!member) throw new NotFoundException('Member not found');
 
     await this.prisma.$transaction(async (tx) => {
-      if (dto.phone !== undefined || dto.email !== undefined) {
+      if (dto.profileImageKey !== undefined) {
+        this.assertProfileImageKey(dto.profileImageKey, tenantId, member.userId);
+      }
+
+      if (dto.phone !== undefined || dto.email !== undefined || dto.profileImageKey !== undefined) {
         await tx.user.update({
           where: { id: member.userId },
           data: {
             ...(dto.phone !== undefined && { phone: dto.phone }),
             ...(dto.email !== undefined && { email: dto.email.toLowerCase() }),
+            ...(dto.profileImageKey !== undefined && { profileImageKey: dto.profileImageKey }),
           },
         });
       }
@@ -316,7 +321,18 @@ export class MembersService {
 
     const updated = await this.prisma.member.findFirst({
       where: { id: memberId, tenantId },
-      include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            profileImageKey: true,
+            updatedAt: true,
+          },
+        },
+      },
     });
 
     await this.audit.create({
@@ -343,5 +359,19 @@ export class MembersService {
   private async assertExists(id: string, tenantId: string): Promise<void> {
     const exists = await this.prisma.member.findFirst({ where: { id, tenantId }, select: { id: true } });
     if (!exists) throw new NotFoundException('Member not found');
+  }
+
+  private assertProfileImageKey(fileKey: string | null, tenantId: string, userId: string): void {
+    if (fileKey === null) return;
+    const expected = new RegExp(
+      `^avatars/${this.escapeRegex(tenantId)}/${this.escapeRegex(userId)}/profile\\.(jpg|jpeg|png|webp)$`,
+    );
+    if (!expected.test(fileKey)) {
+      throw new BadRequestException('Invalid profile image key for this user');
+    }
+  }
+
+  private escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 }

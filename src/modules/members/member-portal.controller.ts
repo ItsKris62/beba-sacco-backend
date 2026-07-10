@@ -43,6 +43,11 @@ import { MemberStkPushDto } from './dto/member-stk-push.dto';
 import { WithdrawMpesaDto } from './dto/withdraw-mpesa.dto';
 import { InternalTransferDto } from './dto/internal-transfer.dto';
 import { PatchProfileDto } from './dto/patch-profile.dto';
+import {
+  ProfileImageUploadUrlRequestDto,
+  ProfileImageUploadUrlResponseDto,
+  ProfileImageUrlResponseDto,
+} from './dto/profile-image.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
@@ -120,6 +125,42 @@ export class MemberPortalController {
   }
 
   // ─── DASHBOARD ─────────────────────────────────────────────────────────────
+
+  @Post('profile/image-url')
+  @Throttle({ global: { limit: 10, ttl: 60_000 } })
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Request a profile image upload URL',
+    description:
+      'Returns a short-lived pre-signed R2 PUT URL and the tenant/user-scoped avatar object key.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Pre-signed profile image upload URL',
+    type: ProfileImageUploadUrlResponseDto,
+  })
+  requestProfileImageUploadUrl(
+    @Body() dto: ProfileImageUploadUrlRequestDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.portal.requestProfileImageUploadUrl(tenant.id, user.id, dto);
+  }
+
+  @Get('profile/image-url')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Get my profile image display URL' })
+  @ApiResponse({
+    status: 200,
+    description: 'Pre-signed profile image display URL, or null when no image is saved',
+    type: ProfileImageUrlResponseDto,
+  })
+  getProfileImageUrl(
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.portal.getProfileImageUrl(tenant.id, user.id);
+  }
 
   @Get('dashboard')
   @HttpCode(HttpStatus.OK)

@@ -42,4 +42,14 @@ export class PatchProfileDto {
   @ArrayMaxSize(5, { message: 'Cannot assign more than 5 stages at once' })
   @IsUUID('4', { each: true, message: 'Each stage ID must be a valid UUID' })
   stageIds?: string[];
+
+  @ApiPropertyOptional({
+    description: 'R2 avatar object key. Pass null to clear the profile image.',
+    nullable: true,
+    example: 'avatars/tenant-uuid/user-uuid/profile.jpg',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  profileImageKey?: string | null;
 }

@@ -19,8 +19,20 @@ import { AccountsService } from '../accounts/accounts.service';
 import { GuarantorResponseDto } from '../loans/dto/guarantor-response.dto';
 import { MemberLoanApplyDto } from './dto/member-loan-apply.dto';
 import { UploadUrlResponseDto } from './dto/upload-url.dto';
+import {
+  ProfileImageUploadUrlRequestDto,
+  ProfileImageUploadUrlResponseDto,
+  ProfileImageUrlResponseDto,
+} from './dto/profile-image.dto';
 import { QUEUE_NAMES, MpesaDisbursementJobPayload } from '../queue/queue.constants';
 import { InternalTransferDto } from './dto/internal-transfer.dto';
+
+const PROFILE_IMAGE_CONTENT_TYPES: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
 
 /**
  * Member Portal Service
@@ -464,6 +476,55 @@ export class MemberPortalService {
   /**
    * Returns paginated loans for the authenticated member.
    */
+  async requestProfileImageUploadUrl(
+    tenantId: string,
+    userId: string,
+    dto: ProfileImageUploadUrlRequestDto,
+  ): Promise<ProfileImageUploadUrlResponseDto> {
+    const ext = this.getProfileImageExtension(dto.fileName);
+    const contentType = PROFILE_IMAGE_CONTENT_TYPES[ext];
+    const fileKey = `avatars/${tenantId}/${userId}/profile.${ext}`;
+    const signed = await this.storage.getUploadUrlForKey({
+      objectKey: fileKey,
+      contentType,
+    });
+
+    return {
+      uploadUrl: signed.uploadUrl,
+      fileKey,
+      contentType,
+      expiresIn: signed.expiresIn,
+    };
+  }
+
+  async getProfileImageUrl(tenantId: string, userId: string): Promise<ProfileImageUrlResponseDto> {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, tenantId },
+      select: { profileImageKey: true },
+    });
+    if (!user?.profileImageKey) {
+      return { imageUrl: null, fileKey: null };
+    }
+
+    const expectedPrefix = `avatars/${tenantId}/${userId}/profile.`;
+    if (!user.profileImageKey.startsWith(expectedPrefix)) {
+      this.logger.warn(`Ignoring invalid profile image key for user=${userId} tenant=${tenantId}`);
+      return { imageUrl: null, fileKey: null };
+    }
+
+    const imageUrl = await this.storage.getDownloadUrl(user.profileImageKey, 3600);
+    return { imageUrl, fileKey: user.profileImageKey };
+  }
+
+  private getProfileImageExtension(fileName: string): keyof typeof PROFILE_IMAGE_CONTENT_TYPES {
+    const match = fileName.trim().toLowerCase().match(/\.([a-z0-9]+)$/);
+    const ext = match?.[1];
+    if (!ext || !(ext in PROFILE_IMAGE_CONTENT_TYPES)) {
+      throw new BadRequestException('Profile image must be a JPG, PNG, or WebP file');
+    }
+    return ext as keyof typeof PROFILE_IMAGE_CONTENT_TYPES;
+  }
+
   async getMyLoans(
     userId: string,
     tenantId: string,

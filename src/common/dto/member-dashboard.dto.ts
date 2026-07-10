@@ -18,6 +18,12 @@ export class MemberIdentityDto {
 
   @ApiPropertyOptional({ nullable: true })
   kycRejectionReason?: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  profileImageKey?: string | null;
+
+  @ApiProperty()
+  updatedAt!: string;
 }
 
 export class MemberDashboardBalancesDto {

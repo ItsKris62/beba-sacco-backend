@@ -11,9 +11,9 @@ export interface DashboardReports {
 }
 
 const MEMBER_DASH_CACHE_KEY = (tenantId: string, userId: string) =>
-  `DASH:MEMBER:${tenantId}:${userId}:v3`;
+  `DASH:MEMBER:${tenantId}:${userId}:v4`;
 const MEMBER_DASH_STALE_KEY = (tenantId: string, userId: string) =>
-  `DASH:MEMBER:${tenantId}:${userId}:stale:v3`;
+  `DASH:MEMBER:${tenantId}:${userId}:stale:v4`;
 
 @Injectable()
 export class DashboardService {
@@ -56,7 +56,7 @@ export class DashboardService {
         memberNumber: true,
         kycStatus: true,
         kycRejectionReason: true,
-        user: { select: { firstName: true, lastName: true, email: true } },
+        user: { select: { firstName: true, lastName: true, email: true, profileImageKey: true, updatedAt: true } },
       },
     });
     if (!member) throw new NotFoundException('Member profile not found');
@@ -156,6 +156,8 @@ export class DashboardService {
         email: member.user.email,
         kycStatus: member.kycStatus,
         kycRejectionReason: member.kycRejectionReason,
+        profileImageKey: member.user.profileImageKey,
+        updatedAt: member.user.updatedAt.toISOString(),
       },
       balances: {
         fosa: Number(fosa?.balance ?? 0),
