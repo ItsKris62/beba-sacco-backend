@@ -567,6 +567,11 @@ export class MemberPortalController {
     summary: 'Withdraw from FOSA to M-Pesa',
     description: "Withdraws available FOSA funds to the member's phone via M-Pesa B2C.",
   })
+  @ApiHeader({
+    name: 'X-Idempotency-Key',
+    required: false,
+    description: 'Optional. Prevents duplicate withdrawal debits on client retry.',
+  })
   @ApiResponse({ status: 200, description: 'Withdrawal initiated successfully' })
   @ApiResponse({ status: 400, description: 'Insufficient FOSA available balance' })
   async withdrawMpesa(
@@ -575,7 +580,10 @@ export class MemberPortalController {
     @CurrentTenant() tenant: Tenant,
     @Req() req: Request,
   ) {
-    return this.portal.withdrawMpesa(user.id, dto.phoneNumber, dto.amount, tenant.id, req.ip);
+    const idempotencyKey =
+      (req.headers['x-idempotency-key'] as string | undefined) ??
+      (req.headers['idempotency-key'] as string | undefined);
+    return this.portal.withdrawMpesa(user.id, dto.phoneNumber, dto.amount, tenant.id, req.ip, idempotencyKey);
   }
 
   @Post('accounts/transfer')

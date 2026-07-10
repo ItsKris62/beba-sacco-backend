@@ -20,7 +20,6 @@ import {
   InterestType,
   UserRole,
 } from '@prisma/client';
-import { v4 as uuidv4 } from 'uuid';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -1165,6 +1164,7 @@ export class LoansService {
     tenantId: string,
     processedBy: string,
     ipAddress?: string,
+    idempotencyKey?: string,
   ) {
     if (amountKes <= 0) throw new BadRequestException('Repayment amount must be positive');
     const amount = new Decimal(amountKes);
@@ -1194,8 +1194,34 @@ export class LoansService {
     // which is acceptable for dev but should be configured in production.
     const txClient = this.prisma.direct ?? this.prisma;
 
+    // Deterministic reference — never uuid() here. A fresh uuid() per call would
+    // defeat replay protection on network retries of the same repayment request,
+    // letting the same cash movement double-debit the member's FOSA balance.
+    // Computed up-front (not from locked data) so a replay can short-circuit
+    // before ever taking the FOR UPDATE locks below.
+    const reference = idempotencyKey
+      ? `REPAY-${tenantId}-${idempotencyKey}`
+      : `TXN-REPAY-${tenantId}-${loanId}-${amountKes}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`;
+
     const repayResult = await txClient.$transaction(
       async (tx) => {
+        // Idempotency check: if this exact repayment reference was already posted
+        // (retry after a timed-out response, double-submit, etc.), replay the
+        // original result instead of re-running the waterfall and double-debiting.
+        const existingReplay = await tx.transaction.findFirst({ where: { tenantId, reference } });
+        if (existingReplay) {
+          const currentLoan = await tx.loan.findFirst({ where: { id: loanId, tenantId } });
+          if (!currentLoan) throw new NotFoundException('Loan not found');
+          return {
+            loan: currentLoan,
+            transaction: existingReplay,
+            reference,
+            paidAt: existingReplay.createdAt,
+            newOutstandingBalance: Math.max(0, new Decimal(currentLoan.outstandingBalance.toString()).toNumber()),
+            allocation: { toPenalties: 0, toInterest: 0, toPrincipal: 0 },
+          };
+        }
+
         // Acquire exclusive row locks on both Account and Loan atomically.
         // This prevents two concurrent repayments from reading the same stale
         // balance and both decrementing by their full amount.
@@ -1271,7 +1297,6 @@ export class LoansService {
         const newOutstanding = outstanding.minus(toPrincipal);
 
         const balAfter = balBefore.minus(actualRepayment);
-        const reference = `REPAY-${uuidv4()}`;
 
         const txn = await tx.transaction.create({
           data: {

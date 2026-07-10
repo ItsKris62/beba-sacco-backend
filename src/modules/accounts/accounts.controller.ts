@@ -7,7 +7,6 @@ import {
   ApiResponse, ApiQuery, ApiHeader, ApiParam,
 } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
-import { v4 as uuidv4 } from 'uuid';
 import { AccountsService } from './accounts.service';
 import { CreateAccountDto } from './dto/create-account.dto';
 import { TransferFundsDto } from './dto/transfer-funds.dto';
@@ -17,6 +16,29 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import type { Tenant } from '@prisma/client';
+
+/**
+ * Deterministic idempotency reference for teller cash movements. Never generate
+ * a fresh uuid() per request here — that would defeat LedgerService.postEntry()'s
+ * replay protection on every network retry, double-posting the same cash movement.
+ * When the caller supplies their own idempotencyKey, that scopes replay detection
+ * to the specific request; otherwise fall back to a same-minute deterministic key
+ * so an automatic client retry (not an intentional second deposit) still collapses
+ * to one posting.
+ */
+function buildCashMovementReference(
+  type: 'DEP' | 'WDR',
+  tenantId: string,
+  accountId: string,
+  amount: number,
+  idempotencyKey?: string,
+): string {
+  if (idempotencyKey) {
+    return `${type}-${tenantId}-${idempotencyKey}`;
+  }
+  const minuteBucket = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  return `TXN-${type}-${tenantId}-${accountId}-${amount}-${minuteBucket}`;
+}
 
 @ApiTags('Accounts')
 @ApiBearerAuth()
@@ -85,7 +107,7 @@ export class AccountsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Post a manual cash deposit',
-    description: 'Credits the account via LedgerService.postEntry() (debit CASH, credit the account\'s deposit-liability GL code). Idempotent on a freshly generated reference per call.',
+    description: 'Credits the account via LedgerService.postEntry() (debit CASH, credit the account\'s deposit-liability GL code). Idempotent: pass idempotencyKey to guarantee replay-safety, or rely on the same-minute deterministic fallback key.',
   })
   @ApiResponse({ status: 200, description: 'Deposit posted' })
   @ApiResponse({ status: 404, description: 'Account not found or inactive' })
@@ -96,7 +118,7 @@ export class AccountsController {
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
   ) {
-    const reference = `DEP-${uuidv4()}`;
+    const reference = buildCashMovementReference('DEP', tenant.id, id, body.amount, body.idempotencyKey);
     return this.accounts.deposit(
       id,
       body.amount,
@@ -123,7 +145,7 @@ export class AccountsController {
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
   ) {
-    const reference = `WDR-${uuidv4()}`;
+    const reference = buildCashMovementReference('WDR', tenant.id, id, body.amount, body.idempotencyKey);
     return this.accounts.withdraw(
       id,
       body.amount,

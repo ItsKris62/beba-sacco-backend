@@ -5,6 +5,7 @@ import { Job } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { toDecimal } from '../../../common/utils/decimal.util';
 import { AuditService as AuditLogService } from '../../audit/audit.service';
+import { LedgerService } from '../../accounting/ledger.service';
 import { APPLY_DAILY_PENALTIES_JOB, QUEUE_NAMES } from '../queue.constants';
 
 @Processor(QUEUE_NAMES.LOAN_PENALTY_QUEUE, { concurrency: 2 })
@@ -15,6 +16,7 @@ export class LoanPenaltyProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditLog: AuditLogService,
+    private readonly ledger: LedgerService,
   ) {
     super();
   }
@@ -148,8 +150,13 @@ export class LoanPenaltyProcessor extends WorkerHost {
       }
 
       const balance = toDecimal(account.balance)!;
-      const reference = `PENALTY-${installment.id}-${accrualDate.toISOString().slice(0, 10)}`;
-      await tx.transaction.create({
+      // Deterministic — includes installment.id (not just loanId+date) because a
+      // single loan can have more than one overdue installment on the same day;
+      // collapsing to PENALTY-{tenantId}-{loanId}-{YYYYMMDD} alone would silently
+      // drop every installment's penalty after the first on a given day.
+      const accrualDateStr = accrualDate.toISOString().slice(0, 10);
+      const reference = `PENALTY-${tenantId}-${loanId}-${installment.id}-${accrualDateStr}`;
+      const penaltyTxn = await tx.transaction.create({
         data: {
           tenantId,
           accountId: account.id,
@@ -163,6 +170,19 @@ export class LoanPenaltyProcessor extends WorkerHost {
           description: `Daily overdue installment penalty for loan ${installment.loan.loanNumber}`,
           processedBy: 'SYSTEM',
         },
+      });
+
+      // GL leg posted in the SAME transaction as the Transaction row above — no
+      // more window where the operational record exists but the GL doesn't. No
+      // Account.balance changes here (this installment's penalty isn't collected
+      // yet, only recognized as owed) — see LedgerService.postPenaltyReceivableEntry().
+      await this.ledger.postPenaltyReceivableEntry({
+        tx,
+        tenantId,
+        reference,
+        amount: penalty,
+        transactionId: penaltyTxn.id,
+        description: `Daily overdue installment penalty for loan ${installment.loan.loanNumber}`,
       });
 
       await this.auditLog.createAtomic(tx, {

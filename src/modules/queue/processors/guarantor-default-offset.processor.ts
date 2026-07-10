@@ -11,13 +11,17 @@ import {
 } from '@prisma/client';
 import { Job, Queue } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { RedisService } from '../../../common/services/redis.service';
 import { toDecimal } from '../../../common/utils/decimal.util';
 import { AuditService as AuditLogService } from '../../audit/audit.service';
+import { LedgerService } from '../../accounting/ledger.service';
 import {
   EmailJobPayload,
+  GUARANTOR_FORFEITURE_LOCK_TTL_SECONDS,
   PROCESS_GUARANTOR_FORFEITURE_JOB,
   QUEUE_NAMES,
   SmsJobPayload,
+  guarantorForfeitureLockKey,
 } from '../queue.constants';
 
 interface ForfeitureNotification {
@@ -38,6 +42,8 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditLog: AuditLogService,
+    private readonly redis: RedisService,
+    private readonly ledger: LedgerService,
     @InjectQueue(QUEUE_NAMES.SMS)
     private readonly smsQueue: Queue<SmsJobPayload>,
     @InjectQueue(QUEUE_NAMES.EMAIL)
@@ -129,6 +135,34 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
     tenantId: string,
     jobId?: string,
   ): Promise<{ forfeited: Prisma.Decimal; notifications: ForfeitureNotification[] }> {
+    // Distributed lock: LoanRecoveryService.recoverFromGuarantors() (the delayed
+    // post-notice debit path) can target the exact same loan's guarantors. Without
+    // this, a cron pass and a delayed-debit job racing each other would both read
+    // the same pre-forfeiture balance and both deduct — a double-debit of the
+    // guarantor's savings. Skip (not throw) on contention: this loop processes up
+    // to 250 loans per run, and one locked loan must not abort the rest of the
+    // batch. It will simply be picked up on the next cron pass.
+    const lockKey = guarantorForfeitureLockKey(tenantId, loanId);
+    const lockToken = await this.redis.acquireLock(lockKey, GUARANTOR_FORFEITURE_LOCK_TTL_SECONDS);
+    if (!lockToken) {
+      this.logger.warn(
+        `Guarantor forfeiture lock held for tenant=${tenantId} loan=${loanId} — skipping this pass`,
+      );
+      return { forfeited: toDecimal(0)!, notifications: [] };
+    }
+
+    try {
+      return await this.offsetLoanLocked(loanId, tenantId, jobId);
+    } finally {
+      await this.redis.releaseLock(lockKey, lockToken);
+    }
+  }
+
+  private async offsetLoanLocked(
+    loanId: string,
+    tenantId: string,
+    jobId?: string,
+  ): Promise<{ forfeited: Prisma.Decimal; notifications: ForfeitureNotification[] }> {
     return this.prisma.$transaction(async (tx) => {
       const loan = await tx.loan.findFirst({
         where: {
@@ -208,6 +242,17 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
           continue;
         }
 
+        // Deterministic reference — defense-in-depth alongside the distributed
+        // lock and the holdReleasedAt:null filter above: if this exact guarantor
+        // was already forfeited for this loan (e.g. a retried job), skip instead
+        // of posting a second debit.
+        const reference = `GUAR_FORFEIT-${tenantId}-${loanId}-${account.id}`;
+        const existingForfeiture = await tx.transaction.findFirst({ where: { tenantId, reference } });
+        if (existingForfeiture) {
+          this.logger.warn(`Guarantor forfeiture already posted for reference=${reference} — skipping`);
+          continue;
+        }
+
         const balanceAfter = balance.minus(amount).toDecimalPlaces(4);
         const frozenAfter = frozenSavings.minus(amount).toDecimalPlaces(4);
         const accountUpdate = await tx.account.updateMany({
@@ -243,7 +288,7 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
           },
         });
 
-        await tx.transaction.create({
+        const forfeitureTxn = await tx.transaction.create({
           data: {
             tenantId,
             accountId: account.id,
@@ -253,10 +298,24 @@ export class GuarantorDefaultOffsetProcessor extends WorkerHost {
             amount: amount.toString(),
             balanceBefore: balance.toString(),
             balanceAfter: balanceAfter.toString(),
-            reference: `GUARANTOR-FORFEIT-${guarantor.id}-${forfeitedAt.getTime()}`,
+            reference,
             description: `Guarantor default offset for loan ${loan.loanNumber}`,
             processedBy: 'SYSTEM',
           },
+        });
+
+        // GL leg: debit the guarantor's own BOSA deposit-liability code, credit
+        // LOAN_RECEIVABLE — the account.updateMany() above is the only balance
+        // mutation; this call is GL-only (see LedgerService.postGuarantorForfeitureEntry
+        // docs) so the two together can never double-debit.
+        await this.ledger.postGuarantorForfeitureEntry({
+          tx,
+          tenantId,
+          reference,
+          amount,
+          accountType: AccountType.BOSA,
+          transactionId: forfeitureTxn.id,
+          description: `Guarantor default offset for loan ${loan.loanNumber}`,
         });
 
         await this.auditLog.createAtomic(tx, {

@@ -4,11 +4,12 @@ import {
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { AccountType, LoanStatus, InterestType, TransactionStatus, TransactionType } from '@prisma/client';
+import { AccountType, LoanStatus, InterestType, JournalEntryType, TransactionStatus, TransactionType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MpesaService } from '../mpesa/mpesa.service';
+import { LedgerService } from '../accounting/ledger.service';
 import { MemberDepositDto, DepositPurpose } from '../mpesa/dto/deposit-request.dto';
 import { maskPhone } from '../mpesa/utils/mpesa.utils';
 import { MpesaTriggerSource } from '@prisma/client';
@@ -38,6 +39,7 @@ export class MemberPortalService {
     private readonly loansService: LoansService,
     private readonly storage: StorageService,
     private readonly accountsService: AccountsService,
+    private readonly ledger: LedgerService,
     @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
     private readonly disbursementQueue: Queue<MpesaDisbursementJobPayload>,
   ) {}
@@ -338,6 +340,7 @@ export class MemberPortalService {
     amount: number,
     tenantId: string,
     ipAddress?: string,
+    idempotencyKey?: string,
   ) {
     const member = await this.resolveMember(userId, tenantId);
 
@@ -356,6 +359,9 @@ export class MemberPortalService {
         throw new NotFoundException('No active FOSA account found for withdrawal');
       }
 
+      // lockedBalance/frozenSavings are not enforced by LedgerService.postEntry()'s
+      // minimum-balance floor (it only knows about minimumBalance/allowsNegative), so
+      // this withdrawal-specific check must stay here, ahead of the ledger post below.
       const availableBalance = new Decimal(fosaAccount.balance.toString()).minus(
         new Decimal(fosaAccount.lockedBalance.toString()).plus(new Decimal(fosaAccount.frozenSavings.toString()))
       );
@@ -364,35 +370,28 @@ export class MemberPortalService {
         throw new BadRequestException('Insufficient FOSA available balance');
       }
 
-      const balanceBefore = new Decimal(fosaAccount.balance.toString());
-      const balanceAfter = balanceBefore.minus(totalDeduction);
+      // Deterministic reference — never Date.now() here. A wall-clock-based reference
+      // is not replay-safe: a client retry milliseconds later gets a different
+      // reference and posts (and debits) a second time. When the caller supplies an
+      // idempotencyKey, replay detection is scoped to that specific request; otherwise
+      // fall back to a same-minute deterministic key.
+      const reference = idempotencyKey
+        ? `MPESA_WD-${tenantId}-${member.id}-${idempotencyKey}`
+        : `MPESA_WD-${tenantId}-${fosaAccount.id}-${totalDeduction.toString()}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`;
 
-      const accountUpdate = await tx.account.updateMany({
-        where: { id: fosaAccount.id, tenantId, isActive: true },
-        data: {
-          balance: balanceAfter.toString(),
-          version: { increment: 1 },
-        },
-      });
-
-      if (accountUpdate.count !== 1) {
-        throw new BadRequestException('Failed to process withdrawal due to concurrent updates');
-      }
-
-      // Log the transaction
-      const transaction = await tx.transaction.create({
-        data: {
-          tenantId,
-          accountId: fosaAccount.id,
-          type: TransactionType.WITHDRAWAL,
-          status: TransactionStatus.COMPLETED,
-          amount: totalDeduction.toString(),
-          balanceBefore: balanceBefore.toString(),
-          balanceAfter: balanceAfter.toString(),
-          reference: `WD-Mpesa-${Date.now()}`,
-          description: `M-Pesa withdrawal to ${maskPhone(phone)}`,
-          processedBy: userId,
-        },
+      // Routed through LedgerService.postEntry() (debit the account's deposit-liability
+      // GL code, credit CASH) instead of a manual Account.update() + Transaction.create()
+      // — see Phase 1 audit: this used to bypass the GL entirely.
+      const { transaction } = await this.ledger.postEntry({
+        tenantId,
+        reference,
+        journalType: JournalEntryType.WITHDRAWAL,
+        accountId: fosaAccount.id,
+        amount: totalDeduction,
+        direction: 'DEBIT',
+        actorId: userId,
+        description: `M-Pesa withdrawal to ${maskPhone(phone)}`,
+        tx,
       });
 
       await this.audit.create({
@@ -423,6 +422,7 @@ export class MemberPortalService {
         phone,
         amount,
         triggeredBy: userId,
+        sourceTransactionId: result.transactionId,
       },
       {
         jobId: `fosa-withdraw-${result.transactionId}`,

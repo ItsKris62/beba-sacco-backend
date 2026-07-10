@@ -14,6 +14,7 @@ import { StorageModule } from '../storage/storage.module';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { DocumentsModule } from '../documents/documents.module';
 import { AccountsModule } from '../accounts/accounts.module';
+import { AccountingModule } from '../accounting/accounting.module';
 import { GuarantorLookupService } from '../../guarantors/guarantor-lookup.service';
 import { GuarantorLookupController } from '../../guarantors/guarantor-lookup.controller';
 import { QUEUE_NAMES } from '../queue/queue.constants';
@@ -29,6 +30,7 @@ import { QUEUE_NAMES } from '../queue/queue.constants';
     DashboardModule,
     DocumentsModule,
     AccountsModule, // ✅ Makes AccountsService available for member internal transfers
+    AccountingModule, // ✅ Makes LedgerService available for withdrawMpesa() GL posting
     BullModule.registerQueue({ name: QUEUE_NAMES.EMAIL }),
     BullModule.registerQueue({ name: QUEUE_NAMES.MPESA_DISBURSEMENT }),
   ],

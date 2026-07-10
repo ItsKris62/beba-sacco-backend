@@ -2,6 +2,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import {
+  AccountType,
   LoanStatus,
   TransactionType,
   TransactionStatus,
@@ -12,6 +13,7 @@ import type { Queue } from 'bullmq';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
+import { LedgerService } from '../accounting/ledger.service';
 import { AuditLogJobPayload, QUEUE_NAMES } from '../queue/queue.constants';
 
 /**
@@ -31,9 +33,15 @@ export class FinancialService {
   // Idempotency lock TTL – 25 hours (longer than the 24h cron cadence)
   private readonly ACCRUAL_LOCK_TTL = 90_000; // 25 h in seconds
 
+  // Cap on how many GL-bypass rows a single runLedgerIntegrityCheck() scan
+  // returns — keeps the query (and the alert payload) bounded on a large
+  // tenant instead of growing unboundedly with the whole transaction history.
+  private readonly GL_BYPASS_SCAN_LIMIT = 500;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    private readonly ledger: LedgerService,
     @Optional()
     @InjectQueue(QUEUE_NAMES.AUDIT_LOG)
     private readonly auditQueue?: Queue<AuditLogJobPayload>,
@@ -160,62 +168,101 @@ export class FinancialService {
       : 1;
 
     await this.prisma.$transaction(async (tx) => {
-      // Post interest accrual transaction
+      // Post interest accrual transaction — the Account debit and its GL leg
+      // (LedgerService.postInterestAccrualEntry) happen in this same transaction,
+      // so a GL-code resolution failure rolls back the balance debit too. Never
+      // silently drain a balance with no GL trace.
       if (dailyInterest.gt(0)) {
         const balBefore = new Decimal(fosaAccount.balance.toString());
         const balAfter = balBefore.minus(dailyInterest); // debit from FOSA
+        // Deterministic — never uuid() here. A retried accrual job must land on the
+        // exact same reference so LedgerService's replay check (and the pre-check
+        // below) can catch it, instead of double-charging the member.
+        const interestReference = `ACCRUAL-${loan.tenantId}-${loan.id}-${accrualDateStr}`;
 
-        await tx.transaction.create({
-          data: {
+        const existingInterest = await tx.transaction.findFirst({
+          where: { tenantId: loan.tenantId, reference: interestReference },
+        });
+        if (!existingInterest) {
+          const interestTxn = await tx.transaction.create({
+            data: {
+              tenantId: loan.tenantId,
+              accountId: fosaAccount.id,
+              loanId: loan.id,
+              type: TransactionType.INTEREST_ACCRUAL,
+              status: TransactionStatus.COMPLETED,
+              amount: dailyInterest.toDecimalPlaces(4).toString(),
+              balanceBefore: balBefore.toDecimalPlaces(4).toString(),
+              balanceAfter: balAfter.toDecimalPlaces(4).toString(),
+              reference: interestReference,
+              description: `Daily interest accrual – ${accrualDateStr}`,
+              processedBy: 'SYSTEM',
+            },
+          });
+
+          await tx.account.update({
+            where: { id: fosaAccount.id },
+            data: { balance: balAfter.toDecimalPlaces(4).toString() },
+          });
+
+          await this.ledger.postInterestAccrualEntry({
+            tx,
             tenantId: loan.tenantId,
-            accountId: fosaAccount.id,
-            loanId: loan.id,
-            type: TransactionType.INTEREST_ACCRUAL,
-            status: TransactionStatus.COMPLETED,
-            amount: dailyInterest.toDecimalPlaces(4).toString(),
-            balanceBefore: balBefore.toDecimalPlaces(4).toString(),
-            balanceAfter: balAfter.toDecimalPlaces(4).toString(),
-            reference: `ACCRUAL-${loan.id}-${accrualDateStr}-${uuidv4().split('-')[0]}`,
+            reference: interestReference,
+            amount: dailyInterest,
+            accountType: AccountType.FOSA,
+            transactionId: interestTxn.id,
             description: `Daily interest accrual – ${accrualDateStr}`,
-            processedBy: 'SYSTEM',
-          },
-        });
-
-        await tx.account.update({
-          where: { id: fosaAccount.id },
-          data: { balance: balAfter.toDecimalPlaces(4).toString() },
-        });
+          });
+        }
       }
 
-      // Post penalty transaction
+      // Post penalty transaction — same atomicity/idempotency/GL-safety shape as
+      // the interest leg above.
       if (dailyPenalty.gt(0)) {
-        const refreshedAccount = await tx.account.findUnique({
-          where: { id: fosaAccount.id },
-          select: { balance: true },
+        const penaltyReference = `PENALTY-${loan.tenantId}-${loan.id}-${accrualDateStr}`;
+        const existingPenalty = await tx.transaction.findFirst({
+          where: { tenantId: loan.tenantId, reference: penaltyReference },
         });
-        const balBefore = new Decimal(refreshedAccount!.balance.toString());
-        const balAfter = balBefore.minus(dailyPenalty);
+        if (!existingPenalty) {
+          const refreshedAccount = await tx.account.findUnique({
+            where: { id: fosaAccount.id },
+            select: { balance: true },
+          });
+          const balBefore = new Decimal(refreshedAccount!.balance.toString());
+          const balAfter = balBefore.minus(dailyPenalty);
 
-        await tx.transaction.create({
-          data: {
+          const penaltyTxn = await tx.transaction.create({
+            data: {
+              tenantId: loan.tenantId,
+              accountId: fosaAccount.id,
+              loanId: loan.id,
+              type: TransactionType.PENALTY,
+              status: TransactionStatus.COMPLETED,
+              amount: dailyPenalty.toDecimalPlaces(4).toString(),
+              balanceBefore: balBefore.toDecimalPlaces(4).toString(),
+              balanceAfter: balAfter.toDecimalPlaces(4).toString(),
+              reference: penaltyReference,
+              description: `Overdue penalty – ${accrualDateStr}`,
+              processedBy: 'SYSTEM',
+            },
+          });
+
+          await tx.account.update({
+            where: { id: fosaAccount.id },
+            data: { balance: balAfter.toDecimalPlaces(4).toString() },
+          });
+
+          await this.ledger.postPenaltyDeductionEntry({
+            tx,
             tenantId: loan.tenantId,
-            accountId: fosaAccount.id,
-            loanId: loan.id,
-            type: TransactionType.PENALTY,
-            status: TransactionStatus.COMPLETED,
-            amount: dailyPenalty.toDecimalPlaces(4).toString(),
-            balanceBefore: balBefore.toDecimalPlaces(4).toString(),
-            balanceAfter: balAfter.toDecimalPlaces(4).toString(),
-            reference: `PENALTY-${loan.id}-${accrualDateStr}-${uuidv4().split('-')[0]}`,
+            reference: penaltyReference,
+            amount: dailyPenalty,
+            accountType: AccountType.FOSA,
+            transactionId: penaltyTxn.id,
             description: `Overdue penalty – ${accrualDateStr}`,
-            processedBy: 'SYSTEM',
-          },
-        });
-
-        await tx.account.update({
-          where: { id: fosaAccount.id },
-          data: { balance: balAfter.toDecimalPlaces(4).toString() },
-        });
+          });
+        }
       }
 
       // Update loan arrears + staging + running accruedInterest total
@@ -355,13 +402,26 @@ export class FinancialService {
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Verifies that SUM(credits) - SUM(debits) == stored account balance for
-   * every account in the tenant.
+   * Verifies TWO independent things, and must never conflate them:
+   *
+   *  1. The math: SUM(credits) - SUM(debits) == stored Account.balance, for
+   *     every account in the tenant ("drifts" below).
+   *  2. The GL trace: every COMPLETED/REVERSED Transaction has a matching
+   *     JournalEntry ("glBypasses" below).
+   *
+   * Before Phase 3, only (1) ran — and a GL bypass (Account.balance updated
+   * directly, skipping LedgerService) leaves the math perfectly balanced: the
+   * live balance and the sum of Transaction.amount still agree with each
+   * other, because both were written by the same bypassing code path. Only a
+   * missing JournalEntry reveals it. Reporting a bypass as though it were a
+   * "drift" would also be misleading operationally — a drift means the books
+   * don't balance and needs investigation into which number is wrong; a
+   * bypass means the books DO balance but a whole leg of double-entry
+   * accounting never happened. Different root cause, different fix, so they
+   * stay in separate fields.
    *
    * Credit types: DEPOSIT, LOAN_DISBURSEMENT, INTEREST_EARNED, DIVIDEND_PAYOUT
    * Debit types:  WITHDRAWAL, LOAN_REPAYMENT, INTEREST_ACCRUAL, PENALTY, FEE_CHARGE
-   *
-   * Returns list of accounts with drift (expected vs actual).
    */
   async runLedgerIntegrityCheck(tenantId: string): Promise<{
     checked: number;
@@ -373,6 +433,17 @@ export class FinancialService {
       actual: number;
       drift: number;
     }[];
+    glBypassCount: number;
+    glBypasses: {
+      transactionId: string;
+      reference: string;
+      type: string;
+      accountId: string;
+      amount: string;
+      createdAt: string;
+    }[];
+    /** true if more bypasses exist than the GL_BYPASS_SCAN_LIMIT below — the count/list are a lower bound, not exhaustive. */
+    glBypassTruncated: boolean;
   }> {
     const CREDIT_TYPES = [
       TransactionType.DEPOSIT,
@@ -450,6 +521,83 @@ export class FinancialService {
       );
     }
 
-    return { checked: accounts.length, driftCount: drifts.length, drifts };
+    const { bypasses, truncated } = await this.findGlBypasses(tenantId);
+    if (bypasses.length > 0) {
+      this.logger.error(
+        `GL_BYPASS_DETECTED tenant=${tenantId}: ${bypasses.length} transaction(s) with no ` +
+          `matching JournalEntry — Account.balance was mutated outside LedgerService` +
+          (truncated ? ` (truncated at ${this.GL_BYPASS_SCAN_LIMIT})` : ''),
+        bypasses,
+      );
+    }
+
+    return {
+      checked: accounts.length,
+      driftCount: drifts.length,
+      drifts,
+      glBypassCount: bypasses.length,
+      glBypasses: bypasses,
+      glBypassTruncated: truncated,
+    };
+  }
+
+  /**
+   * Anti-join Transaction → JournalEntry: find every COMPLETED/REVERSED
+   * Transaction with no JournalEntry referencing it. Pushed down as a single
+   * SQL NOT EXISTS (indexed via JournalEntry(tenantId, referenceType,
+   * referenceId) — see the migration adding that index) instead of an N+1 loop
+   * of per-transaction existence checks, so this stays cheap as transaction
+   * volume grows.
+   *
+   * postInternalTransfer() deliberately writes ONE JournalEntry for TWO
+   * Transaction rows (source + destination leg), with the JournalEntry
+   * referencing only the source leg's id — the destination leg is linked to
+   * it via Transaction.linkedTransactionId, not its own JournalEntry. Without
+   * accounting for that, every internal transfer's destination leg would
+   * false-positive as a bypass here. The `referenceId IN (t.id,
+   * t."linkedTransactionId")` check accepts either.
+   */
+  private async findGlBypasses(tenantId: string): Promise<{
+    bypasses: {
+      transactionId: string;
+      reference: string;
+      type: string;
+      accountId: string;
+      amount: string;
+      createdAt: string;
+    }[];
+    truncated: boolean;
+  }> {
+    const rows = await this.prisma.$queryRaw<
+      { id: string; reference: string; type: string; accountId: string; amount: Decimal; createdAt: Date }[]
+    >`
+      SELECT t.id, t.reference, t.type, t."accountId", t.amount, t."createdAt"
+      FROM "Transaction" t
+      WHERE t."tenantId" = ${tenantId}
+        AND t.status IN ('COMPLETED', 'REVERSED')
+        AND NOT EXISTS (
+          SELECT 1 FROM "JournalEntry" je
+          WHERE je."tenantId" = t."tenantId"
+            AND je."referenceType" = 'TRANSACTION'
+            AND je."referenceId" IN (t.id, t."linkedTransactionId")
+        )
+      ORDER BY t."createdAt" DESC
+      LIMIT ${this.GL_BYPASS_SCAN_LIMIT + 1}
+    `;
+
+    const truncated = rows.length > this.GL_BYPASS_SCAN_LIMIT;
+    const bounded = truncated ? rows.slice(0, this.GL_BYPASS_SCAN_LIMIT) : rows;
+
+    return {
+      bypasses: bounded.map((row) => ({
+        transactionId: row.id,
+        reference: row.reference,
+        type: row.type,
+        accountId: row.accountId,
+        amount: row.amount.toString(),
+        createdAt: row.createdAt.toISOString(),
+      })),
+      truncated,
+    };
   }
 }

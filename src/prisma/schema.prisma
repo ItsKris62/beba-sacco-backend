@@ -1540,11 +1540,14 @@ model JournalEntry {
   postedAt      DateTime?
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
+  reversalOfJournalEntryId String?
   postings      GLPosting[]
   approvedBy    User?              @relation("JournalEntryApprover", fields: [approvedById], references: [id])
   createdBy     User               @relation("JournalEntryCreator", fields: [createdById], references: [id])
   rejectedBy    User?              @relation("JournalEntryRejector", fields: [rejectedById], references: [id])
   tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reversalOf    JournalEntry?      @relation("JournalEntryReversal", fields: [reversalOfJournalEntryId], references: [id])
+  reversals     JournalEntry[]     @relation("JournalEntryReversal")
 
   @@unique([tenantId, entryNumber])
   @@index([tenantId, status])
@@ -1554,6 +1557,8 @@ model JournalEntry {
   @@index([tenantId, createdById])
   @@index([tenantId, approvedById])
   @@index([tenantId, rejectedById])
+  @@index([reversalOfJournalEntryId])
+  @@index([tenantId, referenceType, referenceId])
   @@schema("public")
 }
 
@@ -1681,6 +1686,7 @@ enum TransactionType {
   TRANSFER
   INTEREST_ACCRUAL
   PENALTY
+  REVERSAL
 
   @@schema("public")
 }
@@ -1971,6 +1977,7 @@ enum JournalEntryType {
   WITHDRAWAL
   TRANSFER
   DIVIDEND_PAYOUT
+  REVERSAL
 
   @@schema("public")
 }

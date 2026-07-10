@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis, { RedisOptions } from 'ioredis';
+import { randomUUID } from 'crypto';
 
 /**
  * Redis Service – ioredis wrapper optimised for Upstash Redis
@@ -205,6 +206,45 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(`Redis consumeIfValue failed for key "${key}": ${(err as Error).message}`);
       return 'missing';
+    }
+  }
+
+  // ─── Distributed locks ────────────────────────────────────────────────────
+
+  /**
+   * Acquire a short-lived distributed lock via SET NX EX (single-node Redlock
+   * pattern — sufficient here since we run a single managed Redis instance, not
+   * a Redlock quorum). Returns a random ownership token on success, or `null`
+   * if the lock is already held by someone else.
+   *
+   * Fail-closed: if Redis itself is unreachable, `set()` returns false and this
+   * returns `null` (lock NOT acquired) — callers must treat that the same as
+   * "lock held" and skip/retry rather than proceeding without protection. A
+   * financial mutation guarded by a lock that silently no-ops on Redis outage
+   * would defeat the entire point of taking the lock.
+   *
+   * Always pair with `releaseLock(key, token)` in a `finally` block.
+   */
+  async acquireLock(key: string, ttlSeconds: number): Promise<string | null> {
+    const token = randomUUID();
+    const acquired = await this.set(key, token, ttlSeconds, true);
+    return acquired ? token : null;
+  }
+
+  /**
+   * Release a lock acquired via acquireLock() — only deletes the key if it
+   * still holds OUR token (via consumeIfValue's atomic GET+compare+DEL). This
+   * guards against the case where our TTL already expired and a different
+   * caller acquired the lock in the meantime: blindly DEL-ing here would
+   * release *their* lock, not ours, re-opening the race the lock exists to
+   * prevent.
+   */
+  async releaseLock(key: string, token: string): Promise<void> {
+    const result = await this.consumeIfValue(key, token);
+    if (result === 'mismatch') {
+      this.logger.warn(
+        `Redis releaseLock: key "${key}" is now held by a different owner (our TTL likely expired first) — not releasing`,
+      );
     }
   }
 

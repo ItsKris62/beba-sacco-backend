@@ -30,7 +30,6 @@ export const QUEUE_NAMES = {
   INTEREST_ACCRUAL: 'financial.interest-accrual',
   REPAYMENT_SCHEDULE: 'financial.repayment-schedule',
   MPESA_RECONCILIATION: 'financial.mpesa-reconciliation',
-  MPESA_RECONCILE_QUEUE: 'mpesa.reconcile',
   LEDGER_INTEGRITY: 'financial.ledger-integrity',
   // Phase 4 – Outbound Webhooks
   OUTBOUND_WEBHOOK: 'webhooks.outbound',
@@ -71,7 +70,6 @@ export const GUARANTOR_EXPIRY_CHECK_JOB = 'guarantor-expiry-check';
 export const REPAYMENT_REMINDER_SCAN_JOB = 'repayment-reminder-scan';
 export const GUARANTOR_RECOVERY_NOTICE_JOB = 'guarantor-recovery-notice';
 export const GUARANTOR_DEBIT_JOB = 'guarantor-debit-execute';
-export const RECONCILE_PENDING_STK_JOB = 'reconcile-pending-stk';
 export const APPLY_DAILY_PENALTIES_JOB = 'apply-daily-penalties';
 export const PROCESS_GUARANTOR_FORFEITURE_JOB = 'process-guarantor-forfeiture';
 export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
@@ -100,12 +98,22 @@ export interface MpesaDisbursementJobPayload {
   amount: number;
   /** userId of officer or "SYSTEM" for automated disbursements */
   triggeredBy: string;
+  /**
+   * Ledger Transaction.id of the debit that already moved the money (e.g. the FOSA
+   * withdrawal debit posted by MemberPortalService.withdrawMpesa() before this B2C
+   * payout was queued). Linked onto the resulting MpesaTransaction.transactionId so
+   * a failed/timed-out B2C call can be reversed via LedgerService.reverseTransaction()
+   * instead of a manual, GL-bypassing balance credit.
+   */
+  sourceTransactionId?: string;
 }
 
 export interface MpesaB2cTimeoutJobPayload {
-  loanId: string;
   tenantId: string;
   conversationId: string;
+  /** What MpesaTransaction.referenceId/referenceType this B2C call was for. */
+  referenceId: string;
+  referenceType: 'LOAN_DISBURSEMENT' | 'FOSA_WITHDRAWAL';
 }
 
 export interface GuarantorReminderJobPayload {
@@ -481,3 +489,26 @@ export const SUPPORT_NOTIFICATION_JOB_OPTIONS = {
   removeOnComplete: true,
   removeOnFail: false,
 };
+
+// ─── Distributed-lock keys (Phase 2) ───────────────────────────────────────
+//
+// Shared builders so every caller that must serialize against the same
+// financial mutation derives byte-identical Redis keys — a typo'd inline
+// template string in one of two call sites would silently defeat the lock
+// (they'd never contend on the same key). Always import the builder, never
+// re-type the key format.
+
+/**
+ * Guards guarantor-forfeiture/recovery for one loan. Two independent code
+ * paths can trigger this for the same loan — the daily cron
+ * (GuarantorDefaultOffsetProcessor) and the delayed post-notice debit
+ * (LoanRecoveryService.recoverFromGuarantors, run by GuarantorRecoveryProcessor)
+ * — both must hold this lock before touching any guarantor's Account.balance
+ * for the loan, or a race between them double-debits the guarantor.
+ */
+export function guarantorForfeitureLockKey(tenantId: string, loanId: string): string {
+  return `lock:guarantor_forfeiture:${tenantId}:${loanId}`;
+}
+
+/** TTL for the guarantor-forfeiture lock — comfortably longer than one Serializable transaction over a loan's guarantor list, short enough that a crashed holder doesn't block the next run for long. */
+export const GUARANTOR_FORFEITURE_LOCK_TTL_SECONDS = 30;

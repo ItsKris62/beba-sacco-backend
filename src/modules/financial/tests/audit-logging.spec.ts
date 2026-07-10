@@ -5,6 +5,7 @@ import { FinancialService } from '../financial.service';
 import { ReconciliationService } from '../reconciliation.service';
 import { RedisService } from '../../../common/services/redis.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { LedgerService } from '../../accounting/ledger.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 
 const TENANT_ID = 'tenant-uuid-1';
@@ -19,11 +20,18 @@ describe('Tier 4 audit logging', () => {
       $transaction: jest.fn(async (cb: (tx: any) => Promise<unknown>) => cb(mockTx)),
     };
     const redis = { set: jest.fn().mockResolvedValue(true) };
+    const ledger = {
+      postInterestAccrualEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-interest-1' }, replayed: false }),
+      postPenaltyDeductionEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-penalty-1' }, replayed: false }),
+    };
 
     beforeEach(() => {
       jest.clearAllMocks();
       mockTx = {
-        transaction: { create: jest.fn().mockResolvedValue({}) },
+        transaction: {
+          create: jest.fn().mockResolvedValue({}),
+          findFirst: jest.fn().mockResolvedValue(null),
+        },
         account: {
           update: jest.fn().mockResolvedValue({}),
           findUnique: jest.fn().mockResolvedValue({ balance: '10000.0000' }),
@@ -38,6 +46,7 @@ describe('Tier 4 audit logging', () => {
           FinancialService,
           { provide: PrismaService, useValue: prisma },
           { provide: RedisService, useValue: redis },
+          { provide: LedgerService, useValue: ledger },
           { provide: getQueueToken(QUEUE_NAMES.AUDIT_LOG), useValue: auditQueue },
         ],
       }).compile();

@@ -1,14 +1,18 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { AccountType, GuarantorStatus, Prisma, TransactionStatus, TransactionType } from '@prisma/client';
 import { createHash } from 'crypto';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../common/services/redis.service';
+import { LedgerService } from '../accounting/ledger.service';
 import {
+  GUARANTOR_FORFEITURE_LOCK_TTL_SECONDS,
   GUARANTOR_RECOVERY_NOTICE_JOB,
   InitiateGuarantorRecoveryJobPayload,
   QUEUE_NAMES,
+  guarantorForfeitureLockKey,
 } from '../queue/queue.constants';
 
 interface AcceptedGuarantorRecoveryRow {
@@ -37,6 +41,8 @@ export interface LoanRecoverySummary {
 export class LoanRecoveryService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+    private readonly ledger: LedgerService,
     @InjectQueue(QUEUE_NAMES.GUARANTOR_RECOVERY)
     private readonly guarantorRecoveryQueue: Queue<InitiateGuarantorRecoveryJobPayload>,
   ) {}
@@ -112,6 +118,33 @@ export class LoanRecoveryService {
       throw new BadRequestException('INVALID_DEFAULT_AMOUNT: defaultAmount must be greater than zero');
     }
 
+    // Distributed lock: GuarantorDefaultOffsetProcessor's daily cron can target the
+    // exact same loan's guarantors concurrently with this delayed post-notice debit
+    // (both fire once a loan is far enough in arrears). Without this, they could
+    // both read the same pre-recovery balance and both deduct — a double-debit of
+    // the guarantor's savings. Throw (don't silently no-op) so the caller's BullMQ
+    // job retries with backoff rather than reporting a false "recovered nothing".
+    const lockKey = guarantorForfeitureLockKey(tenantId, loanId);
+    const lockToken = await this.redis.acquireLock(lockKey, GUARANTOR_FORFEITURE_LOCK_TTL_SECONDS);
+    if (!lockToken) {
+      throw new ConflictException(
+        `GUARANTOR_FORFEITURE_LOCKED: another forfeiture/recovery is already in progress for loan ${loanId}`,
+      );
+    }
+
+    try {
+      return await this.recoverFromGuarantorsLocked(loanId, tenantId, defaultAmount, actorId);
+    } finally {
+      await this.redis.releaseLock(lockKey, lockToken);
+    }
+  }
+
+  private async recoverFromGuarantorsLocked(
+    loanId: string,
+    tenantId: string,
+    defaultAmount: Decimal,
+    actorId: string,
+  ): Promise<{ recoverySummary: LoanRecoverySummary }> {
     return this.prisma.$transaction(async (tx) => {
       const loan = await tx.loan.findFirst({
         where: { id: loanId, tenantId },
@@ -121,7 +154,10 @@ export class LoanRecoveryService {
           outstandingBalance: true,
           loanProduct: { select: { requiredAccountType: true } },
           guarantors: {
-            where: { tenantId, status: GuarantorStatus.ACCEPTED },
+            // holdReleasedAt: null matches the cron path's filter (GuarantorDefaultOffsetProcessor) —
+            // a guarantor whose hold was already released (by either path) must never be
+            // selected for a second round of recovery.
+            where: { tenantId, status: GuarantorStatus.ACCEPTED, holdReleasedAt: null },
             select: {
               id: true,
               memberId: true,
@@ -153,6 +189,17 @@ export class LoanRecoveryService {
 
         const account = allocation.account;
         if (!account) {
+          continue;
+        }
+
+        // Deterministic reference — same format as GuarantorDefaultOffsetProcessor
+        // uses, since both paths represent the same conceptual event (this
+        // guarantor's account forfeited for this loan). Defense-in-depth alongside
+        // the distributed lock and holdReleasedAt:null filter above: skip instead
+        // of posting (and debiting) a second time on a retried job.
+        const reference = `GUAR_FORFEIT-${tenantId}-${loanId}-${account.id}`;
+        const existingRecovery = await tx.transaction.findFirst({ where: { tenantId, reference } });
+        if (existingRecovery) {
           continue;
         }
 
@@ -188,7 +235,7 @@ export class LoanRecoveryService {
           );
         }
 
-        await tx.transaction.create({
+        const recoveryTxn = await tx.transaction.create({
           data: {
             tenantId,
             accountId: account.id,
@@ -198,10 +245,24 @@ export class LoanRecoveryService {
             amount,
             balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
             balanceAfter: balanceAfter.toString(),
-            reference: `GUARANTOR-RECOVERY-${allocation.guarantor.id}-${recoveryDate.getTime()}`,
+            reference,
             description: `Guarantor recovery for loan ${loan.loanNumber}`,
             processedBy: actorId,
           },
+        });
+
+        // GL leg: debit the guarantor's own deposit-liability code, credit
+        // LOAN_RECEIVABLE — tx.account.updateMany() above is the only balance
+        // mutation; this call is GL-only (see LedgerService.postGuarantorForfeitureEntry).
+        await this.ledger.postGuarantorForfeitureEntry({
+          tx,
+          tenantId,
+          reference,
+          amount: allocation.deduction,
+          accountType,
+          transactionId: recoveryTxn.id,
+          actorId,
+          description: `Guarantor recovery for loan ${loan.loanNumber}`,
         });
 
         await this.createAuditLogInTransaction(tx, {

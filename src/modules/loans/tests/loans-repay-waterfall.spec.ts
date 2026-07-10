@@ -6,6 +6,7 @@ import { LoansService } from '../loans.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { RedisService } from '../../../common/services/redis.service';
+import { CacheService } from '../../../common/services/cache.service';
 import { IdempotencyService } from '../../../common/services/idempotency.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import { DisbursementGateService } from '../../../loans/disbursement-gate.service';
@@ -18,7 +19,7 @@ import { BehavioralRiskScorerService } from '../../fraud/risk-scorer/behavioral-
 
 type TxClient = {
   $queryRaw: jest.Mock;
-  transaction: { create: jest.Mock };
+  transaction: { create: jest.Mock; findFirst: jest.Mock };
   account: { update: jest.Mock };
   loan: { findFirst: jest.Mock; update: jest.Mock };
 };
@@ -26,7 +27,8 @@ type TxClient = {
 function buildTxClient(): TxClient {
   return {
     $queryRaw: jest.fn(),
-    transaction: { create: jest.fn() },
+    // findFirst defaults to "no existing replay" so the waterfall runs as before.
+    transaction: { create: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
     account: { update: jest.fn() },
     loan: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
   };
@@ -52,6 +54,7 @@ const mockLedger = {
   postAccountSourcedRepaymentLegEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-leg-1' }, replayed: false }),
 };
 const mockRedis = {};
+const mockCache = { invalidateTenantDashboard: jest.fn().mockResolvedValue(undefined) };
 const mockIdempotency = {};
 const mockGuarantorQueue = { add: jest.fn().mockResolvedValue(undefined) };
 const mockEmailQueue = { add: jest.fn().mockResolvedValue(undefined) };
@@ -112,6 +115,7 @@ describe('LoansService.repay() — SASRA waterfall', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: AuditService, useValue: mockAudit },
         { provide: RedisService, useValue: mockRedis },
+        { provide: CacheService, useValue: mockCache },
         { provide: IdempotencyService, useValue: mockIdempotency },
         { provide: getQueueToken(QUEUE_NAMES.LOAN_GUARANTOR_REMINDER), useValue: mockGuarantorQueue },
         { provide: getQueueToken(QUEUE_NAMES.EMAIL), useValue: mockEmailQueue },

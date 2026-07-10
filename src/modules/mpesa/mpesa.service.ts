@@ -288,6 +288,7 @@ export class MpesaService {
     phone: string,
     amount: number,
     triggeredBy: string,
+    sourceTransactionId?: string,
   ): Promise<{ conversationId: string; mpesaTxId: string }> {
     let memberId = '';
     let accountReference = referenceId;
@@ -337,6 +338,10 @@ export class MpesaService {
         memberId,
         referenceType,
         referenceId,
+        // Links back to the ledger Transaction that already moved the money (e.g. a
+        // FOSA withdrawal debit) so a failed/timed-out B2C call can be reversed via
+        // LedgerService.reverseTransaction() — see MpesaCallbackProcessor.handleB2cCallback().
+        ...(sourceTransactionId && { transactionId: sourceTransactionId }),
         type: MpesaTxType.B2C,
         triggerSource:
           triggeredBy === 'SYSTEM' ? MpesaTriggerSource.SYSTEM : MpesaTriggerSource.OFFICER,
@@ -358,7 +363,7 @@ export class MpesaService {
 
     await this.b2cTimeoutQueue.add(
       'b2c-timeout-check',
-      { loanId: referenceId, tenantId, conversationId: darajaResp.ConversationID },
+      { referenceId, referenceType, tenantId, conversationId: darajaResp.ConversationID },
       {
         delay: 30 * 60 * 1000,
         jobId: `b2c-timeout:${darajaResp.ConversationID}`,

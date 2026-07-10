@@ -5,6 +5,7 @@ import { Queue } from 'bullmq';
 import { Job } from 'bullmq';
 import type { AuditService } from '../../audit/audit.service';
 import type { LoanRepaymentService } from '../../loans/loan-repayment.service';
+import type { LedgerService } from '../../accounting/ledger.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,12 @@ const mockDlq = { add: jest.fn().mockResolvedValue({}) } as unknown as Queue;
 const mockAudit = { create: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
 const mockCache = { invalidateTenantDashboard: jest.fn().mockResolvedValue(undefined) };
 const mockLoanRepayment = { processMpesaRepayment: jest.fn().mockResolvedValue(undefined) } as unknown as LoanRepaymentService;
+const mockLedger = {
+  postEntry: jest.fn().mockResolvedValue({
+    transaction: { id: 'ledger-tx-1', balanceBefore: '10000', balanceAfter: '11000' },
+    journalEntry: { id: 'je-1' },
+  }),
+} as unknown as LedgerService;
 
 // ─── Suite ───────────────────────────────────────────────────────────────────
 
@@ -99,7 +106,7 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       accountFindMany,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockDlq);
+    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq);
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(accountFindMany).not.toHaveBeenCalled();
@@ -114,7 +121,7 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       txCreate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockDlq);
+    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq);
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(txCreate).toHaveBeenCalledWith(
@@ -139,7 +146,7 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       txCreate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockDlq);
+    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq);
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(txCreate).toHaveBeenCalledWith(
@@ -165,7 +172,7 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       txCreate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockDlq);
+    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq);
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(txCreate).toHaveBeenCalledWith(
@@ -189,7 +196,7 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       accountUpdate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockDlq);
+    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq);
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(accountUpdate).not.toHaveBeenCalled();
@@ -200,7 +207,7 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
     const accountFindFirst = jest.fn();
     const prisma = makePrisma({ accountFindMany, accountFindFirst });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockDlq);
+    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq);
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(accountFindMany).toHaveBeenCalledWith(

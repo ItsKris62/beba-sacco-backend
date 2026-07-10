@@ -3,25 +3,30 @@ import { LoanStatus, LoanStaging } from '@prisma/client';
 import { FinancialService } from '../financial.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { RedisService } from '../../../common/services/redis.service';
+import { LedgerService } from '../../accounting/ledger.service';
 
 // ─── Transaction mock ─────────────────────────────────────────────────────────
 //
 // accrueInterestForLoan() uses this.prisma.$transaction(async (tx) => {
+//   tx.transaction.findFirst × 1–2 (idempotency pre-check per leg)
 //   tx.transaction.create  × 1 (interest), optionally × 2 (penalty)
 //   tx.account.update      × 1–2
 //   tx.account.findUnique  × 0–1 (re-read before penalty)
 //   tx.loan.update         × 1
-// })
+// }), and calls this.ledger.post{Interest,Penalty}...Entry() for the GL leg.
 
 type TxClient = {
-  transaction: { create: jest.Mock };
+  transaction: { create: jest.Mock; findFirst: jest.Mock };
   account: { update: jest.Mock; findUnique: jest.Mock };
   loan: { update: jest.Mock };
 };
 
 function buildTxClient(): TxClient {
   return {
-    transaction: { create: jest.fn().mockResolvedValue({ id: 'txn-1' }) },
+    transaction: {
+      create: jest.fn().mockResolvedValue({ id: 'txn-1' }),
+      findFirst: jest.fn().mockResolvedValue(null), // no existing accrual — not a replay
+    },
     account: {
       update: jest.fn().mockResolvedValue({}),
       findUnique: jest.fn().mockResolvedValue({ balance: '10000.0000' }),
@@ -41,6 +46,11 @@ const mockPrisma = {
 
 const mockRedis = {
   set: jest.fn().mockResolvedValue(true), // lock acquired
+};
+
+const mockLedger = {
+  postInterestAccrualEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-interest-1' }, replayed: false }),
+  postPenaltyDeductionEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-penalty-1' }, replayed: false }),
 };
 
 // ─── Common fixtures ──────────────────────────────────────────────────────────
@@ -82,6 +92,7 @@ describe('FinancialService.accrueInterestForLoan() — Tier 3 accruedInterest in
         FinancialService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: RedisService, useValue: mockRedis },
+        { provide: LedgerService, useValue: mockLedger },
       ],
     }).compile();
 

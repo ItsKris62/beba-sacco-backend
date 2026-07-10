@@ -459,6 +459,186 @@ export class LedgerService {
     };
   }
 
+  // ─── REVERSAL ──────────────────────────────────────────────────────────────
+
+  /**
+   * Reverse a single-account posting created by postEntry() (deposit / withdrawal /
+   * mpesa deposit / fee / loan disbursement): re-applies the inverse balance change
+   * to Account.balance, writes a linked reversal Transaction, and writes an inverse
+   * JournalEntry/GLPosting pair (debit/credit swapped from the original), all in one
+   * atomic unit. Marks the original Transaction REVERSED so it can never be reversed
+   * twice and so statement/reporting code can filter it out.
+   *
+   * Deliberately does NOT support postInternalTransfer() (two Transaction rows, one
+   * JournalEntry with two legs) or the loan-repayment-waterfall leg postings
+   * (postLoanRepaymentLegEntry / postAccountSourcedRepaymentLegEntry, which touch no
+   * Account) — reversing those needs to unwind multiple linked rows together, which
+   * is a different shape of operation. Extend this method (or add a sibling) if that
+   * becomes a real requirement rather than guessing at the semantics now.
+   *
+   * `tenantId` is required (beyond the caller-facing spec of "originalTransactionId,
+   * reason, reversedByUserId") because Rule 5 (multi-tenancy) is non-negotiable: a
+   * reversal keyed on transaction ID alone would let any caller reverse another
+   * tenant's ledger entry just by guessing/enumerating a UUID.
+   *
+   * `tx` is optional for the same reason postEntry()'s is: pass the caller's own
+   * PrismaTx when the reversal must be atomic with other writes in the same unit of
+   * work (e.g. MpesaCallbackProcessor reversing a FOSA withdrawal debit inside the
+   * same transaction that marks the MpesaTransaction FAILED).
+   *
+   * `reversedByUserId` is optional for the same reason postEntry()'s `actorId` is:
+   * system-triggered reversals (an M-Pesa B2C failure callback, a timeout sweep)
+   * have no human actor. When omitted, falls back to the tenant's seeded SYSTEM
+   * user — see resolveSystemActorId() — since JournalEntry.createdById/approvedById
+   * are non-nullable FKs to User.
+   */
+  async reverseTransaction(params: {
+    tenantId: string;
+    originalTransactionId: string;
+    reason: string;
+    reversedByUserId?: string;
+    tx?: PrismaTx;
+  }): Promise<{ transaction: Transaction; journalEntry: JournalEntry }> {
+    const { tenantId, originalTransactionId, reason } = params;
+    const reversedByUserId = params.reversedByUserId ?? (await this.resolveSystemActorId(tenantId));
+
+    const runBody = (tx: PrismaTx) =>
+      this.reverseTransactionBody(tx, { tenantId, originalTransactionId, reason, reversedByUserId });
+
+    const result = params.tx
+      ? await runBody(params.tx)
+      : await this.prisma.$transaction((tx) => runBody(tx), { isolationLevel: 'Serializable' });
+
+    if (!params.tx) {
+      this.audit
+        .create({
+          tenantId,
+          actorId: reversedByUserId,
+          action: 'LEDGER_REVERSE_TRANSACTION',
+          entityType: 'Transaction',
+          entityId: result.transaction.id,
+          newValue: {
+            originalTransactionId,
+            reason,
+            reference: result.transaction.reference,
+          },
+        })
+        .catch((e: unknown) => this.logger.error('Audit write failed for LEDGER_REVERSE_TRANSACTION', e));
+    }
+
+    return result;
+  }
+
+  private async reverseTransactionBody(
+    tx: PrismaTx,
+    params: { tenantId: string; originalTransactionId: string; reason: string; reversedByUserId: string },
+  ): Promise<{ transaction: Transaction; journalEntry: JournalEntry }> {
+    const { tenantId, originalTransactionId, reason, reversedByUserId } = params;
+
+    const original = await tx.transaction.findFirst({
+      where: { id: originalTransactionId, tenantId },
+    });
+    if (!original) {
+      throw new NotFoundException(`Transaction ${originalTransactionId} not found in this tenant`);
+    }
+    if (original.status === TransactionStatus.REVERSED) {
+      throw new ConflictException(`Transaction ${originalTransactionId} has already been reversed`);
+    }
+
+    const originalEntry = await tx.journalEntry.findFirst({
+      where: { tenantId, referenceType: 'TRANSACTION', referenceId: original.id },
+      include: { postings: true },
+    });
+    if (!originalEntry) {
+      throw new ConflictException(
+        `Transaction ${originalTransactionId} has no linked journal entry — ledger is inconsistent`,
+      );
+    }
+    if (originalEntry.postings.length !== 1) {
+      throw new BadRequestException(
+        `reverseTransaction: journal entry ${originalEntry.entryNumber} has ${originalEntry.postings.length} ` +
+          'postings — only single-posting entries (postEntry()) are supported',
+      );
+    }
+
+    const existingReversal = await tx.journalEntry.findFirst({
+      where: { tenantId, reversalOfJournalEntryId: originalEntry.id },
+    });
+    if (existingReversal) {
+      throw new ConflictException(`Journal entry ${originalEntry.entryNumber} has already been reversed`);
+    }
+
+    const amount = new Decimal(original.amount.toString());
+    const originalBalanceBefore = new Decimal(original.balanceBefore.toString());
+    const originalBalanceAfter = new Decimal(original.balanceAfter.toString());
+    // The original posting was a CREDIT if it increased the balance; reversing it
+    // means applying the opposite direction.
+    const originalWasCredit = originalBalanceAfter.greaterThanOrEqualTo(originalBalanceBefore);
+    const reverseDirection: Direction = originalWasCredit ? 'DEBIT' : 'CREDIT';
+
+    const { balanceBefore, balanceAfter } = await this.applyBalanceChange(tx, {
+      tenantId,
+      accountId: original.accountId,
+      amount,
+      direction: reverseDirection,
+    });
+
+    const reversalReference = `${original.reference}-REVERSAL`;
+
+    const reversalTransaction = await tx.transaction.create({
+      data: {
+        tenantId,
+        accountId: original.accountId,
+        type: TransactionType.REVERSAL,
+        status: TransactionStatus.COMPLETED,
+        amount: amount.toString(),
+        balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+        balanceAfter: balanceAfter.toString(),
+        reference: reversalReference,
+        description: `Reversal of ${original.reference}: ${reason}`,
+        processedBy: reversedByUserId,
+        linkedTransactionId: original.id,
+      },
+    });
+
+    const originalPosting = originalEntry.postings[0];
+    const reversalJournalEntry = await tx.journalEntry.create({
+      data: {
+        tenantId,
+        entryNumber: `JE-REVERSAL-${original.reference}`,
+        type: JournalEntryType.REVERSAL,
+        status: JournalEntryStatus.POSTED,
+        description: `Reversal of ${originalEntry.entryNumber}: ${reason}`,
+        referenceType: 'TRANSACTION',
+        referenceId: reversalTransaction.id,
+        totalAmount: originalEntry.totalAmount,
+        createdById: reversedByUserId,
+        approvedById: reversedByUserId,
+        approvalNotes: `System-posted via LedgerService.reverseTransaction() — ${reason}`,
+        postedAt: new Date(),
+        reversalOfJournalEntryId: originalEntry.id,
+        postings: {
+          create: [
+            {
+              // Debits become credits and credits become debits — exact inverse.
+              debitAccountId: originalPosting.creditAccountId,
+              creditAccountId: originalPosting.debitAccountId,
+              amount: originalPosting.amount,
+              description: `Reversal: ${originalPosting.description ?? originalEntry.description}`,
+            },
+          ],
+        },
+      },
+    });
+
+    await tx.transaction.update({
+      where: { id: original.id },
+      data: { status: TransactionStatus.REVERSED },
+    });
+
+    return { transaction: reversalTransaction, journalEntry: reversalJournalEntry };
+  }
+
   // ─── LOAN REPAYMENT WATERFALL LEG (GL-only, no Account touched) ───────────────
 
   /**
@@ -541,11 +721,133 @@ export class LedgerService {
     });
   }
 
+  // ─── GUARANTOR FORFEITURE (GL-only, no Account touched) ───────────────────────
+
   /**
-   * Shared implementation for both loan-repayment leg postings above: one
-   * GL-only JournalEntry/GLPosting pair, debiting `debitCode` and crediting the
-   * leg-appropriate income/receivable code. No Account or operational Transaction
-   * row is touched — see the two public methods' docs for why.
+   * Post the GL side of a guarantor's savings being forfeited to offset a
+   * defaulted loan: debit the guarantor's own FOSA/BOSA deposit-liability code,
+   * credit LOAN_RECEIVABLE (the defaulted loan's outstanding balance is paid
+   * down by someone else's money, same GL shape as a repayment PRINCIPAL leg).
+   *
+   * Deliberately does NOT touch Account.balance — same convention as
+   * postAccountSourcedRepaymentLegEntry(): the caller (GuarantorDefaultOffsetProcessor
+   * / LoanRecoveryService) decrements the guarantor's balance/frozenSavings itself
+   * under an OCC-guarded update, inside the SAME `tx` and the SAME distributed lock,
+   * so this call can never double-debit.
+   */
+  async postGuarantorForfeitureEntry(params: {
+    tx: PrismaTx;
+    tenantId: string;
+    reference: string;
+    amount: Decimal;
+    accountType: AccountType;
+    transactionId: string;
+    actorId?: string;
+    description?: string;
+  }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
+    return this.postGlOnlyLegEntry({
+      ...params,
+      leg: 'PRINCIPAL',
+      debitCode: this.memberDepositsCode(params.accountType),
+      description: params.description ?? 'Guarantor default offset — savings forfeited to cover defaulted loan',
+      approvalNotes: 'System-posted via LedgerService.postGuarantorForfeitureEntry()',
+    });
+  }
+
+  // ─── INTEREST / PENALTY ACCRUAL (GL-only, no Account touched) ─────────────────
+
+  /**
+   * Post the GL side of daily interest charged directly against a member's own
+   * FOSA/BOSA balance (FinancialService.accrueInterestForLoan()): debit the
+   * member's deposit-liability code, credit INTEREST_INCOME. Same
+   * no-Account-touch convention as postAccountSourcedRepaymentLegEntry() — the
+   * caller performs the balance debit itself in the same `tx`.
+   */
+  async postInterestAccrualEntry(params: {
+    tx: PrismaTx;
+    tenantId: string;
+    reference: string;
+    amount: Decimal;
+    accountType: AccountType;
+    transactionId: string;
+    actorId?: string;
+    description?: string;
+  }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
+    return this.postGlOnlyLegEntry({
+      ...params,
+      leg: 'INTEREST',
+      debitCode: this.memberDepositsCode(params.accountType),
+      description: params.description ?? 'Interest accrual — charged against FOSA/BOSA balance',
+      approvalNotes: 'System-posted via LedgerService.postInterestAccrualEntry()',
+      journalType: JournalEntryType.INTEREST_ACCRUAL,
+    });
+  }
+
+  /**
+   * Post the GL side of a daily overdue penalty charged directly against a
+   * member's own FOSA/BOSA balance (FinancialService.accrueInterestForLoan()):
+   * debit the member's deposit-liability code, credit PENALTY_INCOME.
+   *
+   * NOT the same entry shape as postPenaltyReceivableEntry() below — this one
+   * is for when cash actually leaves the member's own account right now; that
+   * one is for when a penalty is merely recognized as owed, with no balance
+   * movement yet.
+   */
+  async postPenaltyDeductionEntry(params: {
+    tx: PrismaTx;
+    tenantId: string;
+    reference: string;
+    amount: Decimal;
+    accountType: AccountType;
+    transactionId: string;
+    actorId?: string;
+    description?: string;
+  }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
+    return this.postGlOnlyLegEntry({
+      ...params,
+      leg: 'PENALTY',
+      debitCode: this.memberDepositsCode(params.accountType),
+      description: params.description ?? 'Penalty accrual — charged against FOSA/BOSA balance',
+      approvalNotes: 'System-posted via LedgerService.postPenaltyDeductionEntry()',
+    });
+  }
+
+  /**
+   * Post the GL side of an *unpaid* overdue-installment penalty
+   * (LoanPenaltyProcessor.applyPenalty()): no member balance moves — the
+   * penalty is only added to LoanRepayment.penaltyDue / Loan.arrearsAmount,
+   * to be collected later through the normal repayment waterfall (which posts
+   * its own GL leg at collection time via postLoanRepaymentLegEntry() /
+   * postAccountSourcedRepaymentLegEntry()).
+   *
+   * Accrual-accounting entry: debit LOAN_RECEIVABLE (more is now owed to the
+   * SACCO), credit PENALTY_INCOME (income recognized now, not deferred until
+   * cash is actually collected) — mirrors how LOAN_DISBURSEMENT debits
+   * LOAN_RECEIVABLE without any cash having moved yet.
+   */
+  async postPenaltyReceivableEntry(params: {
+    tx: PrismaTx;
+    tenantId: string;
+    reference: string;
+    amount: Decimal;
+    transactionId: string;
+    actorId?: string;
+    description?: string;
+  }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
+    return this.postGlOnlyLegEntry({
+      ...params,
+      leg: 'PENALTY',
+      debitCode: this.GL_CODES.LOAN_RECEIVABLE,
+      description: params.description ?? 'Penalty accrued on overdue installment (not yet collected)',
+      approvalNotes: 'System-posted via LedgerService.postPenaltyReceivableEntry()',
+    });
+  }
+
+  /**
+   * Shared implementation for all GL-only leg postings above: one JournalEntry/
+   * GLPosting pair, debiting `debitCode` and crediting the leg-appropriate
+   * income/receivable code. No Account or operational Transaction row is
+   * touched — see each public method's docs for why.
    */
   private async postGlOnlyLegEntry(params: {
     tx: PrismaTx;
@@ -555,11 +857,16 @@ export class LedgerService {
     amount: Decimal;
     debitCode: string;
     transactionId: string;
-    actorId: string;
+    /** Optional for system-triggered legs (cron jobs) — falls back to the tenant's SYSTEM user, same as postEntry(). */
+    actorId?: string;
     description: string;
     approvalNotes: string;
+    /** Defaults to LOAN_REPAYMENT — the type every existing caller relies on. */
+    journalType?: JournalEntryType;
   }): Promise<{ journalEntry: JournalEntry; replayed: boolean }> {
-    const { tx, tenantId, reference, leg, debitCode, transactionId, actorId, description, approvalNotes } = params;
+    const { tx, tenantId, reference, leg, debitCode, transactionId, description, approvalNotes } = params;
+    const journalType = params.journalType ?? JournalEntryType.LOAN_REPAYMENT;
+    const actorId = params.actorId ?? (await this.resolveSystemActorId(tenantId));
 
     const amount = params.amount.toDecimalPlaces(4);
     if (amount.lte(0)) throw new BadRequestException('Amount must be positive');
@@ -578,6 +885,12 @@ export class LedgerService {
           ? this.GL_CODES.INTEREST_INCOME
           : this.GL_CODES.LOAN_RECEIVABLE;
 
+    // Hard safety check: never let a GL-code resolution failure be silently
+    // swallowed — findGlAccountPair() already throws BadRequestException when a
+    // code isn't configured for this tenant, and since this method never
+    // catches it, that throw propagates straight out of the caller's
+    // prisma.$transaction() callback, rolling back everything (the Account
+    // debit included) rather than draining a balance with no GL trace.
     const { debitAccount, creditAccount } = await this.findGlAccountPair(
       tx,
       tenantId,
@@ -589,7 +902,7 @@ export class LedgerService {
       data: {
         tenantId,
         entryNumber,
-        type: JournalEntryType.LOAN_REPAYMENT,
+        type: journalType,
         status: JournalEntryStatus.POSTED,
         description,
         referenceType: 'TRANSACTION',

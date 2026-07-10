@@ -36,7 +36,6 @@ import { DeadLetterAlertProcessor } from './dead-letter.processor';
 import { MpesaRepaymentScheduler } from './processors/mpesa-repayment.scheduler';
 import { MpesaRepaymentProcessor } from './processors/mpesa-repayment.processor';
 import { DailyReconProcessor } from './processors/daily-recon.processor';
-import { MpesaReconcileProcessor } from './processors/mpesa-reconcile.processor';
 import { LoanPenaltyProcessor } from './processors/loan-penalty.processor';
 import { GuarantorDefaultOffsetProcessor } from './processors/guarantor-default-offset.processor';
 import { DailyReconScheduler } from './daily-recon.scheduler';
@@ -49,6 +48,7 @@ import { LoansModule } from '../loans/loans.module';
 import { AuditModule } from '../audit/audit.module';
 import { PlunkService } from '../../common/services/plunk.service';
 import { FinancialModule } from '../financial/financial.module';
+import { AccountingModule } from '../accounting/accounting.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { ReportsModule } from '../reports/reports.module';
 import { StorageModule } from '../storage/storage.module';
@@ -106,7 +106,6 @@ export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   DailyReconScheduler,
   DeadLetterAlertProcessor,
   DailyJobsScheduler,
-  MpesaReconcileProcessor,
   LoanPenaltyProcessor,
   GuarantorDefaultOffsetProcessor,
   RepaymentReminderProcessor,
@@ -384,7 +383,6 @@ class QueueStartupDiagnostics implements OnModuleInit {
       { name: QUEUE_NAMES.INTEREST_ACCRUAL },
       { name: QUEUE_NAMES.REPAYMENT_SCHEDULE },
       { name: QUEUE_NAMES.MPESA_RECONCILIATION },
-      { name: QUEUE_NAMES.MPESA_RECONCILE_QUEUE },
       { name: QUEUE_NAMES.LEDGER_INTEGRITY },
       { name: QUEUE_NAMES.OUTBOUND_WEBHOOK },
       { name: QUEUE_NAMES.MPESA_STK_REPAYMENT },
@@ -401,6 +399,7 @@ class QueueStartupDiagnostics implements OnModuleInit {
     LoansModule,
     AuditModule,
     FinancialModule,
+    AccountingModule,
     WebhooksModule,
     ReportsModule,
     StorageModule,

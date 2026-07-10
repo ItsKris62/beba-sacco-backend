@@ -335,14 +335,22 @@ export class LoansController {
   @Patch(':id/repay')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Post a loan repayment from member FOSA account' })
+  @ApiOperation({
+    summary: 'Post a loan repayment from member FOSA account',
+    description:
+      'Idempotent: pass idempotencyKey (or an X-Idempotency-Key header) to guarantee ' +
+      'replay-safety on retry, or rely on the same-minute deterministic fallback key.',
+  })
+  @ApiHeader({ name: 'X-Idempotency-Key', required: false, description: 'Optional idempotency key' })
   repay(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { amount: number },
+    @Body() body: { amount: number; idempotencyKey?: string },
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
     @Req() req: Request,
   ) {
-    return this.loans.repay(id, body.amount, tenant.id, actor.id, req.ip);
+    const idempotencyKey =
+      body.idempotencyKey ?? (req.headers['x-idempotency-key'] as string | undefined);
+    return this.loans.repay(id, body.amount, tenant.id, actor.id, req.ip, idempotencyKey);
   }
 }

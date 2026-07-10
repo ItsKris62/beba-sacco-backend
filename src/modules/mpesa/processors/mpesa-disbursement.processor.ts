@@ -38,7 +38,7 @@ export class MpesaDisbursementProcessor extends WorkerHost {
   }
 
   async process(job: Job<MpesaDisbursementJobPayload>): Promise<void> {
-    const { referenceId, referenceType, tenantId, phone, amount, triggeredBy } = job.data;
+    const { referenceId, referenceType, tenantId, phone, amount, triggeredBy, sourceTransactionId } = job.data;
     this.logger.log(`B2C disbursement job | job=${job.id} refType=${referenceType} refId=${referenceId} tenant=${tenantId}`);
 
     const result = await this.mpesaService.executeB2cDisbursement(
@@ -48,6 +48,7 @@ export class MpesaDisbursementProcessor extends WorkerHost {
       phone,
       amount,
       triggeredBy,
+      sourceTransactionId,
     );
 
     this.logger.log(
