@@ -375,13 +375,13 @@ export class LoanRecoveryService {
 
     for (const item of capacities) {
       if (remainingDebt.isZero() || remainingCapacity.isZero() || item.capacity.lessThanOrEqualTo(0)) {
-        allocations.push({ guarantor: item.guarantor, deduction: new Decimal(0) });
+        allocations.push({ guarantor: item.guarantor, deduction: new Decimal(0), account: item.account });
         continue;
       }
 
       const proportionalShare = remainingDebt.times(item.capacity).div(remainingCapacity).toDecimalPlaces(4);
       const deduction = Decimal.min(item.capacity, proportionalShare, remainingDebt).toDecimalPlaces(4);
-      allocations.push({ guarantor: item.guarantor, deduction });
+      allocations.push({ guarantor: item.guarantor, deduction, account: item.account });
       remainingDebt = remainingDebt.minus(deduction).toDecimalPlaces(4);
       remainingCapacity = remainingCapacity.minus(item.capacity).toDecimalPlaces(4);
     }

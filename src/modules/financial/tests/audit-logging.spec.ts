@@ -33,9 +33,11 @@ describe('Tier 4 audit logging', () => {
           findFirst: jest.fn().mockResolvedValue(null),
         },
         account: {
-          update: jest.fn().mockResolvedValue({}),
-          findUnique: jest.fn().mockResolvedValue({ balance: '10000.0000' }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         },
+        // debitAccountWithCas() locks the account via `SELECT ... FOR UPDATE`
+        // before writing a version-guarded updateMany() — see financial.service.ts.
+        $queryRaw: jest.fn().mockResolvedValue([{ balance: '10000.0000', version: 0 }]),
         loan: { update: jest.fn().mockResolvedValue({}) },
       };
     });

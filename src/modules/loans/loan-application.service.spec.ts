@@ -13,6 +13,7 @@ import { GuarantorValidationService } from './guarantor-validation.service';
 import { ProductRuleService } from './product-rule.service';
 import { SmsService } from '../sms/sms.service';
 import { LoansService } from './loans.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 /**
  * LoanApplicationService Unit Tests
@@ -76,6 +77,7 @@ describe('LoanApplicationService', () => {
     approve: jest.fn(),
     reject: jest.fn(),
   };
+  const mockEventEmitter = { emit: jest.fn() };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -94,6 +96,7 @@ describe('LoanApplicationService', () => {
         { provide: getQueueToken(QUEUE_NAMES.AUDIT_LOG), useValue: mockQueue },
         { provide: SmsService, useValue: mockSms },
         { provide: LoansService, useValue: mockLoansService },
+        { provide: EventEmitter2, useValue: mockEventEmitter },
       ],
     }).compile();
 

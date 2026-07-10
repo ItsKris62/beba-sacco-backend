@@ -14,6 +14,7 @@ import { ProductRuleService } from '../product-rule.service';
 import { LedgerService } from '../../accounting/ledger.service';
 import { ApprovalChainService } from '../../fraud/approval-chain.service';
 import { BehavioralRiskScorerService } from '../../fraud/risk-scorer/behavioral-risk-scorer.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 // ─── Transaction mock ─────────────────────────────────────────────────────────
 
@@ -62,6 +63,7 @@ const mockDisbursementGate = { assertPassed: jest.fn().mockResolvedValue(undefin
 const mockProductRules = {};
 const mockApprovalChain = {};
 const mockRiskScorer = {};
+const mockEventEmitter = { emit: jest.fn() };
 
 // ─── Common fixtures ──────────────────────────────────────────────────────────
 
@@ -124,6 +126,7 @@ describe('LoansService.repay() — SASRA waterfall', () => {
         { provide: LedgerService, useValue: mockLedger },
         { provide: ApprovalChainService, useValue: mockApprovalChain },
         { provide: BehavioralRiskScorerService, useValue: mockRiskScorer },
+        { provide: EventEmitter2, useValue: mockEventEmitter },
       ],
     }).compile();
 

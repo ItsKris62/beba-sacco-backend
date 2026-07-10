@@ -13,6 +13,8 @@ import type { GuarantorValidationService } from '../guarantor-validation.service
 import type { ProductRuleService } from '../product-rule.service';
 import type { SmsService } from '../../sms/sms.service';
 import type { AuditLogJobPayload, EmailJobPayload, GuarantorExpiryJobPayload, GuarantorReminderJobPayload, GuarantorValidationJobPayload } from '../../queue/queue.constants';
+import type { EventEmitter2 } from '@nestjs/event-emitter';
+import type { LoansService } from '../loans.service';
 
 type QueueMock<TPayload extends object> = {
   add: jest.Mock<Promise<void>, [string, TPayload, object?]>;
@@ -134,6 +136,8 @@ function buildLoanApplicationService(args: {
       queue<EmailJobPayload>() as never,
       queue<AuditLogJobPayload>() as never,
       args.smsService as unknown as SmsService,
+      { emit: jest.fn() } as unknown as EventEmitter2,
+      { approve: jest.fn(), reject: jest.fn() } as unknown as LoansService,
     ),
   };
 }

@@ -15,6 +15,7 @@ import { ProductRuleService } from '../product-rule.service';
 import { LedgerService } from '../../accounting/ledger.service';
 import { ApprovalChainService } from '../../fraud/approval-chain.service';
 import { BehavioralRiskScorerService } from '../../fraud/risk-scorer/behavioral-risk-scorer.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 // ─── Transaction mock ──────────────────────────────────────────────────────────
 //
@@ -69,6 +70,7 @@ const mockProductRules = {};
 const mockLedger = { postEntry: jest.fn() };
 const mockApprovalChain = { isChainApproved: jest.fn().mockResolvedValue(true) };
 const mockRiskScorer = {};
+const mockEventEmitter = { emit: jest.fn() };
 
 // ─── Common fixtures ──────────────────────────────────────────────────────────
 
@@ -167,6 +169,7 @@ describe('LoansService.disburse() — schedule generation', () => {
         { provide: LedgerService, useValue: mockLedger },
         { provide: ApprovalChainService, useValue: mockApprovalChain },
         { provide: BehavioralRiskScorerService, useValue: mockRiskScorer },
+        { provide: EventEmitter2, useValue: mockEventEmitter },
       ],
     }).compile();
 

@@ -10,6 +10,7 @@ import { ProductRuleService } from './product-rule.service';
 import { LedgerService } from '../accounting/ledger.service';
 import { ApprovalChainService } from '../fraud/approval-chain.service';
 import { BehavioralRiskScorerService } from '../fraud/risk-scorer/behavioral-risk-scorer.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ const mockProductRules = {
 const mockLedger = {} as unknown as LedgerService;
 const mockApprovalChain = {} as unknown as ApprovalChainService;
 const mockRiskScorer = {} as unknown as BehavioralRiskScorerService;
+const mockEventEmitter = { emit: jest.fn() } as unknown as EventEmitter2;
 
 function makeService(): LoansService {
   return new LoansService(
@@ -57,6 +59,7 @@ function makeService(): LoansService {
     mockLedger,
     mockApprovalChain,
     mockRiskScorer,
+    mockEventEmitter,
   );
 }
 
