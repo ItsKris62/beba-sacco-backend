@@ -38,7 +38,10 @@ export class AdminController {
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
   @ApiOperation({
     summary: 'Admin dashboard stats',
-    description: 'Returns total members, active loans, pending KYC count, pending approvals, M-Pesa volume, and default rate.',
+    description:
+      'Returns total members, active loans, pending KYC count, pending approvals, M-Pesa volume, ' +
+      'default rate, Portfolio at Risk > 30 days (loans.portfolioAtRisk30d, derived from LoanStaging), ' +
+      'and loan disbursement totals for this month and overall (loans.disbursements).',
   })
   @ApiResponse({ status: 200, description: 'Aggregated metrics' })
   getDashboardStats(@CurrentTenant() tenant: Tenant) {

@@ -501,6 +501,7 @@ model Transaction {
   @@index([tenantId, accountId, type, createdAt])
   @@index([tenantId, loanId])
   @@index([tenantId, status, createdAt])
+  @@index([tenantId, type, createdAt])
   @@index([reference])
   @@index([createdAt])
   @@index([linkedTransactionId])

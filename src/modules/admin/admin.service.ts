@@ -9,6 +9,7 @@ import {
   DocumentStatus,
   DocumentType,
   KycStatus,
+  LoanStaging,
   LoanStatus,
   StagePosition,
   TransactionStatus,
@@ -231,6 +232,7 @@ export class AdminService {
     const now = new Date();
     const minus7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const minus30d = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
     const [
       totalMembers,
@@ -243,6 +245,9 @@ export class AdminService {
       defaultedLoans,
       mpesa7d,
       mpesa30d,
+      parLoans,
+      disbursedThisMonth,
+      disbursedOverall,
     ] = await this.prisma.$transaction([
       this.prisma.member.count({ where: { tenantId } }),
       this.prisma.user.count({ where: { tenantId, accountStatus: AccountStatus.ACTIVE } }),
@@ -276,12 +281,38 @@ export class AdminService {
         _sum: { amount: true },
         _count: true,
       }),
+      // Portfolio at Risk > 30 days: active loans whose arrears staging has
+      // crossed the 30-day threshold (WATCHLIST = 30-89d, NPL = 90d+ — see
+      // FinancialService.classifyStaging()). Staging is kept in sync by the
+      // daily accrual job, so this reads it rather than recomputing arrears here.
+      this.prisma.loan.findMany({
+        where: { tenantId, status: LoanStatus.ACTIVE, staging: { in: [LoanStaging.WATCHLIST, LoanStaging.NPL] } },
+        select: { outstandingBalance: true },
+      }),
+      this.prisma.loan.aggregate({
+        where: { tenantId, disbursedAt: { gte: monthStart } },
+        _sum: { principalAmount: true },
+        _count: true,
+      }),
+      this.prisma.loan.aggregate({
+        where: { tenantId, disbursedAt: { not: null } },
+        _sum: { principalAmount: true },
+        _count: true,
+      }),
     ]);
 
     const totalActiveLoanAmount = activeLoans.reduce(
       (sum, l) => sum.plus(l.outstandingBalance.toString()),
       new Decimal(0),
     );
+
+    const parOver30Amount = parLoans.reduce(
+      (sum, l) => sum.plus(l.outstandingBalance.toString()),
+      new Decimal(0),
+    );
+    const parOver30Percent = totalActiveLoanAmount.greaterThan(0)
+      ? parOver30Amount.dividedBy(totalActiveLoanAmount).times(100).toDecimalPlaces(2).toNumber()
+      : 0;
 
     const defaultRate = totalLoans > 0 ? ((defaultedLoans / totalLoans) * 100).toFixed(2) : '0.00';
 
@@ -299,6 +330,24 @@ export class AdminService {
         pendingApprovals: pendingLoans,
         defaulted: defaultedLoans,
         defaultRatePercent: parseFloat(defaultRate),
+        portfolioAtRisk30d: {
+          outstandingAmount: parOver30Amount.toNumber(),
+          percentOfActivePortfolio: parOver30Percent,
+        },
+        disbursements: {
+          thisMonth: {
+            count: disbursedThisMonth._count,
+            totalAmount: disbursedThisMonth._sum.principalAmount
+              ? new Decimal(disbursedThisMonth._sum.principalAmount.toString()).toNumber()
+              : 0,
+          },
+          overall: {
+            count: disbursedOverall._count,
+            totalAmount: disbursedOverall._sum.principalAmount
+              ? new Decimal(disbursedOverall._sum.principalAmount.toString()).toNumber()
+              : 0,
+          },
+        },
       },
       mpesa: {
         deposits7d: {

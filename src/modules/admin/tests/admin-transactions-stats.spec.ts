@@ -31,6 +31,10 @@ describe('Admin transaction stats', () => {
     invalidateTenantDashboard: jest.fn(),
   };
 
+  const eventEmitter = {
+    emit: jest.fn(),
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -49,6 +53,7 @@ describe('Admin transaction stats', () => {
       redis as unknown as RedisService,
       cache as never,
       emailQueue as never,
+      eventEmitter as never,
     );
 
     const stats = await service.getTransactionStats('tenant-1', {
@@ -84,6 +89,7 @@ describe('Admin transaction stats', () => {
       redis as unknown as RedisService,
       cache as never,
       emailQueue as never,
+      eventEmitter as never,
     );
     const controller = new AdminController(service);
     const spy = jest.spyOn(service, 'getTransactionStats').mockResolvedValueOnce({
