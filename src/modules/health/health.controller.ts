@@ -1,6 +1,7 @@
 import { Controller, Get, HttpException, HttpStatus } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import type { Redis } from 'ioredis';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { HealthCheck } from '@nestjs/terminus';
 import { SkipThrottle } from '@nestjs/throttler';
@@ -223,7 +224,13 @@ export class HealthController {
 
   private async getStalledCount(queue: Queue): Promise<number> {
     try {
-      const client = await queue.client;
+      // bullmq's own IRedisClient type (queue.client) dropped `scard` from its
+      // declarations in 5.80.1, but the underlying connection is a real
+      // ioredis client and the 'stalled' key is a genuine Redis SET (see
+      // moveStalledJobsToWait's Lua script: SMEMBERS/SADD) — NOT a sorted
+      // set, despite what TS's "did you mean zcard?" suggests. Calling
+      // zcard here would throw WRONGTYPE against real data.
+      const client = (await queue.client) as unknown as Redis;
       const key = queue.toKey('stalled');
       return await client.scard(key);
     } catch (error) {

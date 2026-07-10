@@ -96,6 +96,9 @@
         "socket.io": "^4.8.3",
         "uuid": "^9.0.1"
     },
+    "overrides": {
+        "axios": "^1.18.1"
+    },
     "devDependencies": {
         "@nestjs/cli": "^10.3.0",
         "@nestjs/schematics": "^10.1.0",
