@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import Redis, { RedisOptions } from 'ioredis';
 import { QUEUE_NAMES } from './queue.constants';
 import { isWorkerRuntime } from './worker-runtime';
 
@@ -171,6 +172,34 @@ function normalizeHost(host?: string): string | undefined {
   return host?.replace(/^https?:\/\//, '');
 }
 
+function shouldReconnectBullRedis(err: Error): boolean {
+  return ['READONLY', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED'].some((code) =>
+    err.message.includes(code),
+  );
+}
+
+function createBullRedisConnection(options: RedisOptions): Redis {
+  const connection = new Redis({
+    maxRetriesPerRequest: null,
+    enableAutoPipelining: true,
+    connectTimeout: 5000,
+    keepAlive: 10000,
+    retryStrategy: (times: number) => Math.min(times * 500, 10_000),
+    reconnectOnError: shouldReconnectBullRedis,
+    ...options,
+  });
+
+  connection.on('error', (err: Error) => {
+    if (shouldReconnectBullRedis(err)) {
+      console.warn(`[BullMQ Redis] transient connection error: ${err.message}`);
+      return;
+    }
+    console.error(`[BullMQ Redis] connection error: ${err.message}`);
+  });
+
+  return connection;
+}
+
 @Injectable()
 class QueueStartupDiagnostics implements OnModuleInit {
   private readonly logger = new Logger(QueueStartupDiagnostics.name);
@@ -269,77 +298,64 @@ class QueueStartupDiagnostics implements OnModuleInit {
         if (bullRedisUrl) {
           const parsed = new URL(bullRedisUrl);
           const tls = parsed.protocol === 'rediss:' ? { rejectUnauthorized: false } : undefined;
+          const connection = createBullRedisConnection({
+            host: parsed.hostname,
+            port: parseInt(parsed.port || '6379', 10),
+            password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+            tls,
+          });
 
           return {
-            connection: {
-              host: parsed.hostname,
-              port: parseInt(parsed.port || '6379', 10),
-              password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
-              tls,
-              maxRetriesPerRequest: null,
-              enableAutoPipelining: true,
-              connectTimeout: 5000,
-              keepAlive: 10000,
-              retryStrategy: (times: number) => Math.min(times * 500, 10_000),
-              reconnectOnError: (err: Error) => err.message.includes('READONLY'),
-            },
+            connection,
             defaultJobOptions: DEFAULT_JOB_OPTIONS,
+            sharedConnection: true,
             streams: STREAM_OPTIONS,
           };
         }
-
         if (rawBullHost) {
           const host = rawBullHost.replace(/^https?:\/\//, '');
+          const connection = createBullRedisConnection({
+            host,
+            port: configService.get<number>('app.bullRedis.port', 6379),
+            password: bullPassword || undefined,
+            tls: bullTls ? { rejectUnauthorized: false } : undefined,
+          });
 
           return {
-            connection: {
-              host,
-              port: configService.get<number>('app.bullRedis.port', 6379),
-              password: bullPassword || undefined,
-              tls: bullTls ? { rejectUnauthorized: false } : undefined,
-              maxRetriesPerRequest: null,
-              enableAutoPipelining: true,
-              connectTimeout: 5000,
-              keepAlive: 10000,
-              retryStrategy: (times: number) => Math.min(times * 500, 10_000),
-              reconnectOnError: (err: Error) => err.message.includes('READONLY'),
-            },
+            connection,
             defaultJobOptions: DEFAULT_JOB_OPTIONS,
+            sharedConnection: true,
             streams: STREAM_OPTIONS,
           };
         }
-
         const password = configService.get<string>('app.redis.password');
         const tls = configService.get<boolean>('app.redis.tls');
         const rawHost = configService.get<string>('app.redis.host', 'localhost');
         const host = rawHost.replace(/^https?:\/\//, '');
         let bullGaveUp = false;
+        const connection = createBullRedisConnection({
+          host,
+          port: configService.get<number>('app.redis.port'),
+          password: password || undefined,
+          tls: tls ? { rejectUnauthorized: false } : undefined,
+          retryStrategy: (times: number) => {
+            if (times > 1) {
+              if (!bullGaveUp) {
+                bullGaveUp = true;
+                console.warn(
+                  '[BullMQ] Dedicated Bull Redis is not configured; using app Redis fallback in degraded mode',
+                );
+              }
+              return null;
+            }
+            return Math.min(times * 1000, 5000);
+          },
+        });
 
         return {
-          connection: {
-            host,
-            port: configService.get<number>('app.redis.port'),
-            password: password || undefined,
-            tls: tls ? { rejectUnauthorized: false } : undefined,
-            maxRetriesPerRequest: null,
-            enableAutoPipelining: true,
-            connectTimeout: 5000,
-            keepAlive: 10000,
-            retryStrategy: (times: number) => {
-              if (times > 1) {
-                if (!bullGaveUp) {
-                  bullGaveUp = true;
-                  console.warn(
-                    '[BullMQ] Dedicated Bull Redis is not configured; using app Redis fallback in degraded mode',
-                  );
-                }
-                return null;
-              }
-              return Math.min(times * 1000, 5000);
-            },
-            reconnectOnError: (err: Error) => err.message.includes('READONLY'),
-          },
+          connection,
           defaultJobOptions: DEFAULT_JOB_OPTIONS,
+          sharedConnection: true,
           streams: STREAM_OPTIONS,
         };
       },
