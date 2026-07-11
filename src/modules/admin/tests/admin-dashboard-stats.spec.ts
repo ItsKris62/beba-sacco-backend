@@ -28,7 +28,7 @@ function buildPrisma() {
       aggregate: jest.fn().mockResolvedValue({ _sum: { outstandingBalance: null, principalAmount: null }, _count: 0 }),
     },
     account: {
-      aggregate: jest.fn().mockResolvedValue({ _sum: { balance: null } }),
+      aggregate: jest.fn().mockResolvedValue({ _sum: { balance: null }, _avg: { balance: null }, _count: 0 }),
     },
     mpesaTransaction: {
       aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null }, _count: 0 }),
@@ -135,12 +135,17 @@ describe('AdminService.getDashboardStats()', () => {
   it('reports total FOSA liquidity and BOSA savings from account aggregates', async () => {
     const prisma = buildPrisma();
     prisma.account.aggregate
-      .mockResolvedValueOnce({ _sum: { balance: new Decimal('5000000.0000') } }) // FOSA
-      .mockResolvedValueOnce({ _sum: { balance: new Decimal('2000000.0000') } }); // BOSA
+      .mockResolvedValueOnce({ _sum: { balance: new Decimal('5000000.0000') }, _avg: { balance: new Decimal('2500000.0000') }, _count: 2 }) // FOSA
+      .mockResolvedValueOnce({ _sum: { balance: new Decimal('2000000.0000') }, _avg: { balance: new Decimal('1000000.0000') }, _count: 2 }); // BOSA
 
     const stats = await buildService(prisma).getDashboardStats('tenant-1');
 
-    expect(stats.liquidity).toEqual({ totalFosaLiquidity: 5000000, totalBosaSavings: 2000000 });
+    expect(stats.liquidity).toEqual({
+      totalFosaLiquidity: 5000000,
+      totalBosaSavings: 2000000,
+      fosa: { totalBalance: 5000000, accountCount: 2, avgBalance: 2500000 },
+      bosa: { totalBalance: 2000000, accountCount: 2, avgBalance: 1000000 },
+    });
     expect(prisma.account.aggregate).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ where: expect.objectContaining({ accountType: 'FOSA', isActive: true }) }),
@@ -154,7 +159,12 @@ describe('AdminService.getDashboardStats()', () => {
   it('reports zero liquidity when there are no accounts yet', async () => {
     const prisma = buildPrisma();
     const stats = await buildService(prisma).getDashboardStats('tenant-1');
-    expect(stats.liquidity).toEqual({ totalFosaLiquidity: 0, totalBosaSavings: 0 });
+    expect(stats.liquidity).toEqual({
+      totalFosaLiquidity: 0,
+      totalBosaSavings: 0,
+      fosa: { totalBalance: 0, accountCount: 0, avgBalance: 0 },
+      bosa: { totalBalance: 0, accountCount: 0, avgBalance: 0 },
+    });
   });
 
   it('counts M-Pesa withdrawals stuck RECON_PENDING as a pending action', async () => {

@@ -310,11 +310,15 @@ export class AdminService {
       this.prisma.account.aggregate({
         where: { tenantId, accountType: AccountType.FOSA, isActive: true },
         _sum: { balance: true },
+        _avg: { balance: true },
+        _count: true,
       }),
       // Total BOSA savings — sum of every active BOSA account balance.
       this.prisma.account.aggregate({
         where: { tenantId, accountType: AccountType.BOSA, isActive: true },
         _sum: { balance: true },
+        _avg: { balance: true },
+        _count: true,
       }),
       // Withdrawals stuck past the auto-refund grace window — see
       // WithdrawalReconciliationProcessor / AdminReconciliationService.
@@ -339,6 +343,12 @@ export class AdminService {
       : 0;
     const totalBosaSavings = bosaSavingsAgg._sum.balance
       ? new Decimal(bosaSavingsAgg._sum.balance.toString()).toNumber()
+      : 0;
+    const fosaAvgBalance = fosaLiquidityAgg._avg.balance
+      ? new Decimal(fosaLiquidityAgg._avg.balance.toString()).toNumber()
+      : 0;
+    const bosaAvgBalance = bosaSavingsAgg._avg.balance
+      ? new Decimal(bosaSavingsAgg._avg.balance.toString()).toNumber()
       : 0;
 
     const defaultRate = totalLoans > 0 ? ((defaultedLoans / totalLoans) * 100).toFixed(2) : '0.00';
@@ -379,6 +389,16 @@ export class AdminService {
       liquidity: {
         totalFosaLiquidity,
         totalBosaSavings,
+        fosa: {
+          totalBalance: totalFosaLiquidity,
+          accountCount: fosaLiquidityAgg._count,
+          avgBalance: fosaAvgBalance,
+        },
+        bosa: {
+          totalBalance: totalBosaSavings,
+          accountCount: bosaSavingsAgg._count,
+          avgBalance: bosaAvgBalance,
+        },
       },
       pendingActions: {
         loansPendingApproval: pendingLoans,
