@@ -610,11 +610,14 @@ export class MemberPortalController {
   })
   @ApiHeader({
     name: 'X-Idempotency-Key',
-    required: false,
-    description: 'Optional. Prevents duplicate withdrawal debits on client retry.',
+    required: true,
+    description: 'Required to prevent duplicate withdrawal debits on client retry.',
   })
   @ApiResponse({ status: 200, description: 'Withdrawal initiated successfully' })
-  @ApiResponse({ status: 400, description: 'Insufficient FOSA available balance' })
+  @ApiResponse({
+    status: 400,
+    description: 'Insufficient FOSA available balance, or missing idempotency key',
+  })
   async withdrawMpesa(
     @Body() dto: WithdrawMpesaDto,
     @CurrentUser() user: AuthenticatedUser,

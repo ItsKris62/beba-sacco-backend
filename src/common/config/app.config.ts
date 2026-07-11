@@ -93,6 +93,11 @@ export default registerAs('app', () => ({
       .map((ip) => ip.trim())
       .filter(Boolean),
     stkRateLimitPerDay: parseInt(process.env.MPESA_STK_RATE_LIMIT_PER_DAY || '3', 10),
+    // Minutes a FOSA withdrawal must sit in RECON_PENDING (already 30 min past B2C
+    // initiation — see MpesaB2cTimeoutProcessor) before WithdrawalReconciliationProcessor
+    // auto-refunds it. Kept generous by default so a genuinely-late Daraja callback has
+    // time to land before we act — see withdrawal-recon.processor.ts.
+    withdrawalReconGraceMinutes: parseInt(process.env.MPESA_WITHDRAWAL_RECON_GRACE_MINUTES || '30', 10),
   },
 
   audit: {

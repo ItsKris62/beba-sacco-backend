@@ -1,9 +1,12 @@
 import {
   Controller,
+  ForbiddenException,
   Get,
   Patch,
+  Post,
   Body,
   Param,
+  Query,
   Req,
   HttpCode,
   HttpStatus,
@@ -18,6 +21,7 @@ import {
   ApiResponse,
   ApiHeader,
   ApiParam,
+  ApiQuery,
   ApiBody,
   ApiProperty,
   ApiPropertyOptional,
@@ -32,6 +36,7 @@ import { LoanReviewService } from './loan-review.service';
 import { LoanRecoveryService } from './loan-recovery.service';
 import { UpdateLoanStatusDto, AdminLoanStatus } from './dto/update-loan-status.dto';
 import { ReviewLoanAction, ReviewLoanDto } from './dto/review-loan.dto';
+import { LoanDecisionDto, LoanDecision } from './dto/loan-decision.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { LoanStateGuard } from './decorators/loan-state-guard.decorator';
 import { LoanStateTransitionGuard } from './guards/loan-state-transition.guard';
@@ -119,6 +124,82 @@ export class LoanAdminController {
     return this.loanApp.getGuarantorExposure(memberId, tenant.id);
   }
 
+  // ─── PENDING APPROVAL QUEUE ─────────────────────────────────────────────────
+
+  @Get('loans/pending')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'List loans awaiting approval (PENDING_APPROVAL)',
+    description:
+      'Loans that have cleared guarantor consent and are awaiting a loan-officer/manager ' +
+      'decision. Each entry includes member contact details, loan product terms, and the ' +
+      'full list of ACCEPTED guarantors (name, guaranteed amount, response time) so a ' +
+      'decision can be made without a second round-trip.',
+  })
+  @ApiQuery({ name: 'cursor', required: false, type: String })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  async pendingApprovals(
+    @CurrentTenant() tenant: Tenant,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: number,
+  ) {
+    return this.loans.getPendingApprovalQueue(tenant.id, { cursor, limit });
+  }
+
+  // ─── APPROVE / REJECT DECISION ───────────────────────────────────────────────
+
+  @Patch('loans/:id/decision')
+  @Roles(UserRole.LOAN_OFFICER, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Approve or reject a loan in PENDING_APPROVAL',
+    description:
+      'Thin alias over the same hardened approve/decline path as PATCH /admin/loans/:id/review ' +
+      '(dual-approval initialization, guarantor-hold release on rejection). Does NOT trigger ' +
+      'disbursement — approving here only moves the loan to APPROVED. Disbursement to the ' +
+      "member's FOSA account remains a separate explicit action: PATCH /admin/loans/:id/review " +
+      'with action=DISBURSE, or PATCH /admin/loans/:id/status with status=DISBURSED. Direct ' +
+      "M-Pesa/B2C disbursement is not supported — see LoansService.disburse()'s disburseToMpesa guard.",
+  })
+  @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiBody({
+    type: LoanDecisionDto,
+    examples: {
+      approve: { summary: 'Approve', value: { decision: 'APPROVED' } },
+      reject: {
+        summary: 'Reject',
+        value: { decision: 'REJECTED', comments: 'Debt-to-income ratio exceeds product policy.' },
+      },
+    },
+  })
+  @ApiResponse({ status: 200, description: 'Decision recorded' })
+  @ApiResponse({ status: 400, description: 'Invalid decision, or missing rejection comments' })
+  @ApiResponse({ status: 403, description: 'Insufficient role privileges' })
+  @ApiResponse({ status: 404, description: 'Loan not found' })
+  @UseGuards(LoanStateTransitionGuard)
+  @LoanStateGuard({
+    loanIdParam: 'id',
+    targetStatusBodyField: 'decision',
+    targetStatusMap: {
+      [LoanDecision.APPROVED]: LoanStatus.APPROVED,
+      [LoanDecision.REJECTED]: LoanStatus.REJECTED,
+    },
+  })
+  async decideLoan(
+    @Param('id', ParseUUIDPipe) loanId: string,
+    @Body() dto: LoanDecisionDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    const reviewDto: ReviewLoanDto = {
+      action: dto.decision === LoanDecision.APPROVED ? ReviewLoanAction.APPROVE : ReviewLoanAction.DECLINE,
+      reason: dto.comments,
+    };
+    const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
+    return this.loanReview.process(loanId, reviewDto, tenant.id, actor.id, req.ip, idempotencyKey);
+  }
+
   // ─── LOAN STATUS TRANSITION ──────────────────────────────────────────────────
 
   @Patch('loans/:id/status')
@@ -188,6 +269,7 @@ export class LoanAdminController {
     // performs a Serializable transaction crediting the member's FOSA account.
     // All other transitions are workflow-only and go through LoanApplicationService.
     if (dto.status === AdminLoanStatus.DISBURSED) {
+      this.assertManagerForDisbursement(actor);
       return this.loans.disburse(loanId, tenant.id, actor.id, req.ip);
     }
     return this.loanApp.updateStatus(loanId, dto, tenant.id, actor, req);
@@ -245,8 +327,58 @@ export class LoanAdminController {
     @CurrentUser() actor: AuthenticatedUser,
     @Req() req: Request,
   ) {
+    if (dto.action === ReviewLoanAction.DISBURSE) {
+      this.assertManagerForDisbursement(actor);
+    }
     const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
     return this.loanReview.process(loanId, dto, tenant.id, actor.id, req.ip, idempotencyKey);
+  }
+
+  // ─── EXPLICIT DISBURSE ENDPOINT (Maker-Checker) ──────────────────────────────
+
+  @Post('loans/:id/disburse')
+  @Roles(UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Disburse an APPROVED loan to the member\'s FOSA account',
+    description:
+      'Maker-checker: LOAN_OFFICER approves via PATCH /admin/loans/:id/decision, only MANAGER may ' +
+      'disburse. Delegates entirely to LoansService.disburse() — verifies loan status is APPROVED and ' +
+      "member KYC is APPROVED, then atomically (Serializable transaction) credits the member's FOSA " +
+      'account via LedgerService, charges the processing fee, moves the loan to ACTIVE, and generates ' +
+      'the LoanRepayment schedule. Idempotent: replaying against an already-ACTIVE loan returns the ' +
+      'original disbursement result instead of re-running or erroring.',
+  })
+  @ApiParam({ name: 'id', description: 'Loan UUID' })
+  @ApiResponse({ status: 200, description: 'Loan disbursed (or idempotent replay of a prior disbursement)' })
+  @ApiResponse({ status: 400, description: 'Loan is not APPROVED, or KYC is not APPROVED' })
+  @ApiResponse({ status: 403, description: 'Only MANAGER may disburse (maker-checker)' })
+  @ApiResponse({ status: 404, description: 'Loan not found' })
+  @ApiResponse({ status: 409, description: 'Loan already disbursed — ledger inconsistency if no matching transaction' })
+  async disburseLoan(
+    @Param('id', ParseUUIDPipe) loanId: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.loans.disburse(loanId, tenant.id, actor.id, req.ip);
+  }
+
+  /**
+   * Maker-checker guard for the DISBURSE action reachable through the two legacy
+   * multi-action endpoints (status=DISBURSED, action=DISBURSE). Both endpoints'
+   * class/method-level @Roles() still allow LOAN_OFFICER for their other actions
+   * (workflow transitions, APPROVE/DECLINE) — this runtime check narrows only the
+   * money-moving branch to MANAGER, matching POST /admin/loans/:id/disburse.
+   * SUPER_ADMIN bypasses RBACGuard entirely upstream, so it never reaches here
+   * with a non-MANAGER role that should have been rejected.
+   */
+  private assertManagerForDisbursement(actor: AuthenticatedUser): void {
+    if (actor.role !== UserRole.MANAGER && actor.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException(
+        'Only MANAGER may disburse a loan (maker-checker: the approving LOAN_OFFICER cannot also disburse)',
+      );
+    }
   }
 
   @Patch('loans/:id/recover')

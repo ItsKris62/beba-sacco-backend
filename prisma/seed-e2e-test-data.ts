@@ -115,7 +115,7 @@ async function main() {
   // boots the full app context (no HTTP listener starts either way with
   // createApplicationContext) rather than hand-reimplementing GL-seeding/
   // system-user logic here, so it can't drift from the real behavior.
-  const appCtx = await NestFactory.createApplicationContext(AppModule, { logger: false });
+  const appCtx = await NestFactory.createApplicationContext(AppModule);
   try {
     const accountingService = appCtx.get(AccountingService);
     await accountingService.provisionTenantAccounting(tenant.id);

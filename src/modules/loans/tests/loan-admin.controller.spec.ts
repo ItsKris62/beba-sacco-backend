@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Request } from 'express';
 import { LoanAdminController } from '../loan-admin.controller';
 import { LoanApplicationService } from '../loan-application.service';
@@ -7,12 +7,15 @@ import { LoansService } from '../loans.service';
 import { LoanReviewService } from '../loan-review.service';
 import { LoanRecoveryService } from '../loan-recovery.service';
 import { AdminLoanStatus, UpdateLoanStatusDto } from '../dto/update-loan-status.dto';
+import { LoanDecision, LoanDecisionDto } from '../dto/loan-decision.dto';
+import { ReviewLoanAction } from '../dto/review-loan.dto';
 import { PrismaService } from '../../../prisma/prisma.service';
 
 // ─── Stubs ───────────────────────────────────────────────────────────────────
 
 const mockLoansService = {
   disburse: jest.fn(),
+  getPendingApprovalQueue: jest.fn(),
 };
 
 const mockLoanAppService = {
@@ -194,5 +197,153 @@ describe('LoanAdminController — PATCH /admin/loans/:id/status', () => {
     await expect(
       controller.getGuarantorExposure('ghost-uuid', buildTenant() as any),
     ).rejects.toThrow(NotFoundException);
+  });
+
+  // ── GET /admin/loans/pending ──────────────────────────────────────────────
+
+  it('pendingApprovals delegates to loans.getPendingApprovalQueue() with tenant + pagination', async () => {
+    const tenant = buildTenant();
+    const queueResult = { data: [], nextCursor: null, hasMore: false, meta: {} };
+    mockLoansService.getPendingApprovalQueue.mockResolvedValueOnce(queueResult);
+
+    const result = await controller.pendingApprovals(tenant as any, 'cursor-1', 10);
+
+    expect(result).toBe(queueResult);
+    expect(mockLoansService.getPendingApprovalQueue).toHaveBeenCalledWith(tenant.id, {
+      cursor: 'cursor-1',
+      limit: 10,
+    });
+  });
+
+  // ── PATCH /admin/loans/:id/decision ───────────────────────────────────────
+
+  it('decideLoan maps APPROVED to ReviewLoanAction.APPROVE and delegates to loanReview.process()', async () => {
+    const loanId = 'loan-uuid-3';
+    const actor = buildActor();
+    const tenant = buildTenant();
+    const req = buildRequest();
+    const reviewResult = { loan: { id: loanId, status: 'APPROVED' } };
+    mockLoanReviewService.process.mockResolvedValueOnce(reviewResult);
+
+    const dto: LoanDecisionDto = { decision: LoanDecision.APPROVED };
+    const result = await controller.decideLoan(loanId, dto, tenant as any, actor as any, req);
+
+    expect(result).toBe(reviewResult);
+    expect(mockLoanReviewService.process).toHaveBeenCalledWith(
+      loanId,
+      { action: ReviewLoanAction.APPROVE, reason: undefined },
+      tenant.id,
+      actor.id,
+      req.ip,
+      undefined,
+    );
+  });
+
+  it('decideLoan maps REJECTED to ReviewLoanAction.DECLINE and passes comments as the reason', async () => {
+    const loanId = 'loan-uuid-4';
+    const actor = buildActor();
+    const tenant = buildTenant();
+    const req = buildRequest();
+    const reviewResult = { loan: { id: loanId, status: 'REJECTED' } };
+    mockLoanReviewService.process.mockResolvedValueOnce(reviewResult);
+
+    const dto: LoanDecisionDto = { decision: LoanDecision.REJECTED, comments: 'Debt-to-income too high' };
+    const result = await controller.decideLoan(loanId, dto, tenant as any, actor as any, req);
+
+    expect(result).toBe(reviewResult);
+    expect(mockLoanReviewService.process).toHaveBeenCalledWith(
+      loanId,
+      { action: ReviewLoanAction.DECLINE, reason: 'Debt-to-income too high' },
+      tenant.id,
+      actor.id,
+      req.ip,
+      undefined,
+    );
+  });
+
+  it('decideLoan never calls loans.disburse() — disbursement stays a separate explicit action', async () => {
+    mockLoanReviewService.process.mockResolvedValueOnce({ loan: { status: 'APPROVED' } });
+
+    const dto: LoanDecisionDto = { decision: LoanDecision.APPROVED };
+    await controller.decideLoan('loan-uuid-5', dto, buildTenant() as any, buildActor() as any, buildRequest());
+
+    expect(mockLoansService.disburse).not.toHaveBeenCalled();
+  });
+
+  // ── Maker-checker: DISBURSE restricted to MANAGER ─────────────────────────
+
+  it('POST /admin/loans/:id/disburse delegates straight to loans.disburse()', async () => {
+    const loanId = 'loan-uuid-6';
+    const actor = buildActor({ role: 'MANAGER' });
+    const tenant = buildTenant();
+    const req = buildRequest('10.0.0.2');
+    const disbursalResult = { loan: { id: loanId, status: 'ACTIVE' }, newBalance: 60000 };
+    mockLoansService.disburse.mockResolvedValueOnce(disbursalResult);
+
+    const result = await controller.disburseLoan(loanId, tenant as any, actor as any, req);
+
+    expect(result).toBe(disbursalResult);
+    expect(mockLoansService.disburse).toHaveBeenCalledWith(loanId, tenant.id, actor.id, req.ip);
+  });
+
+  it('updateStatus rejects a LOAN_OFFICER attempting status=DISBURSED (maker-checker)', async () => {
+    const actor = buildActor({ role: 'LOAN_OFFICER' });
+    const dto: UpdateLoanStatusDto = { status: AdminLoanStatus.DISBURSED };
+
+    await expect(
+      controller.updateStatus('loan-uuid-7', dto, buildTenant() as any, actor as any, buildRequest()),
+    ).rejects.toThrow(ForbiddenException);
+    expect(mockLoansService.disburse).not.toHaveBeenCalled();
+  });
+
+  it('updateStatus rejects a TENANT_ADMIN attempting status=DISBURSED (maker-checker)', async () => {
+    const actor = buildActor({ role: 'TENANT_ADMIN' });
+    const dto: UpdateLoanStatusDto = { status: AdminLoanStatus.DISBURSED };
+
+    await expect(
+      controller.updateStatus('loan-uuid-8', dto, buildTenant() as any, actor as any, buildRequest()),
+    ).rejects.toThrow(ForbiddenException);
+    expect(mockLoansService.disburse).not.toHaveBeenCalled();
+  });
+
+  it('updateStatus still allows MANAGER to disburse via status=DISBURSED', async () => {
+    mockLoansService.disburse.mockResolvedValueOnce({ loan: {}, newBalance: 0 });
+    const actor = buildActor({ role: 'MANAGER' });
+    const dto: UpdateLoanStatusDto = { status: AdminLoanStatus.DISBURSED };
+
+    await controller.updateStatus('loan-uuid-9', dto, buildTenant() as any, actor as any, buildRequest());
+
+    expect(mockLoansService.disburse).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviewLoan rejects a LOAN_OFFICER attempting action=DISBURSE (maker-checker)', async () => {
+    const actor = buildActor({ role: 'LOAN_OFFICER' });
+    const dto = { action: ReviewLoanAction.DISBURSE } as any;
+
+    await expect(
+      controller.reviewLoan('loan-uuid-10', dto, buildTenant() as any, actor as any, buildRequest()),
+    ).rejects.toThrow(ForbiddenException);
+    expect(mockLoanReviewService.process).not.toHaveBeenCalled();
+  });
+
+  it('reviewLoan still allows MANAGER to disburse via action=DISBURSE', async () => {
+    mockLoanReviewService.process.mockResolvedValueOnce({ loan: { status: 'ACTIVE' } });
+    const actor = buildActor({ role: 'MANAGER' });
+    const dto = { action: ReviewLoanAction.DISBURSE } as any;
+
+    await controller.reviewLoan('loan-uuid-11', dto, buildTenant() as any, actor as any, buildRequest());
+
+    expect(mockLoanReviewService.process).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviewLoan does not gate APPROVE/DECLINE behind the MANAGER-only disbursement check', async () => {
+    mockLoanReviewService.process.mockResolvedValueOnce({ loan: { status: 'APPROVED' } });
+    const actor = buildActor({ role: 'LOAN_OFFICER' });
+    const dto = { action: ReviewLoanAction.APPROVE } as any;
+
+    await expect(
+      controller.reviewLoan('loan-uuid-12', dto, buildTenant() as any, actor as any, buildRequest()),
+    ).resolves.toBeDefined();
+    expect(mockLoanReviewService.process).toHaveBeenCalledTimes(1);
   });
 });

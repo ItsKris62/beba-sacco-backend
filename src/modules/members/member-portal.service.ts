@@ -1,15 +1,17 @@
 import {
-  Injectable, Logger, NotFoundException, BadRequestException,
+  Injectable, Logger, NotFoundException, BadRequestException, ConflictException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
+import { createHash } from 'crypto';
 import { AccountType, LoanStatus, InterestType, JournalEntryType, TransactionStatus, TransactionType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MpesaService } from '../mpesa/mpesa.service';
 import { LedgerService } from '../accounting/ledger.service';
+import { IdempotencyService } from '../../common/services/idempotency.service';
 import { MemberDepositDto, DepositPurpose } from '../mpesa/dto/deposit-request.dto';
 import { maskPhone } from '../mpesa/utils/mpesa.utils';
 import { MpesaTriggerSource } from '@prisma/client';
@@ -52,6 +54,7 @@ export class MemberPortalService {
     private readonly storage: StorageService,
     private readonly accountsService: AccountsService,
     private readonly ledger: LedgerService,
+    private readonly idempotency: IdempotencyService,
     @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
     private readonly disbursementQueue: Queue<MpesaDisbursementJobPayload>,
   ) {}
@@ -354,8 +357,55 @@ export class MemberPortalService {
     ipAddress?: string,
     idempotencyKey?: string,
   ) {
+    if (!idempotencyKey?.trim()) {
+      throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
+    }
     const member = await this.resolveMember(userId, tenantId);
 
+    // Redis-layer idempotency (mirrors MpesaService.initiateDeposit / GuarantorResponseService):
+    // guards the whole operation, not just the ledger post below, and lets a replayed
+    // request with an IDENTICAL payload return the original response without re-running
+    // any of the account lookups or queue enqueue. A replay with the SAME key but a
+    // DIFFERENT payload (amount/phone) is rejected outright — postEntry()'s reference-only
+    // dedup can't tell those apart on its own, since the reference never encodes amount.
+    const idemKey = `mpesa:withdraw:${tenantId}:${member.id}:${idempotencyKey.trim()}`;
+    const payloadHash = createHash('sha256')
+      .update(JSON.stringify({ phone, amount }))
+      .digest('hex');
+
+    const idem = await this.idempotency.checkAndReserve(idemKey, tenantId, 24 * 60 * 60);
+    if (idem.status === 'COMPLETED') {
+      const cached = idem.result as { payloadHash: string; response: { message: string; transactionId: string } };
+      if (cached.payloadHash !== payloadHash) {
+        throw new BadRequestException(
+          'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD: this key was already used for a different amount/phone',
+        );
+      }
+      return cached.response;
+    }
+    if (idem.status === 'PROCESSING') {
+      throw new ConflictException('Withdrawal request is already processing');
+    }
+
+    try {
+      const response = await this.executeWithdrawMpesa(member.id, userId, phone, amount, tenantId, ipAddress, idempotencyKey.trim());
+      await this.idempotency.complete(idemKey, tenantId, { payloadHash, response }, 24 * 60 * 60);
+      return response;
+    } catch (error) {
+      await this.idempotency.release(idemKey, tenantId);
+      throw error;
+    }
+  }
+
+  private async executeWithdrawMpesa(
+    memberId: string,
+    userId: string,
+    phone: string,
+    amount: number,
+    tenantId: string,
+    ipAddress: string | undefined,
+    idempotencyKey: string,
+  ): Promise<{ message: string; transactionId: string }> {
     // Hardcode withdrawal fee or fetch from config
     const withdrawalFee = new Decimal(0); // Add logic to calculate fee if needed
     const requestedAmount = new Decimal(amount);
@@ -363,7 +413,7 @@ export class MemberPortalService {
 
     const result = await this.prisma.$transaction(async (tx) => {
       const fosaAccount = await tx.account.findFirst({
-        where: { memberId: member.id, tenantId, accountType: 'FOSA', isActive: true },
+        where: { memberId, tenantId, accountType: 'FOSA', isActive: true },
         select: { id: true, balance: true, lockedBalance: true, frozenSavings: true, accountNumber: true },
       });
 
@@ -382,14 +432,11 @@ export class MemberPortalService {
         throw new BadRequestException('Insufficient FOSA available balance');
       }
 
-      // Deterministic reference — never Date.now() here. A wall-clock-based reference
-      // is not replay-safe: a client retry milliseconds later gets a different
-      // reference and posts (and debits) a second time. When the caller supplies an
-      // idempotencyKey, replay detection is scoped to that specific request; otherwise
-      // fall back to a same-minute deterministic key.
-      const reference = idempotencyKey
-        ? `MPESA_WD-${tenantId}-${member.id}-${idempotencyKey}`
-        : `MPESA_WD-${tenantId}-${fosaAccount.id}-${totalDeduction.toString()}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`;
+      // Deterministic reference scoped to the caller-supplied idempotencyKey — never
+      // Date.now() here. A wall-clock-based reference is not replay-safe: a client
+      // retry milliseconds later would get a different reference and post (and debit)
+      // a second time.
+      const reference = `MPESA_WD-${tenantId}-${memberId}-${idempotencyKey}`;
 
       // Routed through LedgerService.postEntry() (debit the account's deposit-liability
       // GL code, credit CASH) instead of a manual Account.update() + Transaction.create()

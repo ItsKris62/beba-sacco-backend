@@ -240,23 +240,29 @@ export class AdminService {
       engagedUsers30d,
       pendingKyc,
       totalLoans,
-      activeLoans,
+      activeLoansAgg,
       pendingLoans,
       defaultedLoans,
       mpesa7d,
       mpesa30d,
-      parLoans,
+      parLoansAgg,
       disbursedThisMonth,
       disbursedOverall,
+      fosaLiquidityAgg,
+      bosaSavingsAgg,
+      stuckReconCount,
     ] = await this.prisma.$transaction([
       this.prisma.member.count({ where: { tenantId } }),
       this.prisma.user.count({ where: { tenantId, accountStatus: AccountStatus.ACTIVE } }),
       this.prisma.user.count({ where: { tenantId, lastLoginAt: { gte: minus30d } } }),
       this.prisma.member.count({ where: { tenantId, kycStatus: KycStatus.PENDING_REVIEW } }),
       this.prisma.loan.count({ where: { tenantId } }),
-      this.prisma.loan.findMany({
+      // Active loan book total — DB-side sum, never load every row to reduce() in JS
+      // (this endpoint must stay fast at 100k+ rows; see admin dashboard perf constraint).
+      this.prisma.loan.aggregate({
         where: { tenantId, status: LoanStatus.ACTIVE },
-        select: { outstandingBalance: true },
+        _sum: { outstandingBalance: true },
+        _count: true,
       }),
       this.prisma.loan.count({
         where: {
@@ -285,9 +291,10 @@ export class AdminService {
       // crossed the 30-day threshold (WATCHLIST = 30-89d, NPL = 90d+ — see
       // FinancialService.classifyStaging()). Staging is kept in sync by the
       // daily accrual job, so this reads it rather than recomputing arrears here.
-      this.prisma.loan.findMany({
+      // DB-side sum — same perf constraint as activeLoansAgg above.
+      this.prisma.loan.aggregate({
         where: { tenantId, status: LoanStatus.ACTIVE, staging: { in: [LoanStaging.WATCHLIST, LoanStaging.NPL] } },
-        select: { outstandingBalance: true },
+        _sum: { outstandingBalance: true },
       }),
       this.prisma.loan.aggregate({
         where: { tenantId, disbursedAt: { gte: monthStart } },
@@ -299,19 +306,39 @@ export class AdminService {
         _sum: { principalAmount: true },
         _count: true,
       }),
+      // Total FOSA liquidity — sum of every active FOSA account balance.
+      this.prisma.account.aggregate({
+        where: { tenantId, accountType: AccountType.FOSA, isActive: true },
+        _sum: { balance: true },
+      }),
+      // Total BOSA savings — sum of every active BOSA account balance.
+      this.prisma.account.aggregate({
+        where: { tenantId, accountType: AccountType.BOSA, isActive: true },
+        _sum: { balance: true },
+      }),
+      // Withdrawals stuck past the auto-refund grace window — see
+      // WithdrawalReconciliationProcessor / AdminReconciliationService.
+      this.prisma.mpesaTransaction.count({
+        where: { tenantId, referenceType: 'FOSA_WITHDRAWAL', status: TransactionStatus.RECON_PENDING },
+      }),
     ]);
 
-    const totalActiveLoanAmount = activeLoans.reduce(
-      (sum, l) => sum.plus(l.outstandingBalance.toString()),
-      new Decimal(0),
-    );
+    const totalActiveLoanAmount = activeLoansAgg._sum.outstandingBalance
+      ? new Decimal(activeLoansAgg._sum.outstandingBalance.toString())
+      : new Decimal(0);
 
-    const parOver30Amount = parLoans.reduce(
-      (sum, l) => sum.plus(l.outstandingBalance.toString()),
-      new Decimal(0),
-    );
+    const parOver30Amount = parLoansAgg._sum.outstandingBalance
+      ? new Decimal(parLoansAgg._sum.outstandingBalance.toString())
+      : new Decimal(0);
     const parOver30Percent = totalActiveLoanAmount.greaterThan(0)
       ? parOver30Amount.dividedBy(totalActiveLoanAmount).times(100).toDecimalPlaces(2).toNumber()
+      : 0;
+
+    const totalFosaLiquidity = fosaLiquidityAgg._sum.balance
+      ? new Decimal(fosaLiquidityAgg._sum.balance.toString()).toNumber()
+      : 0;
+    const totalBosaSavings = bosaSavingsAgg._sum.balance
+      ? new Decimal(bosaSavingsAgg._sum.balance.toString()).toNumber()
       : 0;
 
     const defaultRate = totalLoans > 0 ? ((defaultedLoans / totalLoans) * 100).toFixed(2) : '0.00';
@@ -325,7 +352,7 @@ export class AdminService {
       },
       loans: {
         total: totalLoans,
-        active: activeLoans.length,
+        active: activeLoansAgg._count,
         totalOutstandingAmount: totalActiveLoanAmount.toNumber(),
         pendingApprovals: pendingLoans,
         defaulted: defaultedLoans,
@@ -348,6 +375,14 @@ export class AdminService {
               : 0,
           },
         },
+      },
+      liquidity: {
+        totalFosaLiquidity,
+        totalBosaSavings,
+      },
+      pendingActions: {
+        loansPendingApproval: pendingLoans,
+        mpesaWithdrawalsStuckReconPending: stuckReconCount,
       },
       mpesa: {
         deposits7d: {

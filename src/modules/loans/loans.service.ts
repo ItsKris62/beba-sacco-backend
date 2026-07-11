@@ -391,6 +391,101 @@ export class LoansService {
     };
   }
 
+  // ─── ADMIN: PENDING APPROVAL QUEUE ────────────────────────────
+
+  /**
+   * Loans awaiting loan-officer/manager review, enriched with member contact
+   * details, loan product terms, and the full list of ACCEPTED guarantors
+   * (not just the coverage percent findAll() returns) — everything an admin
+   * needs to make an approve/reject decision without a second round-trip.
+   */
+  async getPendingApprovalQueue(
+    tenantId: string,
+    opts: { cursor?: string; limit?: number } = {},
+  ) {
+    const limit = Math.min(100, Math.max(1, Number(opts.limit ?? 20)));
+
+    const loans = await this.prisma.loan.findMany({
+      where: { tenantId, status: LoanStatus.PENDING_APPROVAL },
+      include: {
+        member: {
+          select: {
+            memberNumber: true,
+            user: { select: { firstName: true, lastName: true, phone: true, phoneNumber: true } },
+          },
+        },
+        loanProduct: {
+          select: { name: true, interestRate: true, minGuarantors: true, guarantorCoverageRatio: true },
+        },
+      },
+      ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
+      take: limit + 1,
+      orderBy: [{ appliedAt: 'asc' }, { id: 'asc' }],
+    });
+
+    const hasMore = loans.length > limit;
+    const pageRows = hasMore ? loans.slice(0, limit) : loans;
+    const nextCursor = hasMore ? (pageRows[pageRows.length - 1]?.id ?? null) : null;
+
+    const loanIds = pageRows.map((loan) => loan.id);
+    const acceptedGuarantors = loanIds.length
+      ? await this.prisma.loanGuarantor.findMany({
+          where: { tenantId, loanId: { in: loanIds }, status: GuarantorStatus.ACCEPTED },
+          select: {
+            loanId: true,
+            guaranteedAmount: true,
+            respondedAt: true,
+            member: {
+              select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } },
+            },
+          },
+        })
+      : [];
+    const guarantorsByLoanId = new Map<string, typeof acceptedGuarantors>();
+    for (const guarantor of acceptedGuarantors) {
+      const list = guarantorsByLoanId.get(guarantor.loanId) ?? [];
+      list.push(guarantor);
+      guarantorsByLoanId.set(guarantor.loanId, list);
+    }
+
+    const data = pageRows.map((loan) => ({
+      id: loan.id,
+      loanNumber: loan.loanNumber,
+      status: loan.status,
+      principalAmount: new Decimal(loan.principalAmount.toString()).toNumber(),
+      tenureMonths: loan.tenureMonths,
+      monthlyInstalment: new Decimal(loan.monthlyInstalment.toString()).toNumber(),
+      purpose: loan.purpose,
+      appliedAt: loan.appliedAt,
+      member: {
+        memberNumber: loan.member.memberNumber,
+        firstName: loan.member.user.firstName,
+        lastName: loan.member.user.lastName,
+        phone: loan.member.user.phone ?? loan.member.user.phoneNumber,
+      },
+      loanProduct: {
+        name: loan.loanProduct.name,
+        interestRate: new Decimal(loan.loanProduct.interestRate.toString()).toNumber(),
+        minGuarantors: loan.loanProduct.minGuarantors,
+        guarantorCoverageRatio: new Decimal(loan.loanProduct.guarantorCoverageRatio.toString()).toNumber(),
+      },
+      acceptedGuarantors: (guarantorsByLoanId.get(loan.id) ?? []).map((guarantor) => ({
+        memberNumber: guarantor.member.memberNumber,
+        firstName: guarantor.member.user.firstName,
+        lastName: guarantor.member.user.lastName,
+        guaranteedAmount: new Decimal(guarantor.guaranteedAmount.toString()).toNumber(),
+        respondedAt: guarantor.respondedAt,
+      })),
+    }));
+
+    return {
+      data,
+      nextCursor,
+      hasMore,
+      meta: { limit, cursor: opts.cursor ?? null, nextCursor, hasMore },
+    };
+  }
+
   // ─── FIND ONE ─────────────────────────────────────────────────
 
   async findOne(id: string, tenantId: string) {

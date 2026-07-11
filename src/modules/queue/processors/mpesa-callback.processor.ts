@@ -461,8 +461,15 @@ export class MpesaCallbackProcessor extends WorkerHost {
       return;
     }
 
-    // Layer 2 idempotency
-    if (mpesaTx.status !== TransactionStatus.PENDING) {
+    // Layer 2 idempotency. RECON_PENDING is included alongside PENDING because
+    // MpesaB2cTimeoutProcessor marks stuck FOSA_WITHDRAWAL rows RECON_PENDING after
+    // 30 minutes without a callback — if we treated that as terminal here, a genuinely
+    // late Daraja callback (success or failure) would be silently dropped forever, and
+    // WithdrawalReconciliationProcessor's later auto-refund of the same row would go
+    // unreconciled against it. The claim-then-act guards below (updateMany with a
+    // status precondition) ensure whichever of {this callback, the recon sweep} acts
+    // second on a given row safely no-ops instead of double-processing it.
+    if (mpesaTx.status !== TransactionStatus.PENDING && mpesaTx.status !== TransactionStatus.RECON_PENDING) {
       this.logger.log(`B2C callback duplicate skipped: ${ConversationID} → ${mpesaTx.status}`);
       return;
     }
@@ -477,23 +484,27 @@ export class MpesaCallbackProcessor extends WorkerHost {
         // bypassing the GL a second time (on top of the withdrawal debit itself,
         // which is now also routed through the ledger — see MemberPortalService.withdrawMpesa()).
         const txClient = this.prisma.direct ?? this.prisma;
-        await txClient.$transaction(
+        const claimed = await txClient.$transaction(
           async (tx) => {
-            await this.ledger.reverseTransaction({
-              tenantId: mpesaTx.tenantId,
-              originalTransactionId: mpesaTx.transactionId!,
-              reason: `B2C withdrawal failed: ${ResultDesc} (code ${ResultCode})`,
-              tx,
-            });
-
-            await tx.mpesaTransaction.update({
-              where: { id: mpesaTx.id },
+            // Claim this row before touching the ledger — if WithdrawalReconciliationProcessor
+            // already won the race and reversed it (row is no longer PENDING/RECON_PENDING),
+            // count is 0 and we must not call reverseTransaction() a second time.
+            const claim = await tx.mpesaTransaction.updateMany({
+              where: { id: mpesaTx.id, status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] } },
               data: {
                 status: TransactionStatus.FAILED,
                 resultCode: ResultCode,
                 resultDesc: ResultDesc,
                 callbackPayload: rawPayload,
               },
+            });
+            if (claim.count === 0) return false;
+
+            await this.ledger.reverseTransaction({
+              tenantId: mpesaTx.tenantId,
+              originalTransactionId: mpesaTx.transactionId!,
+              reason: `B2C withdrawal failed: ${ResultDesc} (code ${ResultCode})`,
+              tx,
             });
 
             await this.audit.createAtomic(tx, {
@@ -515,12 +526,19 @@ export class MpesaCallbackProcessor extends WorkerHost {
                 phone: maskPhone(mpesaTx.phoneNumber),
               },
             });
+            return true;
           },
           { isolationLevel: 'Serializable' },
         );
-        this.logger.warn(
-          `B2C failed and FOSA withdrawal reversed | conversation=${ConversationID} code=${ResultCode} desc=${ResultDesc}`,
-        );
+        if (!claimed) {
+          this.logger.warn(
+            `B2C failure callback arrived after the row was already reconciled — skipped | conversation=${ConversationID}`,
+          );
+        } else {
+          this.logger.warn(
+            `B2C failed and FOSA withdrawal reversed | conversation=${ConversationID} code=${ResultCode} desc=${ResultDesc}`,
+          );
+        }
       } else if (mpesaTx.referenceType === 'FOSA_WITHDRAWAL' && mpesaTx.referenceId) {
         // Legacy fallback for MpesaTransaction rows created before withdrawMpesa()
         // started linking transactionId (see MpesaService.executeB2cDisbursement()).
@@ -634,9 +652,9 @@ export class MpesaCallbackProcessor extends WorkerHost {
 
     if (mpesaTx.referenceType === 'FOSA_WITHDRAWAL') {
       const txClient = this.prisma.direct ?? this.prisma;
-      await txClient.$transaction(async (tx) => {
-        await tx.mpesaTransaction.update({
-          where: { id: mpesaTx.id },
+      const claimed = await txClient.$transaction(async (tx) => {
+        const claim = await tx.mpesaTransaction.updateMany({
+          where: { id: mpesaTx.id, status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] } },
           data: {
             status: TransactionStatus.COMPLETED,
             resultCode: ResultCode,
@@ -648,6 +666,8 @@ export class MpesaCallbackProcessor extends WorkerHost {
             callbackPayload: rawPayload,
           },
         });
+        if (claim.count === 0) return false;
+
         await this.audit.createAtomic(tx, {
           tenantId: mpesaTx.tenantId,
           actorId: 'SYSTEM',
@@ -657,7 +677,35 @@ export class MpesaCallbackProcessor extends WorkerHost {
           newValue: { status: 'COMPLETED', receipt, amount: amount.toFixed(4) },
           metadata: { referenceId: mpesaTx.referenceId, phone: maskPhone(mpesaTx.phoneNumber) },
         });
+        return true;
       });
+
+      if (!claimed) {
+        // The row was already reversed by WithdrawalReconciliationProcessor's auto-refund
+        // before this genuinely-late SUCCESS callback arrived — the member has now been
+        // paid out by Safaricom AND had their FOSA balance refunded. This is a real
+        // double-credit that the claim-guard cannot retroactively prevent (it only stops
+        // the two writers racing concurrently, not a callback arriving after the grace
+        // window has already elapsed and been acted on). Surface loudly for manual recovery.
+        this.logger.error(
+          `CRITICAL: B2C withdrawal succeeded AFTER auto-refund reconciliation — member may be ` +
+            `double-credited | conversation=${ConversationID} mpesaTransactionId=${mpesaTx.id} ` +
+            `amount=${amount.toFixed(2)} phone=${maskPhone(mpesaTx.phoneNumber)}`,
+        );
+        await this.audit
+          .create({
+            tenantId: mpesaTx.tenantId,
+            actorId: 'SYSTEM',
+            action: 'MPESA.WITHDRAWAL.LATE_SUCCESS_AFTER_AUTO_REFUND',
+            entityType: 'MpesaTransaction',
+            entityId: mpesaTx.id,
+            newValue: { receipt, amount: amount.toFixed(4) },
+            metadata: { conversationId: ConversationID, phone: maskPhone(mpesaTx.phoneNumber) },
+          })
+          .catch((e: unknown) =>
+            this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
+          );
+      }
     } else if (mpesaTx.loanId) {
       await this.postDisbursementLedger({
         tenantId: mpesaTx.tenantId,

@@ -225,7 +225,7 @@ export class AuditController {
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
+@Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
 @Controller('admin/audit-logs')
 export class AdminAuditController {
   constructor(private readonly auditService: AuditService) {}
@@ -234,8 +234,11 @@ export class AdminAuditController {
   @ApiOperation({
     summary: 'List audit logs for admins',
     description:
-      'Admin compatibility endpoint for paginated audit visibility. ' +
-      'Accessible only to SUPER_ADMIN and TENANT_ADMIN roles.',
+      'Admin compatibility endpoint for paginated audit visibility (M-Pesa reconciliations, ' +
+      'loan approvals/disbursements, and every other audited action). ' +
+      'Accessible to SUPER_ADMIN, TENANT_ADMIN, MANAGER, and AUDITOR roles. ' +
+      'Strictly scoped to the caller\'s tenantId except for SUPER_ADMIN, which may pass ' +
+      '?tenantId= to inspect a specific tenant.',
   })
   @ApiQuery({ name: 'cursor', required: false, type: String })
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1, description: 'Deprecated; use cursor' })

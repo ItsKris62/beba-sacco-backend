@@ -1927,6 +1927,7 @@ enum DocumentType {
   NATIONAL_ID_BACK
   KRA_PIN
   MEMBER_FORM
+  CRB_CONSENT
   OTHER
 
   @@schema("public")

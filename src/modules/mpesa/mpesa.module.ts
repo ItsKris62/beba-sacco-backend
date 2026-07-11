@@ -1,15 +1,19 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { MpesaService } from './mpesa.service';
+import { AdminReconciliationService } from './admin-reconciliation.service';
 import { DarajaClientService } from './daraja-client.service';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
 import { MpesaB2cTimeoutProcessor } from './processors/mpesa-b2c-timeout.processor';
 import { StkExpiryScheduler } from './jobs/stk-expiry.scheduler';
 import { StkExpiryProcessor } from './jobs/stk-expiry.processor';
+import { WithdrawalReconciliationScheduler } from './jobs/withdrawal-recon.scheduler';
+import { WithdrawalReconciliationProcessor } from './jobs/withdrawal-recon.processor';
 import { MpesaStkTimeoutService } from './mpesa-stk-timeout.service';
 import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditModule } from '../audit/audit.module';
+import { AccountingModule } from '../accounting/accounting.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { isWorkerRuntime } from '../queue/worker-runtime';
 import { LoansModule } from '../loans/loans.module';
@@ -21,6 +25,8 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
       MpesaB2cTimeoutProcessor,
       StkExpiryProcessor,
       StkExpiryScheduler,
+      WithdrawalReconciliationProcessor,
+      WithdrawalReconciliationScheduler,
       MpesaStkTimeoutService,
     ]
   : [];
@@ -56,12 +62,14 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
     AuditModule,
     LoansModule,
     MetricsModule,
+    AccountingModule, // Makes LedgerService available to WithdrawalReconciliationProcessor
     // Queue registrations (connection inherited from BullModule.forRootAsync in QueueModule)
     BullModule.registerQueue(
       { name: QUEUE_NAMES.MPESA_CALLBACK },
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT },
       { name: QUEUE_NAMES.MPESA_STK_EXPIRY },
       { name: QUEUE_NAMES.MPESA_B2C_TIMEOUT },
+      { name: QUEUE_NAMES.MPESA_WITHDRAWAL_RECON },
       // DLQ queues — jobs are moved here after all retries are exhausted
       { name: QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ },
       { name: QUEUE_NAMES.MPESA_CALLBACK_DLQ },
@@ -70,13 +78,14 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   providers: [
     DarajaClientService,
     MpesaService,
+    AdminReconciliationService,
     MpesaTenantResolverService,
     ...MPESA_WORKER_PROVIDERS,
     // PrismaService is @Global via PrismaModule, but listed explicitly so
     // this module is self-documenting about its dependencies.
     PrismaService,
   ],
-  exports: [MpesaService, DarajaClientService, MpesaTenantResolverService],
+  exports: [MpesaService, AdminReconciliationService, DarajaClientService, MpesaTenantResolverService],
 })
 export class MpesaModule {}
 
