@@ -19,14 +19,20 @@ describe('CreateUserDto — role validation', () => {
     expect(errors.some((e) => e.property === 'role')).toBe(true);
   });
 
+  it.each([UserRole.MEMBER, UserRole.CHAIRMAN])(
+    'rejects %s as a target role — creating a brand-new User here would never get a linked Member profile',
+    async (role) => {
+      const errors = await validate(makeDto(role));
+      expect(errors.some((e) => e.property === 'role')).toBe(true);
+    },
+  );
+
   it.each([
     UserRole.TENANT_ADMIN,
     UserRole.MANAGER,
     UserRole.LOAN_OFFICER,
     UserRole.TELLER,
     UserRole.AUDITOR,
-    UserRole.MEMBER,
-    UserRole.CHAIRMAN,
     UserRole.ACCOUNTANT,
   ])('accepts %s as a target role', async (role) => {
     const errors = await validate(makeDto(role));

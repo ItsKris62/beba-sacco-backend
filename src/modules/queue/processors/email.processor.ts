@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue.constants';
 import { PlunkService } from '../../../common/services/plunk.service';
+import { EncryptionService, EncryptedPayload } from '../../zero-trust/encryption/encryption.service';
 
 /**
  * Email Queue Processor
@@ -25,7 +26,10 @@ import { PlunkService } from '../../../common/services/plunk.service';
 export class EmailProcessor extends WorkerHost {
   private readonly logger = new Logger(EmailProcessor.name);
 
-  constructor(private readonly plunk: PlunkService) {
+  constructor(
+    private readonly plunk: PlunkService,
+    private readonly encryption: EncryptionService,
+  ) {
     super();
   }
 
@@ -33,7 +37,7 @@ export class EmailProcessor extends WorkerHost {
     const payload = job.data;
     this.logger.log(`Processing email job ${job.id} type=${payload.type} to=${payload.to}`);
 
-    const { subject, body } = this.buildEmail(payload);
+    const { subject, body } = await this.buildEmail(payload);
     const sent = await this.plunk.send({ to: payload.to, subject, body });
 
     if (!sent) {
@@ -44,7 +48,7 @@ export class EmailProcessor extends WorkerHost {
 
   // ─── Template router ─────────────────────────────────────────
 
-  private buildEmail(payload: EmailJobPayload): { subject: string; body: string } {
+  private async buildEmail(payload: EmailJobPayload): Promise<{ subject: string; body: string }> {
     switch (payload.type) {
       case 'WELCOME':
         return this.welcome(payload);
@@ -70,6 +74,8 @@ export class EmailProcessor extends WorkerHost {
         return this.memberApproved(payload);
       case 'MEMBER_REJECTED':
         return this.memberRejected(payload);
+      case 'STAFF_ACCOUNT_CREATED':
+        return this.staffAccountCreated(payload);
     }
   }
 
@@ -115,6 +121,20 @@ export class EmailProcessor extends WorkerHost {
 
   private kes(amount: number): string {
     return `KES ${amount.toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  private roleLabel(role: string): string {
+    const labels: Record<string, string> = {
+      TENANT_ADMIN: 'Tenant Admin',
+      MANAGER: 'Manager',
+      LOAN_OFFICER: 'Loan Officer',
+      ACCOUNTANT: 'Accountant',
+      TELLER: 'Teller',
+      AUDITOR: 'Auditor',
+      MEMBER: 'Member',
+      CHAIRMAN: 'Chairman',
+    };
+    return labels[role] ?? role;
   }
 
   private systemNotice(p: Extract<EmailJobPayload, { type: 'SYSTEM_NOTICE' }>) {
@@ -334,6 +354,33 @@ export class EmailProcessor extends WorkerHost {
         </div>
         <p>Please address the above and resubmit your application, or visit our offices for assistance.</p>
         <p>We look forward to welcoming you as a member.</p>
+      `),
+    };
+  }
+
+  // ── STAFF ACCOUNT CREATED ─────────────────────────────────────
+
+  private async staffAccountCreated(p: Extract<EmailJobPayload, { type: 'STAFF_ACCOUNT_CREATED' }>) {
+    // Mirrors SmsProcessor's TEMP_PASSWORD handling — the plaintext password is
+    // decrypted here, immediately before send, and never persisted in the
+    // Redis-backed job payload.
+    const encrypted = JSON.parse(p.encryptedPayload) as EncryptedPayload;
+    const tempPassword = await this.encryption.decrypt(encrypted, p.tenantId);
+
+    return {
+      subject: `Your ${p.saccoName} staff account has been created`,
+      body: this.wrap(p.firstName, `
+        <h2>Staff Account Created</h2>
+        <p>An administrator has created a <strong>${this.roleLabel(p.role)}</strong> account for you at ${p.saccoName}.</p>
+        <div class="highlight">
+          <table>
+            <tr><td>Login Email</td><td>${p.to}</td></tr>
+            <tr><td>Temporary Password</td><td>${tempPassword}</td></tr>
+          </table>
+        </div>
+        <p>Log in using the button below. You will be required to verify your phone number via SMS and set a new password before you can access the dashboard.</p>
+        <p><a href="${p.portalUrl}" class="btn">Log In</a></p>
+        <p>For security, never share this password with anyone. If you did not expect this account, contact your administrator immediately.</p>
       `),
     };
   }

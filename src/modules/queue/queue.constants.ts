@@ -9,6 +9,7 @@ export const QUEUE_NAMES = {
   MPESA_DISBURSEMENT_DLQ: 'mpesa.disbursement.dlq', // Dead-letter queue for B2C failures
   MPESA_STK_EXPIRY: 'mpesa.stk-expiry',
   MPESA_B2C_TIMEOUT: 'mpesa.b2c-timeout',
+  MPESA_WITHDRAWAL_RECON: 'mpesa.withdrawal-recon', // Auto-refund sweep for RECON_PENDING FOSA withdrawals
   MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq', // Dead-letter queue for callback failures
   LOAN_GUARANTOR_REMINDER: 'loan.guarantor.reminder',
   LOAN_GUARANTOR_EXPIRY: 'loan.guarantor.expiry',
@@ -232,7 +233,8 @@ export type EmailJobPayload =
   | PasswordResetEmailPayload
   | PasswordResetOtpEmailPayload
   | MemberApprovedEmailPayload
-  | MemberRejectedEmailPayload;
+  | MemberRejectedEmailPayload
+  | StaffAccountCreatedEmailPayload;
 
 interface BaseEmailPayload {
   to: string; // recipient email address
@@ -248,6 +250,22 @@ export interface SystemNoticeEmailPayload extends BaseEmailPayload {
 export interface WelcomeEmailPayload extends BaseEmailPayload {
   type: 'WELCOME';
   saccoName: string;
+}
+
+export interface StaffAccountCreatedEmailPayload extends BaseEmailPayload {
+  type: 'STAFF_ACCOUNT_CREATED';
+  saccoName: string;
+  role: string;
+  /** Login URL, e.g. `${APP_URL}/login` */
+  portalUrl: string;
+  /**
+   * JSON-stringified EncryptedPayload, decrypted by EmailProcessor at send time —
+   * mirrors SmsProcessor's TEMP_PASSWORD handling so plaintext never sits in the
+   * Redis-backed job payload (and therefore never surfaces in Bull Board).
+   */
+  encryptedPayload: string;
+  /** Tenant scope needed to derive the decryption key. */
+  tenantId: string;
 }
 
 export interface LoanApprovedEmailPayload extends BaseEmailPayload {

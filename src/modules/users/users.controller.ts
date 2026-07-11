@@ -48,20 +48,23 @@ export class UsersController {
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Create a staff or member account',
+    summary: 'Create a staff account',
     description:
-      'Creates a user with a server-generated temporary password, sent via SMS ' +
+      'Creates a user with a server-generated temporary password, sent via SMS and email ' +
       '(mustChangePassword = true). The plaintext password is never returned in this ' +
-      'response — if SMS delivery fails, retrieve it via GET /users/:id/reveal-temp-password. ' +
+      'response — if delivery fails, retrieve it via GET /users/:id/reveal-temp-password. ' +
       'On first login the user must verify their phone via a 6-digit SMS OTP (enforced by ' +
       'POST /auth/login, unless SMS_OTP_BYPASS_ADMIN_CREATED is enabled) before tokens are ' +
       'issued, then set a permanent password. ' +
-      'TENANT_ADMIN can create any tenant-level role. ' +
-      'MANAGER can create LOAN_OFFICER, ACCOUNTANT, TELLER, MEMBER, CHAIRMAN, or AUDITOR accounts. ' +
+      'TENANT_ADMIN can create TENANT_ADMIN, MANAGER, LOAN_OFFICER, ACCOUNTANT, TELLER, or AUDITOR. ' +
+      'MANAGER can create LOAN_OFFICER, ACCOUNTANT, TELLER, or AUDITOR. ' +
       'SUPER_ADMIN is never assignable via this endpoint. ' +
-      'For MEMBER self-registration, use POST /auth/register instead.',
+      'MEMBER and CHAIRMAN are not assignable here either — a User created via this endpoint ' +
+      'never gets a linked Member profile, so use POST /members instead (which links to an ' +
+      'existing self-registered user from POST /auth/register).',
   })
-  @ApiResponse({ status: 201, description: 'User created. Temporary password sent via SMS.' })
+  @ApiResponse({ status: 201, description: 'User created. Temporary password sent via SMS and email.' })
+  @ApiResponse({ status: 400, description: 'Validation failed (e.g. role is MEMBER/CHAIRMAN/SUPER_ADMIN)' })
   @ApiResponse({ status: 403, description: 'Insufficient role to create this account type' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
   create(

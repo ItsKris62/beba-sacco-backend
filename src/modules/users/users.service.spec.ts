@@ -1,6 +1,9 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { UsersService } from './users.service';
+
+jest.mock('@sentry/nestjs', () => ({ captureException: jest.fn() }));
+import * as Sentry from '@sentry/nestjs';
 
 describe('UsersService — role hierarchy enforcement (canManageRole consolidation)', () => {
   let service: UsersService;
@@ -20,6 +23,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
 
   let smsServiceMock: any;
   let encryptionMock: any;
+  let configMock: any;
 
   beforeEach(() => {
     prismaMock = {
@@ -31,8 +35,12 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
           ...(data as Record<string, unknown>),
         })),
       },
+      tenant: {
+        findUnique: jest.fn().mockResolvedValue({ name: 'Test SACCO' }),
+      },
     };
     auditMock = { create: jest.fn().mockResolvedValue(undefined) };
+    configMock = { get: jest.fn().mockReturnValue(undefined) };
     const pinServiceMock = {
       generateAndIssuePin: jest.fn(),
       validatePin: jest.fn(),
@@ -57,6 +65,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       pinServiceMock,
       smsServiceMock,
       encryptionMock,
+      configMock,
       { add: jest.fn() } as any,
     );
   });
@@ -114,12 +123,79 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       expect((result as any).temporaryPassword).toBeUndefined();
     });
 
+    it('enqueues a STAFF_ACCOUNT_CREATED email alongside the SMS, without plaintext in the payload', async () => {
+      prismaMock.user.findFirst.mockResolvedValue(null);
+      prismaMock.user.create.mockResolvedValue({ id: 'new-user-id', ...newUserDto });
+      const addMock = jest.fn().mockResolvedValue(undefined);
+      service = new UsersService(
+        prismaMock,
+        auditMock,
+        {} as any,
+        {
+          generateAndIssuePin: jest.fn(),
+          validatePin: jest.fn(),
+          regenerateAndRevealPin: jest.fn(),
+          assertIssuanceRateLimit: jest.fn().mockResolvedValue(undefined),
+        } as any,
+        smsServiceMock,
+        encryptionMock,
+        configMock,
+        { add: addMock } as any,
+      );
+
+      const result = await service.create(newUserDto, 'tenant-1', manager);
+
+      expect(result.emailEnqueued).toBe(true);
+      expect(prismaMock.tenant.findUnique).toHaveBeenCalledWith({
+        where: { id: 'tenant-1' },
+        select: { name: true },
+      });
+      const [, payload] = addMock.mock.calls[0];
+      expect(payload).toEqual(
+        expect.objectContaining({
+          type: 'STAFF_ACCOUNT_CREATED',
+          to: newUserDto.email,
+          role: newUserDto.role,
+          saccoName: 'Test SACCO',
+          tenantId: 'tenant-1',
+        }),
+      );
+      expect(payload).not.toHaveProperty('tempPassword'); // plaintext must never enter the job payload
+      expect(typeof payload.encryptedPayload).toBe('string');
+    });
+
     it('blocks MANAGER from creating a TENANT_ADMIN account', async () => {
       await expect(
         service.create({ ...newUserDto, role: UserRole.TENANT_ADMIN }, 'tenant-1', manager),
       ).rejects.toThrow(ForbiddenException);
 
       expect(prismaMock.user.create).not.toHaveBeenCalled();
+    });
+
+    it.each([UserRole.MEMBER, UserRole.CHAIRMAN])(
+      'blocks creating a %s account via this endpoint (would be an orphaned User with no Member row)',
+      async (role) => {
+        await expect(
+          service.create({ ...newUserDto, role }, 'tenant-1', manager),
+        ).rejects.toThrow(BadRequestException);
+
+        expect(prismaMock.user.create).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reports a broken audit chain to Sentry without failing the request', async () => {
+      prismaMock.user.findFirst.mockResolvedValue(null);
+      prismaMock.user.create.mockResolvedValue({ id: 'new-user-id', ...newUserDto });
+      const auditError = new Error('audit db unreachable');
+      auditMock.create.mockRejectedValueOnce(auditError);
+
+      const result = await service.create(newUserDto, 'tenant-1', manager);
+
+      expect(result.success).toBe(true); // audit failure never blocks account creation
+      expect(Sentry.captureException).toHaveBeenCalledWith(
+        auditError,
+        expect.objectContaining({ tags: { audit_chain_broken: true, action: 'USER.CREATED' } }),
+      );
     });
   });
 

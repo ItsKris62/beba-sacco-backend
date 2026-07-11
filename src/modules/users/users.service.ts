@@ -6,9 +6,11 @@ import {
   ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import * as Sentry from '@sentry/nestjs';
 import { randomInt } from 'crypto';
 import * as argon2 from 'argon2';
 import { UserRole, AccountStatus, PinPurpose } from '@prisma/client';
@@ -60,6 +62,7 @@ export class UsersService {
     private readonly pinService: PinService,
     private readonly smsService: SmsService,
     private readonly encryption: EncryptionService,
+    private readonly config: ConfigService,
     @InjectQueue(QUEUE_NAMES.EMAIL)
     private readonly emailQueue: Queue<EmailJobPayload>,
   ) {}
@@ -72,6 +75,26 @@ export class UsersService {
           `[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`,
         ),
       );
+  }
+
+  /**
+   * Awaited variant of enqueueEmail — used where the caller needs to know
+   * (and report back, e.g. `emailEnqueued` in the create() response) whether
+   * the job was actually queued, mirroring SmsService.enqueueSms's contract.
+   */
+  private async enqueueEmailAwaited(payload: EmailJobPayload, ctx: string): Promise<boolean> {
+    try {
+      await this.emailQueue.add('send', payload, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      });
+      return true;
+    } catch (e: unknown) {
+      this.logger.error(
+        `[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return false;
+    }
   }
 
   // ─── CREATE (admin channel) ──────────────────────────────────
@@ -89,6 +112,8 @@ export class UsersService {
    *
    * Role restrictions:
    *   - SUPER_ADMIN cannot be assigned via this endpoint (platform-only role)
+   *   - MEMBER/CHAIRMAN cannot be assigned via this endpoint (would create a User
+   *     with no linked Member profile — use POST /members instead)
    *   - MANAGER cannot create TENANT_ADMIN accounts (role hierarchy)
    *   - TENANT_ADMIN can create any tenant-level role
    */
@@ -100,6 +125,15 @@ export class UsersService {
   ) {
     if (dto.role === UserRole.SUPER_ADMIN) {
       throw new ForbiddenException('SUPER_ADMIN cannot be assigned via this endpoint');
+    }
+
+    // Belt-and-suspenders alongside the DTO's STAFF_ASSIGNABLE_ROLES whitelist —
+    // a User created here never gets a linked Member row, so MEMBER/CHAIRMAN
+    // accounts created through this endpoint would be orphaned.
+    if (dto.role === UserRole.MEMBER || dto.role === UserRole.CHAIRMAN) {
+      throw new BadRequestException(
+        'Members and Chairmen must be created via the Members Management flow, not the Staff Users endpoint.',
+      );
     }
 
     // Role hierarchy enforcement — DTO validation only confirms dto.role is an
@@ -152,6 +186,26 @@ export class UsersService {
       `users.create:${user.id}`,
     );
 
+    // Email fallback alongside SMS — if the phone number on file is wrong or
+    // unreachable, the admin/user isn't stuck waiting on a TENANT_ADMIN to run
+    // reveal-temp-password. Mirrors the SMS TEMP_PASSWORD pattern: the plaintext
+    // never enters the Redis-backed payload, only the encrypted blob + tenant scope.
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } });
+    const appUrl = this.config.get<string>('app.appUrl') ?? 'http://localhost:3000';
+    const emailEnqueued = await this.enqueueEmailAwaited(
+      {
+        type: 'STAFF_ACCOUNT_CREATED',
+        to: user.email,
+        firstName: user.firstName,
+        saccoName: tenant?.name ?? 'Beba SACCO',
+        role: user.role,
+        portalUrl: `${appUrl}/login`,
+        encryptedPayload: tempPasswordEncrypted,
+        tenantId,
+      },
+      `users.create.email:${user.id}`,
+    );
+
     await this.auditSafe({
       tenantId,
       actorId: actor.id,
@@ -164,7 +218,7 @@ export class UsersService {
         accountStatus: user.accountStatus,
         createdById: actor.id,
       },
-      metadata: { ipAddress, smsEnqueued },
+      metadata: { ipAddress, smsEnqueued, emailEnqueued },
       ipAddress,
     });
 
@@ -174,6 +228,7 @@ export class UsersService {
         ? 'User created. Temporary password sent via SMS.'
         : 'User created, but SMS enqueue failed. An admin can retrieve it via GET /users/:id/reveal-temp-password.',
       smsEnqueued,
+      emailEnqueued,
       user,
     };
   }
@@ -882,13 +937,17 @@ export class UsersService {
     return { success: true, message: '2FA has been disabled for this user' };
   }
 
-  /** Fire-and-forget audit write — never let an audit failure break the user flow. */
+  /**
+   * Fire-and-forget audit write — never let an audit failure break the user flow.
+   * A dropped entry here breaks the tamper-evident hash chain (SASRA compliance),
+   * so beyond the local log line it's also reported to Sentry — a silent gap in
+   * the chain should never be discoverable only by grepping server logs.
+   */
   private async auditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {
-    await this.audit
-      .create(params)
-      .catch((e: unknown) =>
-        this.logger.error('Audit write failed (non-fatal)', e instanceof Error ? e.stack : e),
-      );
+    await this.audit.create(params).catch((e: unknown) => {
+      this.logger.error('Audit write failed (non-fatal)', e instanceof Error ? e.stack : e);
+      Sentry.captureException(e, { tags: { audit_chain_broken: true, action: params.action } });
+    });
   }
 
   private generateTempPassword(): string {
