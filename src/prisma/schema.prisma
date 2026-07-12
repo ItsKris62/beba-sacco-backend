@@ -34,6 +34,7 @@ model Tenant {
   guarantors            LoanGuarantor[]
   journalEntries        JournalEntry[]
   loans                 Loan[]
+  loanArrearsSnapshots  LoanArrearsSnapshot[]
   loanProducts          LoanProduct[]
   members               Member[]
   pinVerifications      PinVerification[]
@@ -429,6 +430,7 @@ model Loan {
   loanRepayments             LoanRepayment[]
   supportTickets             SupportTicket[]
   transactions               Transaction[]
+  arrearsSnapshots           LoanArrearsSnapshot[]
 
   @@unique([tenantId, loanNumber])
   @@index([tenantId, memberId])
@@ -436,6 +438,24 @@ model Loan {
   @@index([tenantId, status])
   @@index([tenantId, staging])
   @@index([tenantId, staging, arrearsDays])
+  @@schema("public")
+}
+
+model LoanArrearsSnapshot {
+  id           String      @id @default(uuid())
+  tenantId     String
+  loanId       String
+  snapshotDate DateTime    @db.Date
+  arrearsDays  Int
+  staging      LoanStaging
+  capturedAt   DateTime    @default(now())
+  loan         Loan        @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, loanId, snapshotDate])
+  @@index([tenantId, snapshotDate])
+  @@index([tenantId, snapshotDate, staging])
+  @@index([loanId, snapshotDate])
   @@schema("public")
 }
 

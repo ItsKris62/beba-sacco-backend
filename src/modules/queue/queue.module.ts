@@ -26,6 +26,7 @@ import { LoanDisburseProcessor } from './processors/loan-disburse.processor';
 import { EmailProcessor } from './processors/email.processor';
 // Phase 4 processors
 import { InterestAccrualProcessor } from './processors/interest-accrual.processor';
+import { LoanArrearsSnapshotProcessor } from './processors/loan-arrears-snapshot.processor';
 import { MpesaReconciliationProcessor } from './processors/mpesa-reconciliation.processor';
 import { LedgerIntegrityProcessor } from './processors/ledger-integrity.processor';
 import { RepaymentScheduleProcessor } from './processors/repayment-schedule.processor';
@@ -114,6 +115,7 @@ export const QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
 
 export const ADVANCED_FINANCIAL_QUEUE_PROCESSOR_PROVIDERS: Type<unknown>[] = [
   InterestAccrualProcessor,
+  LoanArrearsSnapshotProcessor,
   MpesaReconciliationProcessor,
   LedgerIntegrityProcessor,
   RepaymentScheduleProcessor,
@@ -225,6 +227,16 @@ class QueueStartupDiagnostics implements OnModuleInit {
           '(or PHASE_4_ENABLED=true). Without it, CronOrchestratorService is never registered, so the daily ' +
           'interest-accrual fan-out (and DEFAULTED classification that depends on it) silently never runs. ' +
           'Set both flags together, or leave both unset.',
+      );
+    }
+    if (
+      process.env.ENABLE_LOAN_ARREARS_SNAPSHOT_JOB === 'true' &&
+      !advancedFinancialJobsEnabled
+    ) {
+      throw new Error(
+        'Invalid configuration: ENABLE_LOAN_ARREARS_SNAPSHOT_JOB=true requires ' +
+          'FEATURE_ADVANCED_FINANCIAL_JOBS=true (or PHASE_4_ENABLED=true). Without it, ' +
+          'InterestAccrualProcessor and LoanArrearsSnapshotProcessor are not registered.',
       );
     }
 
@@ -381,6 +393,7 @@ class QueueStartupDiagnostics implements OnModuleInit {
       { name: QUEUE_NAMES.SMS },
       // Phase 4
       { name: QUEUE_NAMES.INTEREST_ACCRUAL },
+      { name: QUEUE_NAMES.LOAN_ARREARS_SNAPSHOT },
       { name: QUEUE_NAMES.REPAYMENT_SCHEDULE },
       { name: QUEUE_NAMES.MPESA_RECONCILIATION },
       { name: QUEUE_NAMES.LEDGER_INTEGRITY },

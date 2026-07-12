@@ -10,6 +10,7 @@ import { LoansService } from '../../loans/loans.service';
 import { StorageService } from '../../storage/storage.service';
 import { AccountsService } from '../../accounts/accounts.service';
 import { LedgerService } from '../../accounting/ledger.service';
+import { IdempotencyService } from '../../../common/services/idempotency.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 
 // ─── Stubs ────────────────────────────────────────────────────────────────────
@@ -36,6 +37,7 @@ const mockLoans = { respondAsGuarantor: jest.fn(), apply: jest.fn() };
 const mockStorage = { getUploadUrl: jest.fn() };
 const mockAccounts = {};
 const mockLedger = { postEntry: jest.fn() };
+const mockIdempotency = {};
 const mockDisbursementQueue = { add: jest.fn() };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -99,6 +101,7 @@ describe('MemberPortalService.getLoanDetail()', () => {
         { provide: StorageService, useValue: mockStorage },
         { provide: AccountsService, useValue: mockAccounts },
         { provide: LedgerService, useValue: mockLedger },
+        { provide: IdempotencyService, useValue: mockIdempotency },
         { provide: getQueueToken(QUEUE_NAMES.MPESA_DISBURSEMENT), useValue: mockDisbursementQueue },
       ],
     }).compile();

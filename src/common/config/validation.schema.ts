@@ -40,6 +40,7 @@ export const validationSchema = Joi.object({
   DATABASE_DIRECT_URL: Joi.string().optional(),
   WORKER_MODE: Joi.boolean().truthy('true').falsy('false').default(false),
   FEATURE_ADVANCED_FINANCIAL_JOBS: Joi.boolean().truthy('true').falsy('false').default(false),
+  ENABLE_LOAN_ARREARS_SNAPSHOT_JOB: Joi.boolean().truthy('true').falsy('false').default(false),
   PHASE_4_ENABLED: Joi.boolean().truthy('true').falsy('false').optional(),
 
   // ── JWT ────────────────────────────────────────────────────────────────────

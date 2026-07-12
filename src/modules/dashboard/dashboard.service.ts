@@ -1,7 +1,24 @@
-import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import {
+  AccountStatus,
+  GuarantorStatus,
+  JournalEntryStatus,
+  KycStatus,
+  LoanStaging,
+  LoanStatus,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { MemberDashboardDto } from '../../common/dto/member-dashboard.dto';
+import {
+  DashboardDrilldownQueryDto,
+  DashboardDrilldownSource,
+  DelinquencyTrendsQueryDto,
+  GuarantorCorrelationQueryDto,
+} from './dto/dashboard-drilldown.dto';
+
+export const MIN_GUARANTEES_FOR_CORRELATION = 5;
 
 export interface DashboardReports {
   loansByStatus: Array<{ status: string; count: number; totalAmount: number }>;
@@ -52,10 +69,64 @@ export interface MpesaHeatmap {
   buckets: Array<{ day: string; hour: number; totalAmount: number; transactionCount: number }>;
 }
 
+export interface DelinquencyTrendPoint {
+  date: string;
+  totalLoans: number;
+  delinquentLoans: number;
+  watchlistLoans: number;
+  nplLoans: number;
+  averageArrearsDays: number;
+  par30Rate: number;
+}
+
+export interface DelinquencyTrends {
+  from: string;
+  to: string;
+  loanProductId?: string;
+  points: DelinquencyTrendPoint[];
+}
+
+export interface GuarantorCorrelationRow {
+  memberId: string;
+  memberNumber: string;
+  name: string;
+  totalGuarantees: number;
+  defaultedGuarantees: number;
+  defaultCorrelationRate: number;
+  totalGuaranteedAmount: number;
+  recoveredAmount: number;
+  activeGuarantees: number;
+  defaultedActiveGuarantees: number;
+  closedGuarantees: number;
+}
+
+export interface GuarantorCorrelationResponse {
+  minGuaranteesForCorrelation: number;
+  ranked: GuarantorCorrelationRow[];
+  belowThreshold?: GuarantorCorrelationRow[];
+  excludedBelowThreshold: number;
+  generatedAt: string;
+  defaultEvidenceDefinition: string;
+}
+
+export interface DashboardDrilldownResponse {
+  source: DashboardDrilldownSource;
+  data: Array<Record<string, unknown>>;
+  meta: { total: number; page: number; limit: number; totalPages: number };
+}
+
 const MEMBER_DASH_CACHE_KEY = (tenantId: string, userId: string) =>
   `DASH:MEMBER:${tenantId}:${userId}:v4`;
 const MEMBER_DASH_STALE_KEY = (tenantId: string, userId: string) =>
   `DASH:MEMBER:${tenantId}:${userId}:stale:v4`;
+
+function toDateOnly(date: string): Date {
+  return new Date(`${date.slice(0, 10)}T00:00:00.000Z`);
+}
+
+function isoDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
 
 @Injectable()
 export class DashboardService {
@@ -131,6 +202,903 @@ export class DashboardService {
     const heatmap = await this.computeMpesaHeatmap(tenantId, days);
     await this.redis.set(cacheKey, JSON.stringify(heatmap), 120); // 2 min
     return heatmap;
+  }
+
+  async getDelinquencyTrends(
+    tenantId: string,
+    query: DelinquencyTrendsQueryDto,
+  ): Promise<DelinquencyTrends> {
+    const today = new Date();
+    const defaultFrom = new Date(today);
+    defaultFrom.setUTCDate(defaultFrom.getUTCDate() - 29);
+
+    const from = query.from ? query.from.slice(0, 10) : isoDate(defaultFrom);
+    const to = query.to ? query.to.slice(0, 10) : isoDate(today);
+    const fromDate = toDateOnly(from);
+    const toDate = toDateOnly(to);
+
+    if (fromDate > toDate) {
+      throw new BadRequestException('from must be before or equal to to');
+    }
+
+    const productFilter = query.loanProductId
+      ? Prisma.sql`AND l."loanProductId" = ${query.loanProductId}`
+      : Prisma.empty;
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        date: Date;
+        total_loans: bigint;
+        delinquent_loans: bigint;
+        watchlist_loans: bigint;
+        npl_loans: bigint;
+        avg_arrears_days: string | null;
+      }>
+    >`
+      SELECT
+        s."snapshotDate"::date AS date,
+        COUNT(*) AS total_loans,
+        COUNT(*) FILTER (WHERE s."arrearsDays" > 0) AS delinquent_loans,
+        COUNT(*) FILTER (WHERE s.staging = 'WATCHLIST') AS watchlist_loans,
+        COUNT(*) FILTER (WHERE s.staging = 'NPL') AS npl_loans,
+        AVG(s."arrearsDays") AS avg_arrears_days
+      FROM "LoanArrearsSnapshot" s
+      JOIN "Loan" l
+        ON l.id = s."loanId"
+       AND l."tenantId" = s."tenantId"
+      WHERE s."tenantId" = ${tenantId}
+        AND s."snapshotDate" BETWEEN ${fromDate} AND ${toDate}
+        ${productFilter}
+      GROUP BY s."snapshotDate"
+      ORDER BY s."snapshotDate" ASC
+    `;
+
+    return {
+      from,
+      to,
+      ...(query.loanProductId && { loanProductId: query.loanProductId }),
+      points: rows.map((row) => {
+        const totalLoans = Number(row.total_loans);
+        const watchlistLoans = Number(row.watchlist_loans);
+        const nplLoans = Number(row.npl_loans);
+        return {
+          date: isoDate(row.date),
+          totalLoans,
+          delinquentLoans: Number(row.delinquent_loans),
+          watchlistLoans,
+          nplLoans,
+          averageArrearsDays: Math.round(Number(row.avg_arrears_days ?? 0) * 100) / 100,
+          par30Rate:
+            totalLoans > 0
+              ? Math.round(((watchlistLoans + nplLoans) / totalLoans) * 10000) / 100
+              : 0,
+        };
+      }),
+    };
+  }
+
+  async getGuarantorCorrelation(
+    tenantId: string,
+    query: GuarantorCorrelationQueryDto = {},
+  ): Promise<GuarantorCorrelationResponse> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        memberId: string;
+        memberNumber: string;
+        firstName: string;
+        lastName: string;
+        totalGuarantees: bigint;
+        defaultedGuarantees: bigint;
+        totalGuaranteedAmount: string | null;
+        recoveredAmount: string | null;
+        activeGuarantees: bigint;
+        defaultedActiveGuarantees: bigint;
+        closedGuarantees: bigint;
+      }>
+    >`
+      SELECT
+        m.id AS "memberId",
+        m."memberNumber" AS "memberNumber",
+        u."firstName" AS "firstName",
+        u."lastName" AS "lastName",
+        COUNT(g.id) AS "totalGuarantees",
+        COUNT(g.id) FILTER (
+          WHERE l.status IN ('DEFAULTED', 'WRITTEN_OFF')
+             OR l.staging = 'NPL'
+             OR g."recoveredAmount" > 0
+             OR g."recoveryDate" IS NOT NULL
+        ) AS "defaultedGuarantees",
+        COALESCE(SUM(g."guaranteedAmount"), 0)::text AS "totalGuaranteedAmount",
+        COALESCE(SUM(g."recoveredAmount"), 0)::text AS "recoveredAmount",
+        COUNT(g.id) FILTER (
+          WHERE l.status IN (
+            'PENDING_GUARANTORS',
+            'PENDING_REVIEW',
+            'PENDING_APPROVAL',
+            'APPROVED',
+            'DISBURSED',
+            'ACTIVE'
+          )
+        ) AS "activeGuarantees",
+        COUNT(g.id) FILTER (
+          WHERE l.status = 'DEFAULTED'
+             OR (l.status NOT IN ('FULLY_PAID', 'WRITTEN_OFF') AND l.staging = 'NPL')
+        ) AS "defaultedActiveGuarantees",
+        COUNT(g.id) FILTER (
+          WHERE l.status IN ('FULLY_PAID', 'WRITTEN_OFF')
+        ) AS "closedGuarantees"
+      FROM "Guarantor" g
+      JOIN "Loan" l ON l.id = g."loanId" AND l."tenantId" = ${tenantId}
+      JOIN "Member" m ON m.id = g."memberId" AND m."tenantId" = ${tenantId}
+      JOIN "User" u ON u.id = m."userId" AND u."tenantId" = ${tenantId}
+      WHERE g."tenantId" = ${tenantId}
+        AND g.status = 'ACCEPTED'
+      GROUP BY m.id, m."memberNumber", u."firstName", u."lastName"
+    `;
+
+    const mapped = rows
+      .map((row) => {
+        const totalGuarantees = Number(row.totalGuarantees);
+        const defaultedGuarantees = Number(row.defaultedGuarantees);
+        return {
+          memberId: row.memberId,
+          memberNumber: row.memberNumber,
+          name: `${row.firstName} ${row.lastName}`,
+          totalGuarantees,
+          defaultedGuarantees,
+          defaultCorrelationRate:
+            totalGuarantees > 0 ? Math.round((defaultedGuarantees / totalGuarantees) * 10000) / 100 : 0,
+          totalGuaranteedAmount: Number(row.totalGuaranteedAmount ?? 0),
+          recoveredAmount: Number(row.recoveredAmount ?? 0),
+          activeGuarantees: Number(row.activeGuarantees),
+          defaultedActiveGuarantees: Number(row.defaultedActiveGuarantees),
+          closedGuarantees: Number(row.closedGuarantees),
+        };
+      })
+      .sort((a, b) => b.defaultCorrelationRate - a.defaultCorrelationRate || b.totalGuarantees - a.totalGuarantees);
+
+    const ranked = mapped.filter((row) => row.totalGuarantees >= MIN_GUARANTEES_FOR_CORRELATION);
+    const belowThreshold = mapped.filter((row) => row.totalGuarantees < MIN_GUARANTEES_FOR_CORRELATION);
+    const includeBelowThreshold = query.includeBelowThreshold === 'true';
+
+    return {
+      minGuaranteesForCorrelation: MIN_GUARANTEES_FOR_CORRELATION,
+      ranked,
+      ...(includeBelowThreshold && { belowThreshold }),
+      excludedBelowThreshold: belowThreshold.length,
+      generatedAt: new Date().toISOString(),
+      defaultEvidenceDefinition:
+        'status IN (DEFAULTED, WRITTEN_OFF) OR staging = NPL OR recoveredAmount > 0 OR recoveryDate IS NOT NULL',
+    };
+  }
+
+  async getDrilldown(tenantId: string, query: DashboardDrilldownQueryDto): Promise<DashboardDrilldownResponse> {
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(100, Math.max(1, query.limit ?? 20));
+    const skip = (page - 1) * limit;
+
+    switch (query.source) {
+      case DashboardDrilldownSource.TRANSACTION:
+        return this.getTransactionDrilldown(tenantId, query, page, limit, skip);
+      case DashboardDrilldownSource.MPESA:
+        return this.getMpesaDrilldown(tenantId, query, page, limit, skip);
+      case DashboardDrilldownSource.LOAN:
+        return this.getLoanDrilldown(tenantId, query, page, limit, skip);
+      case DashboardDrilldownSource.GUARANTOR:
+        return this.getGuarantorDrilldown(tenantId, query, page, limit, skip);
+      case DashboardDrilldownSource.MEMBER:
+        return this.getMemberDrilldown(tenantId, query, page, limit, skip);
+      case DashboardDrilldownSource.JOURNAL:
+        return this.getJournalDrilldown(tenantId, query, page, limit, skip);
+      default:
+        throw new BadRequestException('Unsupported dashboard drill-down source');
+    }
+  }
+
+  private buildCreatedAtFilter(query: Pick<DashboardDrilldownQueryDto, 'from' | 'to'>) {
+    if (!query.from && !query.to) return undefined;
+    return {
+      ...(query.from && { gte: new Date(query.from) }),
+      ...(query.to && { lte: new Date(query.to) }),
+    };
+  }
+
+  private buildLoanDateFilter(query: DashboardDrilldownQueryDto): Prisma.LoanWhereInput {
+    const dateFilter = this.buildCreatedAtFilter(query);
+    if (!dateFilter) return {};
+    switch (query.loanDateField) {
+      case 'appliedAt':
+        return { appliedAt: dateFilter };
+      case 'disbursedAt':
+        return { disbursedAt: dateFilter };
+      default:
+        return { createdAt: dateFilter };
+    }
+  }
+
+  private meta(total: number, page: number, limit: number) {
+    return { total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  private async getTransactionDrilldown(
+    tenantId: string,
+    query: DashboardDrilldownQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<DashboardDrilldownResponse> {
+    const createdAt = this.buildCreatedAtFilter(query);
+    const loanWhere: Prisma.LoanWhereInput = {
+      ...(query.loanStatus && { status: query.loanStatus }),
+      ...(query.loanStaging && { staging: query.loanStaging }),
+      ...(query.loanProductId && { loanProductId: query.loanProductId }),
+    };
+    const where: Prisma.TransactionWhereInput = {
+      tenantId,
+      ...(query.type && { type: query.type }),
+      ...(query.status && { status: query.status }),
+      ...(createdAt && { createdAt }),
+      ...(query.accountType && { account: { accountType: query.accountType } }),
+      ...(Object.keys(loanWhere).length > 0 && { loan: loanWhere }),
+      ...(query.search && {
+        OR: [
+          { reference: { contains: query.search, mode: 'insensitive' } },
+          { account: { accountNumber: { contains: query.search, mode: 'insensitive' } } },
+        ],
+      }),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.transaction.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          account: {
+            select: {
+              accountNumber: true,
+              accountType: true,
+              member: {
+                select: {
+                  memberNumber: true,
+                  user: { select: { firstName: true, lastName: true } },
+                },
+              },
+            },
+          },
+          loan: { select: { loanNumber: true, status: true, staging: true } },
+        },
+      }),
+      this.prisma.transaction.count({ where }),
+    ]);
+
+    return {
+      source: DashboardDrilldownSource.TRANSACTION,
+      data: rows.map((row) => ({
+        id: row.id,
+        reference: row.reference,
+        type: row.type,
+        status: row.status,
+        amount: Number(row.amount),
+        balanceAfter: Number(row.balanceAfter),
+        description: row.description,
+        createdAt: row.createdAt,
+        accountNumber: row.account.accountNumber,
+        accountType: row.account.accountType,
+        memberNumber: row.account.member.memberNumber,
+        memberName: `${row.account.member.user.firstName} ${row.account.member.user.lastName}`,
+        loanNumber: row.loan?.loanNumber ?? null,
+      })),
+      meta: this.meta(total, page, limit),
+    };
+  }
+
+  private async getMpesaDrilldown(
+    tenantId: string,
+    query: DashboardDrilldownQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<DashboardDrilldownResponse> {
+    const createdAt = this.buildCreatedAtFilter(query);
+    const where: Prisma.MpesaTransactionWhereInput = {
+      tenantId,
+      ...(query.status && { status: query.status }),
+      ...(query.mpesaType && { type: query.mpesaType }),
+      ...(createdAt && { createdAt }),
+      ...(query.search && {
+        OR: [
+          { reference: { contains: query.search, mode: 'insensitive' } },
+          { mpesaReceiptNumber: { contains: query.search, mode: 'insensitive' } },
+          { phoneNumber: { contains: query.search, mode: 'insensitive' } },
+        ],
+      }),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.mpesaTransaction.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          member: {
+            select: {
+              memberNumber: true,
+              user: { select: { firstName: true, lastName: true } },
+            },
+          },
+          transaction: { select: { reference: true, type: true } },
+        },
+      }),
+      this.prisma.mpesaTransaction.count({ where }),
+    ]);
+
+    return {
+      source: DashboardDrilldownSource.MPESA,
+      data: rows.map((row) => ({
+        id: row.id,
+        reference: row.reference,
+        type: row.type,
+        status: row.status,
+        amount: Number(row.amount),
+        phoneNumber: row.phoneNumber,
+        mpesaReceiptNumber: row.mpesaReceiptNumber,
+        description: row.description,
+        createdAt: row.createdAt,
+        transactionDate: row.transactionDate,
+        memberNumber: row.member?.memberNumber ?? null,
+        memberName: row.member ? `${row.member.user.firstName} ${row.member.user.lastName}` : null,
+        ledgerReference: row.transaction?.reference ?? null,
+      })),
+      meta: this.meta(total, page, limit),
+    };
+  }
+
+  private loanAgingWhere(query: DashboardDrilldownQueryDto): Prisma.LoanWhereInput {
+    switch (query.agingBucket) {
+      case 'current':
+        return { status: LoanStatus.ACTIVE, arrearsDays: { lte: 0 } };
+      case 'arrears':
+        return { status: LoanStatus.ACTIVE, arrearsDays: { gt: 0 } };
+      case 'days1to30':
+        return { status: LoanStatus.ACTIVE, arrearsDays: { gte: 1, lte: 30 } };
+      case 'days31to60':
+        return { status: LoanStatus.ACTIVE, arrearsDays: { gte: 31, lte: 60 } };
+      case 'days61to90':
+        return { status: LoanStatus.ACTIVE, arrearsDays: { gte: 61, lte: 90 } };
+      case 'days90Plus':
+        return { status: LoanStatus.ACTIVE, arrearsDays: { gt: 90 } };
+      case 'par30':
+        return { status: LoanStatus.ACTIVE, staging: { in: [LoanStaging.WATCHLIST, LoanStaging.NPL] } };
+      default:
+        return {};
+    }
+  }
+
+  private snapshotAgingWhere(query: DashboardDrilldownQueryDto): Prisma.LoanArrearsSnapshotWhereInput {
+    switch (query.agingBucket) {
+      case 'current':
+        return { arrearsDays: { lte: 0 } };
+      case 'arrears':
+        return { arrearsDays: { gt: 0 } };
+      case 'days1to30':
+        return { arrearsDays: { gte: 1, lte: 30 } };
+      case 'days31to60':
+        return { arrearsDays: { gte: 31, lte: 60 } };
+      case 'days61to90':
+        return { arrearsDays: { gte: 61, lte: 90 } };
+      case 'days90Plus':
+        return { arrearsDays: { gt: 90 } };
+      case 'par30':
+        return { staging: { in: [LoanStaging.WATCHLIST, LoanStaging.NPL] } };
+      default:
+        return {};
+    }
+  }
+
+  private async getCoverageLoanIds(
+    tenantId: string,
+    coverage: string,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<{ ids: string[]; total: number }> {
+    if (!['full', 'partial', 'none'].includes(coverage)) {
+      return { ids: [], total: 0 };
+    }
+
+    const having =
+      coverage === 'full'
+        ? Prisma.sql`COALESCE(SUM(g."guaranteedAmount"), 0) >= l."principalAmount"`
+        : coverage === 'partial'
+          ? Prisma.sql`COALESCE(SUM(g."guaranteedAmount"), 0) > 0 AND COALESCE(SUM(g."guaranteedAmount"), 0) < l."principalAmount"`
+          : Prisma.sql`COALESCE(SUM(g."guaranteedAmount"), 0) = 0`;
+
+    const totalRows = await this.prisma.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*) AS count
+      FROM (
+        SELECT l.id
+        FROM "Loan" l
+        LEFT JOIN "Guarantor" g ON g."loanId" = l.id AND g."tenantId" = ${tenantId} AND g.status = 'ACCEPTED'
+        WHERE l."tenantId" = ${tenantId} AND l.status = 'ACTIVE'
+        GROUP BY l.id, l."principalAmount"
+        HAVING ${having}
+      ) sub
+    `;
+    const idRows = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT l.id
+      FROM "Loan" l
+      LEFT JOIN "Guarantor" g ON g."loanId" = l.id AND g."tenantId" = ${tenantId} AND g.status = 'ACCEPTED'
+      WHERE l."tenantId" = ${tenantId} AND l.status = 'ACTIVE'
+      GROUP BY l.id, l."principalAmount"
+      HAVING ${having}
+      ORDER BY l."updatedAt" DESC
+      LIMIT ${limit} OFFSET ${skip}
+    `;
+
+    return { ids: idRows.map((row) => row.id), total: Number(totalRows[0]?.count ?? 0) };
+  }
+
+  private async getCoverageGuarantorIds(
+    tenantId: string,
+    coverage: string,
+    limit: number,
+    skip: number,
+  ): Promise<{ ids: string[]; total: number }> {
+    if (!['full', 'partial'].includes(coverage)) {
+      return { ids: [], total: 0 };
+    }
+
+    const having =
+      coverage === 'full'
+        ? Prisma.sql`COALESCE(SUM(g2."guaranteedAmount"), 0) >= l."principalAmount"`
+        : Prisma.sql`COALESCE(SUM(g2."guaranteedAmount"), 0) > 0 AND COALESCE(SUM(g2."guaranteedAmount"), 0) < l."principalAmount"`;
+
+    const totalRows = await this.prisma.$queryRaw<Array<{ count: bigint }>>`
+      WITH coverage_loans AS (
+        SELECT l.id
+        FROM "Loan" l
+        LEFT JOIN "Guarantor" g2 ON g2."loanId" = l.id AND g2."tenantId" = ${tenantId} AND g2.status = 'ACCEPTED'
+        WHERE l."tenantId" = ${tenantId} AND l.status = 'ACTIVE'
+        GROUP BY l.id, l."principalAmount"
+        HAVING ${having}
+      )
+      SELECT COUNT(g.id) AS count
+      FROM "Guarantor" g
+      JOIN coverage_loans cl ON cl.id = g."loanId"
+      WHERE g."tenantId" = ${tenantId}
+        AND g.status = 'ACCEPTED'
+    `;
+    const idRows = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      WITH coverage_loans AS (
+        SELECT l.id
+        FROM "Loan" l
+        LEFT JOIN "Guarantor" g2 ON g2."loanId" = l.id AND g2."tenantId" = ${tenantId} AND g2.status = 'ACCEPTED'
+        WHERE l."tenantId" = ${tenantId} AND l.status = 'ACTIVE'
+        GROUP BY l.id, l."principalAmount"
+        HAVING ${having}
+      )
+      SELECT g.id
+      FROM "Guarantor" g
+      JOIN coverage_loans cl ON cl.id = g."loanId"
+      WHERE g."tenantId" = ${tenantId}
+        AND g.status = 'ACCEPTED'
+      ORDER BY g."createdAt" DESC
+      LIMIT ${limit} OFFSET ${skip}
+    `;
+
+    return { ids: idRows.map((row) => row.id), total: Number(totalRows[0]?.count ?? 0) };
+  }
+
+  private async getLoanDrilldown(
+    tenantId: string,
+    query: DashboardDrilldownQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<DashboardDrilldownResponse> {
+    if (query.snapshotDate) {
+      return this.getLoanSnapshotDrilldown(tenantId, query, page, limit, skip);
+    }
+
+    if (query.coverage) {
+      const { ids, total } = await this.getCoverageLoanIds(tenantId, query.coverage, page, limit, skip);
+      const rows = ids.length
+        ? await this.prisma.loan.findMany({
+            where: { tenantId, id: { in: ids } },
+            include: {
+              member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
+              loanProduct: { select: { name: true } },
+              guarantors: { where: { status: GuarantorStatus.ACCEPTED }, select: { id: true } },
+            },
+            orderBy: { updatedAt: 'desc' },
+          })
+        : [];
+      return {
+        source: DashboardDrilldownSource.LOAN,
+        data: rows.map((row) => this.mapLoanDrilldownRow(row)),
+        meta: this.meta(total, page, limit),
+      };
+    }
+
+    const where: Prisma.LoanWhereInput = {
+      tenantId,
+      ...(query.loanStatus && { status: query.loanStatus }),
+      ...(query.loanStaging && { staging: query.loanStaging }),
+      ...(query.loanProductId && { loanProductId: query.loanProductId }),
+      ...this.buildLoanDateFilter(query),
+      ...this.loanAgingWhere(query),
+      ...(query.search && {
+        OR: [
+          { loanNumber: { contains: query.search, mode: 'insensitive' } },
+          { member: { memberNumber: { contains: query.search, mode: 'insensitive' } } },
+        ],
+      }),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.loan.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { updatedAt: 'desc' },
+        include: {
+          member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
+          loanProduct: { select: { name: true } },
+          guarantors: { where: { status: GuarantorStatus.ACCEPTED }, select: { id: true } },
+        },
+      }),
+      this.prisma.loan.count({ where }),
+    ]);
+
+    return {
+      source: DashboardDrilldownSource.LOAN,
+      data: rows.map((row) => this.mapLoanDrilldownRow(row)),
+      meta: this.meta(total, page, limit),
+    };
+  }
+
+  private async getLoanSnapshotDrilldown(
+    tenantId: string,
+    query: DashboardDrilldownQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<DashboardDrilldownResponse> {
+    const snapshotDate = toDateOnly(query.snapshotDate!);
+    const where: Prisma.LoanArrearsSnapshotWhereInput = {
+      tenantId,
+      snapshotDate,
+      ...(query.loanStaging && { staging: query.loanStaging }),
+      ...this.snapshotAgingWhere(query),
+      loan: {
+        ...(query.loanProductId && { loanProductId: query.loanProductId }),
+        ...(query.loanStatus && { status: query.loanStatus }),
+        ...(query.search && {
+          OR: [
+            { loanNumber: { contains: query.search, mode: 'insensitive' } },
+            { member: { memberNumber: { contains: query.search, mode: 'insensitive' } } },
+          ],
+        }),
+      },
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.loanArrearsSnapshot.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ arrearsDays: 'desc' }, { capturedAt: 'desc' }],
+        include: {
+          loan: {
+            include: {
+              member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
+              loanProduct: { select: { name: true } },
+              guarantors: { where: { status: GuarantorStatus.ACCEPTED }, select: { id: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.loanArrearsSnapshot.count({ where }),
+    ]);
+
+    return {
+      source: DashboardDrilldownSource.LOAN,
+      data: rows.map((row) => this.mapLoanSnapshotDrilldownRow(row)),
+      meta: this.meta(total, page, limit),
+    };
+  }
+
+  private mapLoanSnapshotDrilldownRow(row: {
+    id: string;
+    snapshotDate: Date;
+    staging: string;
+    arrearsDays: number;
+    capturedAt: Date;
+    loan: {
+      id: string;
+      loanNumber: string;
+      status: LoanStatus;
+      principalAmount: Prisma.Decimal;
+      outstandingBalance: Prisma.Decimal;
+      appliedAt: Date;
+      disbursedAt: Date | null;
+      member: { memberNumber: string; user: { firstName: string; lastName: string } };
+      loanProduct: { name: string };
+      guarantors: Array<{ id: string }>;
+    };
+  }): Record<string, unknown> {
+    return {
+      id: row.loan.id,
+      snapshotId: row.id,
+      snapshotDate: isoDate(row.snapshotDate),
+      capturedAt: row.capturedAt,
+      loanNumber: row.loan.loanNumber,
+      status: row.loan.status,
+      staging: row.staging,
+      principalAmount: Number(row.loan.principalAmount),
+      outstandingBalance: Number(row.loan.outstandingBalance),
+      arrearsDays: row.arrearsDays,
+      appliedAt: row.loan.appliedAt,
+      disbursedAt: row.loan.disbursedAt,
+      memberNumber: row.loan.member.memberNumber,
+      memberName: `${row.loan.member.user.firstName} ${row.loan.member.user.lastName}`,
+      loanProductName: row.loan.loanProduct.name,
+      acceptedGuarantors: row.loan.guarantors.length,
+    };
+  }
+
+  private mapLoanDrilldownRow(row: {
+    id: string;
+    loanNumber: string;
+    status: LoanStatus;
+    staging: string;
+    principalAmount: Prisma.Decimal;
+    outstandingBalance: Prisma.Decimal;
+    arrearsDays: number;
+    appliedAt: Date;
+    disbursedAt: Date | null;
+    member: { memberNumber: string; user: { firstName: string; lastName: string } };
+    loanProduct: { name: string };
+    guarantors: Array<{ id: string }>;
+  }): Record<string, unknown> {
+    return {
+      id: row.id,
+      loanNumber: row.loanNumber,
+      status: row.status,
+      staging: row.staging,
+      principalAmount: Number(row.principalAmount),
+      outstandingBalance: Number(row.outstandingBalance),
+      arrearsDays: row.arrearsDays,
+      appliedAt: row.appliedAt,
+      disbursedAt: row.disbursedAt,
+      memberNumber: row.member.memberNumber,
+      memberName: `${row.member.user.firstName} ${row.member.user.lastName}`,
+      loanProductName: row.loanProduct.name,
+      acceptedGuarantors: row.guarantors.length,
+    };
+  }
+
+  private async getGuarantorDrilldown(
+    tenantId: string,
+    query: DashboardDrilldownQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<DashboardDrilldownResponse> {
+    const createdAt = this.buildCreatedAtFilter(query);
+    const include = {
+      member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
+      loan: {
+        select: {
+          loanNumber: true,
+          status: true,
+          staging: true,
+          member: { select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } } },
+        },
+      },
+    } satisfies Prisma.LoanGuarantorInclude;
+
+    if (query.coverage) {
+      const { ids, total } = await this.getCoverageGuarantorIds(tenantId, query.coverage, limit, skip);
+      const rows = ids.length
+        ? await this.prisma.loanGuarantor.findMany({
+            where: { tenantId, id: { in: ids } },
+            orderBy: { createdAt: 'desc' },
+            include,
+          })
+        : [];
+      return {
+        source: DashboardDrilldownSource.GUARANTOR,
+        data: rows.map((row) => ({
+          id: row.id,
+          status: row.status,
+          guaranteedAmount: Number(row.guaranteedAmount),
+          recoveredAmount: Number(row.recoveredAmount),
+          invitedAt: row.invitedAt,
+          respondedAt: row.respondedAt,
+          recoveryDate: row.recoveryDate,
+          guarantorMemberNumber: row.member.memberNumber,
+          guarantorName: `${row.member.user.firstName} ${row.member.user.lastName}`,
+          loanNumber: row.loan.loanNumber,
+          loanStatus: row.loan.status,
+          loanStaging: row.loan.staging,
+          borrowerMemberNumber: row.loan.member.memberNumber,
+          borrowerName: `${row.loan.member.user.firstName} ${row.loan.member.user.lastName}`,
+        })),
+        meta: this.meta(total, page, limit),
+      };
+    }
+
+    const loanWhere: Prisma.LoanWhereInput = {
+      ...(query.loanStatus && { status: query.loanStatus }),
+      ...(query.loanStaging && { staging: query.loanStaging }),
+      ...(query.loanProductId && { loanProductId: query.loanProductId }),
+    };
+    const where: Prisma.LoanGuarantorWhereInput = {
+      tenantId,
+      ...(query.guarantorStatus && { status: query.guarantorStatus }),
+      ...(createdAt && { createdAt }),
+      ...(Object.keys(loanWhere).length > 0 && { loan: loanWhere }),
+      ...(query.search && {
+        OR: [
+          { member: { memberNumber: { contains: query.search, mode: 'insensitive' } } },
+          { loan: { loanNumber: { contains: query.search, mode: 'insensitive' } } },
+        ],
+      }),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.loanGuarantor.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include,
+      }),
+      this.prisma.loanGuarantor.count({ where }),
+    ]);
+
+    return {
+      source: DashboardDrilldownSource.GUARANTOR,
+      data: rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        guaranteedAmount: Number(row.guaranteedAmount),
+        recoveredAmount: Number(row.recoveredAmount),
+        invitedAt: row.invitedAt,
+        respondedAt: row.respondedAt,
+        recoveryDate: row.recoveryDate,
+        guarantorMemberNumber: row.member.memberNumber,
+        guarantorName: `${row.member.user.firstName} ${row.member.user.lastName}`,
+        loanNumber: row.loan.loanNumber,
+        loanStatus: row.loan.status,
+        loanStaging: row.loan.staging,
+        borrowerMemberNumber: row.loan.member.memberNumber,
+        borrowerName: `${row.loan.member.user.firstName} ${row.loan.member.user.lastName}`,
+      })),
+      meta: this.meta(total, page, limit),
+    };
+  }
+
+  private async getMemberDrilldown(
+    tenantId: string,
+    query: DashboardDrilldownQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<DashboardDrilldownResponse> {
+    const createdAt = this.buildCreatedAtFilter(query);
+    const segmentWhere: Prisma.MemberWhereInput =
+      query.membershipSegment === 'active'
+        ? { user: { accountStatus: AccountStatus.ACTIVE } }
+        : query.membershipSegment === 'pending'
+          ? { kycStatus: KycStatus.PENDING_REVIEW }
+          : query.membershipSegment === 'other'
+            ? { NOT: [{ user: { accountStatus: AccountStatus.ACTIVE } }, { kycStatus: KycStatus.PENDING_REVIEW }] }
+            : {};
+    const where: Prisma.MemberWhereInput = {
+      tenantId,
+      ...(createdAt && { joinedAt: createdAt }),
+      ...segmentWhere,
+      ...(query.search && {
+        OR: [
+          { memberNumber: { contains: query.search, mode: 'insensitive' } },
+          { user: { firstName: { contains: query.search, mode: 'insensitive' } } },
+          { user: { lastName: { contains: query.search, mode: 'insensitive' } } },
+          { user: { email: { contains: query.search, mode: 'insensitive' } } },
+        ],
+      }),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.member.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { joinedAt: 'desc' },
+        include: {
+          user: { select: { firstName: true, lastName: true, email: true, accountStatus: true } },
+          accounts: { select: { accountType: true, balance: true, isActive: true } },
+        },
+      }),
+      this.prisma.member.count({ where }),
+    ]);
+
+    return {
+      source: DashboardDrilldownSource.MEMBER,
+      data: rows.map((row) => ({
+        id: row.id,
+        memberNumber: row.memberNumber,
+        name: `${row.user.firstName} ${row.user.lastName}`,
+        email: row.user.email,
+        accountStatus: row.user.accountStatus,
+        kycStatus: row.kycStatus,
+        isActive: row.isActive,
+        joinedAt: row.joinedAt,
+        accounts: row.accounts.map((account) => ({
+          accountType: account.accountType,
+          balance: Number(account.balance),
+          isActive: account.isActive,
+        })),
+      })),
+      meta: this.meta(total, page, limit),
+    };
+  }
+
+  private async getJournalDrilldown(
+    tenantId: string,
+    query: DashboardDrilldownQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+  ): Promise<DashboardDrilldownResponse> {
+    const createdAt = this.buildCreatedAtFilter(query);
+    const where: Prisma.JournalEntryWhereInput = {
+      tenantId,
+      ...(query.journalType && { type: query.journalType }),
+      status: query.journalStatus ?? JournalEntryStatus.POSTED,
+      ...(createdAt && { createdAt }),
+      ...(query.creditAccountType && {
+        postings: { some: { creditAccount: { type: query.creditAccountType } } },
+      }),
+      ...(query.search && {
+        OR: [
+          { entryNumber: { contains: query.search, mode: 'insensitive' } },
+          { description: { contains: query.search, mode: 'insensitive' } },
+        ],
+      }),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.journalEntry.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          createdBy: { select: { firstName: true, lastName: true } },
+        },
+      }),
+      this.prisma.journalEntry.count({ where }),
+    ]);
+
+    return {
+      source: DashboardDrilldownSource.JOURNAL,
+      data: rows.map((row) => ({
+        id: row.id,
+        entryNumber: row.entryNumber,
+        type: row.type,
+        status: row.status,
+        description: row.description,
+        totalAmount: Number(row.totalAmount),
+        postedAt: row.postedAt,
+        createdAt: row.createdAt,
+        createdBy: `${row.createdBy.firstName} ${row.createdBy.lastName}`,
+      })),
+      meta: this.meta(total, page, limit),
+    };
   }
 
   private async computeExecutiveOverview(

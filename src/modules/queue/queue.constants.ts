@@ -29,6 +29,7 @@ export const QUEUE_NAMES = {
   SMS: 'sms-queue',
   // Phase 4 – Financial Operations
   INTEREST_ACCRUAL: 'financial.interest-accrual',
+  LOAN_ARREARS_SNAPSHOT: 'financial.loan-arrears-snapshot',
   REPAYMENT_SCHEDULE: 'financial.repayment-schedule',
   MPESA_RECONCILIATION: 'financial.mpesa-reconciliation',
   LEDGER_INTEGRITY: 'financial.ledger-integrity',
@@ -73,6 +74,7 @@ export const GUARANTOR_RECOVERY_NOTICE_JOB = 'guarantor-recovery-notice';
 export const GUARANTOR_DEBIT_JOB = 'guarantor-debit-execute';
 export const APPLY_DAILY_PENALTIES_JOB = 'apply-daily-penalties';
 export const PROCESS_GUARANTOR_FORFEITURE_JOB = 'process-guarantor-forfeiture';
+export const CAPTURE_LOAN_ARREARS_SNAPSHOT_JOB = 'capture-loan-arrears-snapshot';
 export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
 
 // ─── Job payload types ────────────────────────────────────────────────────────
@@ -376,6 +378,14 @@ export interface InterestAccrualJobPayload {
   /** ISO date string (YYYY-MM-DD) – the accrual date, used for idempotency */
   accrualDate: string;
   tenantId: string;
+}
+
+export interface LoanArrearsSnapshotJobPayload {
+  /** EAT business date (YYYY-MM-DD) captured into LoanArrearsSnapshot.snapshotDate */
+  snapshotDate: string;
+  tenantId: string;
+  source?: 'interest-accrual-complete' | 'manual';
+  accrualJobId?: string;
 }
 
 export interface RepaymentScheduleJobPayload {

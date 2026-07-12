@@ -5,11 +5,19 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import {
   DashboardService,
   DashboardReports,
+  type DelinquencyTrends,
+  type DashboardDrilldownResponse,
   type ExecutiveOverview,
   type ExecutiveOverviewRange,
+  type GuarantorCorrelationResponse,
   type GuarantorHealth,
   type MpesaHeatmap,
 } from './dashboard.service';
+import {
+  DashboardDrilldownQueryDto,
+  DelinquencyTrendsQueryDto,
+  GuarantorCorrelationQueryDto,
+} from './dto/dashboard-drilldown.dto';
 import type { AuthenticatedRequest } from '../../common/types/request.types';
 
 const VALID_RANGES: ExecutiveOverviewRange[] = ['30d', '90d', '1y'];
@@ -28,6 +36,14 @@ const VALID_RANGES: ExecutiveOverviewRange[] = ['30d', '90d', '1y'];
 @Controller('admin/dashboard')
 export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
+
+  private requireTenantContext(req: AuthenticatedRequest): string {
+    const tenantId = req.tenant?.id;
+    if (!tenantId) {
+      throw new BadRequestException('Tenant context is required. Select a tenant before using dashboard analytics.');
+    }
+    return tenantId;
+  }
 
   @Get('reports')
   @HttpCode(HttpStatus.OK)
@@ -87,5 +103,65 @@ export class DashboardController {
       throw new BadRequestException('days must be an integer between 1 and 30');
     }
     return this.dashboardService.getMpesaHeatmap(req.tenant.id, parsed);
+  }
+
+  @Get('delinquency-trends')
+  @HttpCode(HttpStatus.OK)
+  @Roles(
+    UserRole.SUPER_ADMIN,
+    UserRole.TENANT_ADMIN,
+    UserRole.MANAGER,
+    UserRole.LOAN_OFFICER,
+    UserRole.AUDITOR,
+  )
+  @ApiOperation({
+    summary: 'Get delinquency trend lines',
+    description:
+      'Returns tenant-scoped daily arrears snapshot aggregates over a date range, optionally filtered by loan product.',
+  })
+  @ApiResponse({ status: 200, description: 'Delinquency trend time series' })
+  async getDelinquencyTrends(
+    @Req() req: AuthenticatedRequest,
+    @Query() query: DelinquencyTrendsQueryDto,
+  ): Promise<DelinquencyTrends> {
+    return this.dashboardService.getDelinquencyTrends(this.requireTenantContext(req), query);
+  }
+
+  @Get('guarantor-correlation')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.AUDITOR)
+  @ApiOperation({
+    summary: 'Get guarantor default correlation analysis',
+    description:
+      'Returns tenant-scoped accepted-guarantee counts by guarantor and ranks guarantors with enough guarantees by default correlation rate.',
+  })
+  @ApiResponse({ status: 200, description: 'Guarantor default correlation analysis' })
+  async getGuarantorCorrelation(
+    @Req() req: AuthenticatedRequest,
+    @Query() query: GuarantorCorrelationQueryDto,
+  ): Promise<GuarantorCorrelationResponse> {
+    return this.dashboardService.getGuarantorCorrelation(this.requireTenantContext(req), query);
+  }
+
+  @Get('drilldown')
+  @HttpCode(HttpStatus.OK)
+  @Roles(
+    UserRole.SUPER_ADMIN,
+    UserRole.TENANT_ADMIN,
+    UserRole.MANAGER,
+    UserRole.LOAN_OFFICER,
+    UserRole.AUDITOR,
+  )
+  @ApiOperation({
+    summary: 'Get dashboard chart drill-down rows',
+    description:
+      'Returns tenant-scoped paginated rows for dashboard chart segments across transactions, M-Pesa, loans, guarantors, members, and journal entries.',
+  })
+  @ApiResponse({ status: 200, description: 'Dashboard drill-down rows' })
+  async getDrilldown(
+    @Req() req: AuthenticatedRequest,
+    @Query() query: DashboardDrilldownQueryDto,
+  ): Promise<DashboardDrilldownResponse> {
+    return this.dashboardService.getDrilldown(this.requireTenantContext(req), query);
   }
 }

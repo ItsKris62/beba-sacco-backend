@@ -167,6 +167,7 @@ services:
     region: oregon
     autoDeploy: true
     buildCommand: npm ci --include=dev && npx prisma generate --schema=src/prisma/schema.prisma && npm run build
+    preDeployCommand: npx prisma migrate deploy --schema=src/prisma/schema.prisma
     startCommand: node dist/worker
     envVars:
       - key: NODE_ENV
