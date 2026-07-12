@@ -107,14 +107,16 @@ export default registerAs('app', () => ({
   // Plunk Transactional Email
   plunk: {
     apiKey: process.env.PLUNK_API_KEY,
-    fromEmail: process.env.PLUNK_FROM_EMAIL || 'noreply@beba-sacco.com',
+    secretKey: process.env.PLUNK_SECRET_KEY,
+    apiUrl: process.env.PLUNK_API_URL || 'https://next-api.useplunk.com/v1/',
+    fromEmail: process.env.PLUNK_FROM_EMAIL || 'noreply@kolwa.mwaloni.com',
     fromName: process.env.PLUNK_FROM_NAME || 'Beba SACCO',
   },
 
   sendGrid: {
     apiKey: process.env.SENDGRID_API_KEY,
     fromEmail:
-      process.env.SENDGRID_FROM_EMAIL || process.env.PLUNK_FROM_EMAIL || 'noreply@beba-sacco.com',
+      process.env.SENDGRID_FROM_EMAIL || process.env.PLUNK_FROM_EMAIL || 'noreply@kolwa.mwaloni.com',
     fromName: process.env.SENDGRID_FROM_NAME || process.env.PLUNK_FROM_NAME || 'Beba SACCO',
   },
 

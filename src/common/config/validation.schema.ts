@@ -159,12 +159,13 @@ export const validationSchema = Joi.object({
   MPESA_STK_RATE_LIMIT_PER_DAY: Joi.number().integer().min(1).default(3),
 
   // ── Email (Plunk) ──────────────────────────────────────────────────────────
-  PLUNK_API_KEY: Joi.string().when('NODE_ENV', {
+  PLUNK_API_KEY: Joi.string().optional(),
+  PLUNK_SECRET_KEY: Joi.string().when('NODE_ENV', {
     is: 'production',
     then: Joi.required(),
     otherwise: Joi.optional(),
   }),
-  PLUNK_SECRET_KEY: Joi.string().optional(),
+  PLUNK_API_URL: Joi.string().uri().default('https://next-api.useplunk.com/v1/'),
   PLUNK_FROM_EMAIL: Joi.string().email().required(),
   PLUNK_FROM_NAME: Joi.string().default('Beba SACCO'),
   EMAIL_IGNORE_DELIVERY_FAILURES: Joi.boolean().truthy('true').falsy('false').default(false),

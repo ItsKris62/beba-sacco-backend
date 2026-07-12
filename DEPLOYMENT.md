@@ -70,8 +70,9 @@ AWS_SES_ACCESS_KEY_ID=<ses-access-key-if-using-ses>
 AWS_SES_SECRET_ACCESS_KEY=<ses-secret-key-if-using-ses>
 AWS_SES_REGION=<ses-region>
 AWS_SES_FROM_EMAIL=<verified-from-email>
-PLUNK_API_KEY=<plunk-public-key-if-using-plunk>
+PLUNK_API_KEY=
 PLUNK_SECRET_KEY=<plunk-secret-key-if-using-plunk>
+PLUNK_API_URL=https://next-api.useplunk.com/v1/
 PLUNK_FROM_EMAIL=<verified-from-email>
 ```
 
