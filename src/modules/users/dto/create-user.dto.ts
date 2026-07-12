@@ -1,10 +1,10 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsEnum, IsNotEmpty, IsPhoneNumber, IsString } from 'class-validator';
+import { IsEmail, IsEnum, IsOptional, IsPhoneNumber, IsString } from 'class-validator';
 import { UserRole } from '@prisma/client';
 
 /**
- * Roles that can be assigned via PATCH /users/:id (reassigning an *existing*
- * account, which — for MEMBER/CHAIRMAN — already has a linked Member profile).
+ * Roles that can be assigned via PATCH /users/:id (reassigning an existing
+ * account, which for MEMBER/CHAIRMAN already has a linked Member profile).
  * MEMBER is created via /auth/register; SUPER_ADMIN is platform-only.
  */
 export const ASSIGNABLE_ROLES = [
@@ -19,11 +19,8 @@ export const ASSIGNABLE_ROLES = [
 ] as const;
 
 /**
- * Roles that can be assigned via POST /users (creates a *brand-new* account).
- * Excludes MEMBER and CHAIRMAN — creating a User with one of those roles here
- * would never get a linked Member row (that only happens via /auth/register or
- * POST /members), leaving an orphaned staff-style login with member-level
- * access and no member profile. Use Members Management → Create Member instead.
+ * Roles that can be assigned via POST /users (creates a brand-new staff account).
+ * Excludes MEMBER and CHAIRMAN; use the member-management flow for those roles.
  */
 export const STAFF_ASSIGNABLE_ROLES = [
   UserRole.TENANT_ADMIN,
@@ -35,7 +32,10 @@ export const STAFF_ASSIGNABLE_ROLES = [
 ] as const;
 
 export class CreateUserDto {
-  @ApiProperty({ example: 'jane.doe@saccobank.co.ke' })
+  @ApiProperty({
+    example: 'jane.doe@saccobank.co.ke',
+    description: 'Required staff email. The temporary password is delivered here.',
+  })
   @IsEmail()
   email!: string;
 
@@ -49,21 +49,18 @@ export class CreateUserDto {
 
   @ApiProperty({
     example: '+254712345678',
-    description:
-      'Required — a server-generated temporary password is sent to this number via SMS. ' +
-      'The user logs in with the temp password, verifies their phone via a 6-digit SMS OTP, ' +
-      'and is then forced to set a permanent password.',
+    description: 'Optional staff phone number. Temporary passwords are delivered by email.',
+    required: false,
   })
-  @IsNotEmpty({ message: 'Phone number is required for temporary password delivery' })
+  @IsOptional()
   @IsPhoneNumber('KE', { message: 'Must be a valid Kenyan phone number' })
-  phone!: string;
+  phone?: string;
 
   @ApiProperty({
     enum: STAFF_ASSIGNABLE_ROLES,
     description:
       'Role to assign. SUPER_ADMIN is not assignable via this endpoint. MEMBER and CHAIRMAN ' +
-      'are not assignable here either — use Members Management (POST /members) instead, ' +
-      'which links to an existing self-registered User and provisions a Member profile.',
+      'are not assignable here; use Members Management instead.',
     example: UserRole.TELLER,
   })
   @IsEnum(STAFF_ASSIGNABLE_ROLES, {

@@ -66,54 +66,55 @@ model TenantCounter {
 }
 
 model User {
-  id                     String            @id @default(uuid())
-  tenantId               String
-  email                  String
-  passwordHash           String
-  tempPasswordEncrypted  String?
-  role                   UserRole          @default(MEMBER)
-  firstName              String
-  lastName               String
-  phone                  String?
-  profileImageKey        String?
-  emailVerified          Boolean           @default(false)
-  refreshToken           String?
-  lastLoginAt            DateTime?
-  mustChangePassword     Boolean           @default(false)
-  createdAt              DateTime          @default(now())
-  updatedAt              DateTime          @updatedAt
-  idNumber               String?           @unique
-  importBatchId          String?
-  legacyMemberNo         String?
-  nextOfKinPhone         String?
-  passwordResetExpiry    DateTime?
-  passwordResetToken     String?
-  phoneNumber            String?           @unique
-  wardId                 String?
-  createdById            String?
-  approvedById           String?
-  approvedAt             DateTime?
-  approvalReason         String?
-  accountStatus          AccountStatus     @default(PENDING)
-  backupCodes            String[]
-  totpEnrolledAt         DateTime?
-  totpSecret             String?
-  twoFactorEnabled       Boolean           @default(false)
-  lastPasswordChangeAt   DateTime          @default(now())
-  phoneVerified          Boolean           @default(false)
-  pinLoginRequired       Boolean           @default(false)
-  auditLogs              AuditLog[]
-  approvedJournalEntries JournalEntry[]    @relation("JournalEntryApprover")
-  createdJournalEntries  JournalEntry[]    @relation("JournalEntryCreator")
-  rejectedJournalEntries JournalEntry[]    @relation("JournalEntryRejector")
-  member                 Member?
+  id                      String                   @id @default(uuid())
+  tenantId                String
+  email                   String
+  passwordHash            String
+  tempPasswordEncrypted   String?
+  tempPasswordExpiresAt   DateTime?
+  role                    UserRole                 @default(MEMBER)
+  firstName               String
+  lastName                String
+  phone                   String?
+  profileImageKey         String?
+  emailVerified           Boolean                  @default(false)
+  refreshToken            String?
+  lastLoginAt             DateTime?
+  mustChangePassword      Boolean                  @default(false)
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  idNumber                String?                  @unique
+  importBatchId           String?
+  legacyMemberNo          String?
+  nextOfKinPhone          String?
+  passwordResetExpiry     DateTime?
+  passwordResetToken      String?
+  phoneNumber             String?                  @unique
+  wardId                  String?
+  createdById             String?
+  approvedById            String?
+  approvedAt              DateTime?
+  approvalReason          String?
+  accountStatus           AccountStatus            @default(PENDING)
+  backupCodes             String[]
+  totpEnrolledAt          DateTime?
+  totpSecret              String?
+  twoFactorEnabled        Boolean                  @default(false)
+  lastPasswordChangeAt    DateTime                 @default(now())
+  phoneVerified           Boolean                  @default(false)
+  pinLoginRequired        Boolean                  @default(false)
+  auditLogs               AuditLog[]
+  approvedJournalEntries  JournalEntry[]           @relation("JournalEntryApprover")
+  createdJournalEntries   JournalEntry[]           @relation("JournalEntryCreator")
+  rejectedJournalEntries  JournalEntry[]           @relation("JournalEntryRejector")
+  member                  Member?
   notificationPreferences NotificationPreference[]
-  pinVerifications       PinVerification[]
-  requestedReports       ReportJob[]
-  stageAssignments       StageAssignment[]
-  assignedSupportTickets SupportTicket[]   @relation("AssignedSupportTickets")
-  sentTicketMessages     TicketMessage[]
-  tenant                 Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pinVerifications        PinVerification[]
+  requestedReports        ReportJob[]
+  stageAssignments        StageAssignment[]
+  assignedSupportTickets  SupportTicket[]          @relation("AssignedSupportTickets")
+  sentTicketMessages      TicketMessage[]
+  tenant                  Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -391,41 +392,41 @@ model LoanProduct {
 }
 
 model Loan {
-  id                         String              @id @default(uuid())
+  id                         String                @id @default(uuid())
   tenantId                   String
   memberId                   String
   loanProductId              String
   loanNumber                 String
-  status                     LoanStatus          @default(DRAFT)
-  principalAmount            Decimal             @db.Decimal(18, 4)
-  interestRate               Decimal             @db.Decimal(7, 4)
-  processingFee              Decimal             @default(0) @db.Decimal(18, 4)
+  status                     LoanStatus            @default(DRAFT)
+  principalAmount            Decimal               @db.Decimal(18, 4)
+  interestRate               Decimal               @db.Decimal(7, 4)
+  processingFee              Decimal               @default(0) @db.Decimal(18, 4)
   tenureMonths               Int
-  monthlyInstalment          Decimal             @db.Decimal(18, 4)
-  appliedAt                  DateTime            @default(now())
+  monthlyInstalment          Decimal               @db.Decimal(18, 4)
+  appliedAt                  DateTime              @default(now())
   approvedAt                 DateTime?
   approvedBy                 String?
   disbursedAt                DateTime?
   disbursedBy                String?
   dueDate                    DateTime?
-  totalRepaid                Decimal             @default(0) @db.Decimal(18, 4)
-  outstandingBalance         Decimal             @db.Decimal(18, 4)
+  totalRepaid                Decimal               @default(0) @db.Decimal(18, 4)
+  outstandingBalance         Decimal               @db.Decimal(18, 4)
   notes                      String?
-  createdAt                  DateTime            @default(now())
-  updatedAt                  DateTime            @updatedAt
+  createdAt                  DateTime              @default(now())
+  updatedAt                  DateTime              @updatedAt
   purpose                    String?
-  gracePeriodMonths          Int                 @default(0)
-  arrearsAmount              Decimal             @default(0) @db.Decimal(18, 4)
-  arrearsDays                Int                 @default(0)
+  gracePeriodMonths          Int                   @default(0)
+  arrearsAmount              Decimal               @default(0) @db.Decimal(18, 4)
+  arrearsDays                Int                   @default(0)
   lastAccrualDate            DateTime?
-  staging                    LoanStaging         @default(PERFORMING)
-  accruedInterest            Decimal             @default(0) @db.Decimal(18, 4)
-  repaymentScheduleGenerated Boolean             @default(false)
+  staging                    LoanStaging           @default(PERFORMING)
+  accruedInterest            Decimal               @default(0) @db.Decimal(18, 4)
+  repaymentScheduleGenerated Boolean               @default(false)
   disbursementFailureReason  String?
   guarantors                 LoanGuarantor[]
-  loanProduct                LoanProduct         @relation(fields: [loanProductId], references: [id])
-  member                     Member              @relation(fields: [memberId], references: [id])
-  tenant                     Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  loanProduct                LoanProduct           @relation(fields: [loanProductId], references: [id])
+  member                     Member                @relation(fields: [memberId], references: [id])
+  tenant                     Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   approvalChains             LoanApprovalChain[]
   loanRepayments             LoanRepayment[]
   supportTickets             SupportTicket[]
@@ -909,23 +910,23 @@ model ApiClient {
 }
 
 model NotificationLog {
-  id               String             @id @default(uuid())
+  id               String              @id @default(uuid())
   tenantId         String
   memberId         String?
-  eventType        String             @default("legacy.notification")
+  eventType        String              @default("legacy.notification")
   channel          NotificationChannel
   recipient        String
   templateId       String
   payload          Json
-  status           NotificationStatus @default(PENDING)
+  status           NotificationStatus  @default(PENDING)
   providerRef      String?
   providerResponse Json?
-  cost             Decimal?           @db.Decimal(10, 4)
+  cost             Decimal?            @db.Decimal(10, 4)
   sentAt           DateTime?
   deliveredAt      DateTime?
   failReason       String?
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @default(now()) @updatedAt
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @default(now()) @updatedAt
 
   @@index([tenantId])
   @@index([tenantId, eventType])
@@ -1571,30 +1572,30 @@ model GLAccount {
 /// Auto-numbering: JE-{YYYY}-{seq} per tenant.
 /// Entries with totalAmount >= KES 100,000 require MANAGER approval.
 model JournalEntry {
-  id            String             @id @default(uuid())
-  tenantId      String
-  entryNumber   String
-  type          JournalEntryType
-  status        JournalEntryStatus @default(DRAFT)
-  description   String
-  referenceType String?
-  referenceId   String?
-  totalAmount   Decimal            @db.Decimal(18, 4)
-  createdById   String
-  approvedById  String?
-  rejectedById  String?
-  approvalNotes String?
-  postedAt      DateTime?
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  id                       String             @id @default(uuid())
+  tenantId                 String
+  entryNumber              String
+  type                     JournalEntryType
+  status                   JournalEntryStatus @default(DRAFT)
+  description              String
+  referenceType            String?
+  referenceId              String?
+  totalAmount              Decimal            @db.Decimal(18, 4)
+  createdById              String
+  approvedById             String?
+  rejectedById             String?
+  approvalNotes            String?
+  postedAt                 DateTime?
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
   reversalOfJournalEntryId String?
-  postings      GLPosting[]
-  approvedBy    User?              @relation("JournalEntryApprover", fields: [approvedById], references: [id])
-  createdBy     User               @relation("JournalEntryCreator", fields: [createdById], references: [id])
-  rejectedBy    User?              @relation("JournalEntryRejector", fields: [rejectedById], references: [id])
-  tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  reversalOf    JournalEntry?      @relation("JournalEntryReversal", fields: [reversalOfJournalEntryId], references: [id])
-  reversals     JournalEntry[]     @relation("JournalEntryReversal")
+  postings                 GLPosting[]
+  approvedBy               User?              @relation("JournalEntryApprover", fields: [approvedById], references: [id])
+  createdBy                User               @relation("JournalEntryCreator", fields: [createdById], references: [id])
+  rejectedBy               User?              @relation("JournalEntryRejector", fields: [rejectedById], references: [id])
+  tenant                   Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reversalOf               JournalEntry?      @relation("JournalEntryReversal", fields: [reversalOfJournalEntryId], references: [id])
+  reversals                JournalEntry[]     @relation("JournalEntryReversal")
 
   @@unique([tenantId, entryNumber])
   @@index([tenantId, status])

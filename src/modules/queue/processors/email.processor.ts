@@ -3,7 +3,10 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue.constants';
 import { PlunkService } from '../../../common/services/plunk.service';
-import { EncryptionService, EncryptedPayload } from '../../zero-trust/encryption/encryption.service';
+import {
+  EncryptionService,
+  EncryptedPayload,
+} from '../../zero-trust/encryption/encryption.service';
 
 /**
  * Email Queue Processor
@@ -149,7 +152,9 @@ export class EmailProcessor extends WorkerHost {
   private welcome(p: Extract<EmailJobPayload, { type: 'WELCOME' }>) {
     return {
       subject: `Welcome to ${p.saccoName}`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Welcome to ${p.saccoName}! 🎉</h2>
         <p>Your account has been created successfully. You are now part of our growing SACCO community.</p>
         <p>Here's what you can do next:</p>
@@ -160,7 +165,8 @@ export class EmailProcessor extends WorkerHost {
         </ul>
         <p>If you received a temporary password, please change it on your first login.</p>
         <p>Welcome aboard!</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -169,7 +175,9 @@ export class EmailProcessor extends WorkerHost {
   private loanApproved(p: Extract<EmailJobPayload, { type: 'LOAN_APPROVED' }>) {
     return {
       subject: `Your loan ${p.loanNumber} has been approved`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Loan Approved ✅</h2>
         <p>Great news! Your loan application has been approved and is now awaiting disbursement.</p>
         <div class="highlight">
@@ -181,7 +189,8 @@ export class EmailProcessor extends WorkerHost {
           </table>
         </div>
         <p>Funds will be credited to your FOSA account once disbursement is processed. You will receive a confirmation email at that time.</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -190,13 +199,16 @@ export class EmailProcessor extends WorkerHost {
   private loanRejected(p: Extract<EmailJobPayload, { type: 'LOAN_REJECTED' }>) {
     return {
       subject: `Update on your loan application ${p.loanNumber}`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Loan Application Update</h2>
         <p>We regret to inform you that your loan application <strong>${p.loanNumber}</strong> has not been approved at this time.</p>
         ${p.reason ? `<div class="highlight"><p style="margin:0"><strong>Reason:</strong> ${p.reason}</p></div>` : ''}
         <p>You are welcome to reapply once you have addressed the above concerns, or visit our offices for further guidance.</p>
         <p>We appreciate your continued membership and trust in Beba SACCO.</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -205,7 +217,9 @@ export class EmailProcessor extends WorkerHost {
   private loanDisbursed(p: Extract<EmailJobPayload, { type: 'LOAN_DISBURSED' }>) {
     return {
       subject: `Loan ${p.loanNumber} disbursed — ${this.kes(p.principalAmount)} credited`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Funds Disbursed 💰</h2>
         <p>Your loan has been disbursed. The funds have been credited to your FOSA account.</p>
         <div class="highlight">
@@ -218,7 +232,8 @@ export class EmailProcessor extends WorkerHost {
           </table>
         </div>
         <p>Please ensure your FOSA account is funded on or before your monthly instalment date to avoid penalties.</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -227,7 +242,9 @@ export class EmailProcessor extends WorkerHost {
   private guarantorInvite(p: Extract<EmailJobPayload, { type: 'GUARANTOR_INVITE' }>) {
     return {
       subject: `${p.borrowerName} has requested you as a guarantor`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>LoanGuarantor Request</h2>
         <p>Your fellow member <strong>${p.borrowerName}</strong> has listed you as a guarantor for their loan application.</p>
         <div class="highlight">
@@ -239,7 +256,8 @@ export class EmailProcessor extends WorkerHost {
         </div>
         <p>Please log in to the Beba SACCO portal to <strong>accept</strong> or <strong>decline</strong> this guarantee request.</p>
         <p>Note: By accepting, your FOSA account balance of ${this.kes(p.guaranteedAmount)} will be reserved as security for this loan.</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -248,7 +266,9 @@ export class EmailProcessor extends WorkerHost {
   private guarantorReminder(p: Extract<EmailJobPayload, { type: 'GUARANTOR_REMINDER' }>) {
     return {
       subject: `Reminder: Pending guarantor response for loan ${p.loanNumber}`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Friendly Reminder ⏰</h2>
         <p>You have a pending guarantor request from <strong>${p.borrowerName}</strong> that requires your response.</p>
         <div class="highlight">
@@ -258,7 +278,8 @@ export class EmailProcessor extends WorkerHost {
           </table>
         </div>
         <p>Please log in to the Beba SACCO portal to respond. The loan cannot proceed until all guarantors have responded.</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -267,7 +288,9 @@ export class EmailProcessor extends WorkerHost {
   private repaymentReceipt(p: Extract<EmailJobPayload, { type: 'REPAYMENT_RECEIPT' }>) {
     return {
       subject: `Repayment received — ${this.kes(p.amountPaid)} for loan ${p.loanNumber}`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Repayment Confirmed ✅</h2>
         <p>We have received your loan repayment. Here is your receipt:</p>
         <div class="highlight">
@@ -279,11 +302,13 @@ export class EmailProcessor extends WorkerHost {
             <tr><td>Date</td><td>${p.paidAt}</td></tr>
           </table>
         </div>
-        ${p.outstandingBalance <= 0
-          ? '<p><strong>🎉 Congratulations! Your loan has been fully repaid.</strong></p>'
-          : `<p>Your remaining outstanding balance is <strong>${this.kes(p.outstandingBalance)}</strong>. Thank you for staying on track!</p>`
+        ${
+          p.outstandingBalance <= 0
+            ? '<p><strong>🎉 Congratulations! Your loan has been fully repaid.</strong></p>'
+            : `<p>Your remaining outstanding balance is <strong>${this.kes(p.outstandingBalance)}</strong>. Thank you for staying on track!</p>`
         }
-      `),
+      `,
+      ),
     };
   }
 
@@ -292,14 +317,17 @@ export class EmailProcessor extends WorkerHost {
   private passwordReset(p: Extract<EmailJobPayload, { type: 'PASSWORD_RESET' }>) {
     return {
       subject: 'Reset your Beba SACCO password',
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Password Reset Request 🔒</h2>
         <p>We received a request to reset your password. Click the button below to set a new password:</p>
         <p><a href="${p.resetUrl}" class="btn">Reset Password</a></p>
         <p>This link expires in <strong>${p.expiresInMinutes} minutes</strong>.</p>
         <p>If you did not request a password reset, please ignore this email. Your password will remain unchanged.</p>
         <p>For security, never share this link with anyone.</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -308,7 +336,9 @@ export class EmailProcessor extends WorkerHost {
   private passwordResetOtp(p: Extract<EmailJobPayload, { type: 'PASSWORD_RESET_OTP' }>) {
     return {
       subject: 'Your Beba SACCO password reset code',
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Password Reset Code</h2>
         <p>Use this one-time password to reset your account password:</p>
         <div class="highlight" style="text-align:center">
@@ -317,14 +347,17 @@ export class EmailProcessor extends WorkerHost {
         <p>This code expires in <strong>${p.expiresInMinutes} minutes</strong>.</p>
         <p>If you did not request a password reset, please ignore this email. Your password will remain unchanged.</p>
         <p>For security, never share this code with anyone.</p>
-      `),
+      `,
+      ),
     };
   }
 
   private memberApproved(p: Extract<EmailJobPayload, { type: 'MEMBER_APPROVED' }>) {
     return {
       subject: `Your ${p.saccoName} membership has been approved`,
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Membership Approved ✅</h2>
         <p>Congratulations! Your KYC documents have been reviewed and your membership application has been <strong>approved</strong>.</p>
         <div class="highlight">
@@ -337,7 +370,8 @@ export class EmailProcessor extends WorkerHost {
           <li>Apply for a loan</li>
         </ul>
         <p>Welcome to ${p.saccoName}!</p>
-      `),
+      `,
+      ),
     };
   }
 
@@ -346,7 +380,9 @@ export class EmailProcessor extends WorkerHost {
   private memberRejected(p: Extract<EmailJobPayload, { type: 'MEMBER_REJECTED' }>) {
     return {
       subject: 'Update on your SACCO membership application',
-      body: this.wrap(p.firstName, `
+      body: this.wrap(
+        p.firstName,
+        `
         <h2>Application Update</h2>
         <p>We have reviewed your membership application and are unable to approve it at this time.</p>
         <div class="highlight">
@@ -354,35 +390,58 @@ export class EmailProcessor extends WorkerHost {
         </div>
         <p>Please address the above and resubmit your application, or visit our offices for assistance.</p>
         <p>We look forward to welcoming you as a member.</p>
-      `),
+      `,
+      ),
     };
   }
 
   // ── STAFF ACCOUNT CREATED ─────────────────────────────────────
 
-  private async staffAccountCreated(p: Extract<EmailJobPayload, { type: 'STAFF_ACCOUNT_CREATED' }>) {
+  private async staffAccountCreated(
+    p: Extract<EmailJobPayload, { type: 'STAFF_ACCOUNT_CREATED' }>,
+  ) {
     // Mirrors SmsProcessor's TEMP_PASSWORD handling — the plaintext password is
     // decrypted here, immediately before send, and never persisted in the
     // Redis-backed job payload.
     const encrypted = JSON.parse(p.encryptedPayload) as EncryptedPayload;
     const tempPassword = await this.encryption.decrypt(encrypted, p.tenantId);
+    const expiresAt = new Date(p.expiresAt).toLocaleString('en-KE', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'Africa/Nairobi',
+    });
+    const isRegenerated = p.purpose === 'TEMP_PASSWORD_REGENERATED';
 
     return {
-      subject: `Your ${p.saccoName} staff account has been created`,
-      body: this.wrap(p.firstName, `
-        <h2>Staff Account Created</h2>
-        <p>An administrator has created a <strong>${this.roleLabel(p.role)}</strong> account for you at ${p.saccoName}.</p>
+      subject: isRegenerated
+        ? `Your ${p.saccoName} temporary password`
+        : `Welcome to ${p.saccoName} staff portal`,
+      body: this.wrap(
+        p.firstName,
+        `
+        <h2>${isRegenerated ? 'Temporary Password Generated' : 'Your Staff Account Is Ready'}</h2>
+        <p>${
+          isRegenerated
+            ? `An administrator generated a new temporary password for your ${p.saccoName} staff account.`
+            : `An administrator created a <strong>${this.roleLabel(p.role)}</strong> account for you at ${p.saccoName}.`
+        }
+        </p>
+        <div style="background:#0f172a;color:#fff;border-radius:8px;padding:20px;margin:24px 0;">
+          <p style="margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#bfdbfe;">Temporary password</p>
+          <p style="margin:0;font-family:'Courier New',monospace;font-size:24px;font-weight:700;letter-spacing:.08em;">${tempPassword}</p>
+        </div>
         <div class="highlight">
           <table>
-            <tr><td>Login Email</td><td>${p.to}</td></tr>
-            <tr><td>Temporary Password</td><td>${tempPassword}</td></tr>
+            <tr><td>Login email</td><td>${p.to}</td></tr>
+            <tr><td>Role</td><td>${this.roleLabel(p.role)}</td></tr>
+            <tr><td>Expires</td><td>${expiresAt} EAT</td></tr>
           </table>
         </div>
-        <p>Log in using the button below. You will be required to verify your phone number via SMS and set a new password before you can access the dashboard.</p>
-        <p><a href="${p.portalUrl}" class="btn">Log In</a></p>
-        <p>For security, never share this password with anyone. If you did not expect this account, contact your administrator immediately.</p>
-      `),
+        <p>Use the button below to sign in. You will be asked to set a permanent password before accessing the dashboard.</p>
+        <p><a href="${p.portalUrl}" class="btn">Open Staff Portal</a></p>
+        <p style="font-size:13px;color:#6b7280;">For security, this temporary password is valid for 24 hours only. Never share it with anyone. If you did not expect this email, contact your administrator immediately.</p>
+      `,
+      ),
     };
   }
 }
-

@@ -51,7 +51,13 @@ const mockPrismaService = {
     upsert: jest.fn().mockResolvedValue({}),
   },
   tenant: {
-    findUnique: jest.fn().mockResolvedValue({ id: 'tenant-uuid-1234', status: TenantStatus.ACTIVE, name: 'Test SACCO' }),
+    findUnique: jest
+      .fn()
+      .mockResolvedValue({
+        id: 'tenant-uuid-1234',
+        status: TenantStatus.ACTIVE,
+        name: 'Test SACCO',
+      }),
   },
 };
 
@@ -192,7 +198,10 @@ describe('AuthService', () => {
     });
 
     it('returns null when user is inactive', async () => {
-      mockPrismaService.user.findFirst.mockResolvedValue({ ...baseUser, accountStatus: AccountStatus.SUSPENDED });
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        accountStatus: AccountStatus.SUSPENDED,
+      });
 
       const result = await service.validateUser(baseUser.email, 'password', TENANT_ID);
 
@@ -218,7 +227,10 @@ describe('AuthService', () => {
     });
 
     it('throws UnauthorizedException when account is deactivated', async () => {
-      mockPrismaService.user.findFirst.mockResolvedValue({ ...baseUser, accountStatus: AccountStatus.SUSPENDED });
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        accountStatus: AccountStatus.SUSPENDED,
+      });
 
       await expect(
         service.login({ email: baseUser.email, password: 'Pass123!' }, TENANT_ID),
@@ -227,7 +239,10 @@ describe('AuthService', () => {
 
     it('returns access + refresh tokens on valid credentials', async () => {
       mockPrismaService.user.findFirst.mockResolvedValue(baseUser);
-      mockPrismaService.user.update.mockResolvedValue({ ...baseUser, refreshToken: 'hashed-refresh' });
+      mockPrismaService.user.update.mockResolvedValue({
+        ...baseUser,
+        refreshToken: 'hashed-refresh',
+      });
       jest.mocked(argon2.verify).mockResolvedValueOnce(true);
       jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
 
@@ -341,13 +356,62 @@ describe('AuthService', () => {
       expect(mockPrismaService.user.update).not.toHaveBeenCalled();
     });
 
+    it('does NOT SMS-gate an email-only staff temp-password account', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        role: UserRole.TELLER,
+        mustChangePassword: true,
+        phoneVerified: false,
+        tempPasswordEncrypted: '{"ciphertext":"c"}',
+        tempPasswordExpiresAt: new Date(Date.now() + 60_000),
+      });
+      mockPrismaService.user.update.mockResolvedValue({
+        ...baseUser,
+        refreshToken: 'hashed-refresh',
+      });
+      jest.mocked(argon2.verify).mockResolvedValueOnce(true);
+      jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
+
+      const result = await service.login(
+        { email: baseUser.email, password: 'TempPass123!' },
+        TENANT_ID,
+        '127.0.0.1',
+      );
+
+      expect(result.accessToken).toBe('access.jwt.token');
+      expect(mockOtpService.generate).not.toHaveBeenCalled();
+      expect(mockSmsService.enqueueSms).not.toHaveBeenCalled();
+    });
+
+    it('rejects an expired temp password before issuing tokens', async () => {
+      mockPrismaService.user.findFirst.mockResolvedValue({
+        ...baseUser,
+        role: UserRole.TELLER,
+        mustChangePassword: true,
+        phoneVerified: false,
+        tempPasswordEncrypted: '{"ciphertext":"c"}',
+        tempPasswordExpiresAt: new Date(Date.now() - 1000),
+      });
+      jest.mocked(argon2.verify).mockResolvedValueOnce(true);
+
+      await expect(
+        service.login({ email: baseUser.email, password: 'TempPass123!' }, TENANT_ID, '127.0.0.1'),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
+      expect(mockSmsService.enqueueSms).not.toHaveBeenCalled();
+    });
+
     it('does NOT gate an account that already has a verified phone, even with mustChangePassword true', async () => {
       mockPrismaService.user.findFirst.mockResolvedValue({
         ...baseUser,
         mustChangePassword: true,
         phoneVerified: true,
       });
-      mockPrismaService.user.update.mockResolvedValue({ ...baseUser, refreshToken: 'hashed-refresh' });
+      mockPrismaService.user.update.mockResolvedValue({
+        ...baseUser,
+        refreshToken: 'hashed-refresh',
+      });
       jest.mocked(argon2.verify).mockResolvedValueOnce(true);
       jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
 
@@ -367,7 +431,10 @@ describe('AuthService', () => {
         mustChangePassword: false,
         phoneVerified: false,
       });
-      mockPrismaService.user.update.mockResolvedValue({ ...baseUser, refreshToken: 'hashed-refresh' });
+      mockPrismaService.user.update.mockResolvedValue({
+        ...baseUser,
+        refreshToken: 'hashed-refresh',
+      });
       jest.mocked(argon2.verify).mockResolvedValueOnce(true);
       jest.mocked(argon2.hash).mockResolvedValueOnce('hashed-refresh-token');
 
@@ -475,9 +542,9 @@ describe('AuthService', () => {
       ).rejects.toThrow(ConflictException);
     });
 
-
     it('hashes new passwords with Argon2id parameters', async () => {
-      jest.mocked(argon2.hash)
+      jest
+        .mocked(argon2.hash)
         .mockResolvedValueOnce('$argon2id$v=19$m=65536,t=3,p=1$registration')
         .mockResolvedValueOnce('$argon2id$v=19$m=65536,t=3,p=1$refresh');
       mockPrismaService.user.findFirst.mockResolvedValue(null);
@@ -554,7 +621,11 @@ describe('AuthService', () => {
     });
 
     it('revokes all RefreshSessions when token reuse is detected', async () => {
-      mockJwtService.verify.mockReturnValue({ sub: baseUser.id, email: baseUser.email, tenantId: TENANT_ID });
+      mockJwtService.verify.mockReturnValue({
+        sub: baseUser.id,
+        email: baseUser.email,
+        tenantId: TENANT_ID,
+      });
       mockPrismaService.user.findUnique.mockResolvedValue({
         ...baseUser,
         // Non-null refreshToken so the flow reaches argon2.verify
@@ -619,4 +690,3 @@ describe('AuthService', () => {
     });
   });
 });
-

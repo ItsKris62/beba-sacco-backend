@@ -50,12 +50,10 @@ export class UsersController {
   @ApiOperation({
     summary: 'Create a staff account',
     description:
-      'Creates a user with a server-generated temporary password, sent via SMS and email ' +
-      '(mustChangePassword = true). The plaintext password is never returned in this ' +
+      'Creates a staff user with a server-generated temporary password sent by email ' +
+      '(mustChangePassword = true, valid for 24 hours). The plaintext password is never returned in this ' +
       'response — if delivery fails, retrieve it via GET /users/:id/reveal-temp-password. ' +
-      'On first login the user must verify their phone via a 6-digit SMS OTP (enforced by ' +
-      'POST /auth/login, unless SMS_OTP_BYPASS_ADMIN_CREATED is enabled) before tokens are ' +
-      'issued, then set a permanent password. ' +
+      'On first login the user must set a permanent password. ' +
       'TENANT_ADMIN can create TENANT_ADMIN, MANAGER, LOAN_OFFICER, ACCOUNTANT, TELLER, or AUDITOR. ' +
       'MANAGER can create LOAN_OFFICER, ACCOUNTANT, TELLER, or AUDITOR. ' +
       'SUPER_ADMIN is never assignable via this endpoint. ' +
@@ -63,8 +61,11 @@ export class UsersController {
       'never gets a linked Member profile, so use POST /members instead (which links to an ' +
       'existing self-registered user from POST /auth/register).',
   })
-  @ApiResponse({ status: 201, description: 'User created. Temporary password sent via SMS and email.' })
-  @ApiResponse({ status: 400, description: 'Validation failed (e.g. role is MEMBER/CHAIRMAN/SUPER_ADMIN)' })
+  @ApiResponse({ status: 201, description: 'User created. Temporary password sent via email.' })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation failed (e.g. role is MEMBER/CHAIRMAN/SUPER_ADMIN)',
+  })
   @ApiResponse({ status: 403, description: 'Insufficient role to create this account type' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
   create(
@@ -239,9 +240,9 @@ export class UsersController {
     description:
       'Generates a new server-side temporary password, stores its Argon2id hash plus an ' +
       'AES-256-GCM encrypted copy (for admin recovery), sets mustChangePassword = true, ' +
-      'invalidates existing sessions, and enqueues an SMS to the user with the new password. ' +
+      'invalidates existing sessions, and emails the user with the new password. ' +
       'The plaintext is never returned in this response — retrieve it via ' +
-      'GET /users/:id/reveal-temp-password if the SMS fails to queue. Use this when the ' +
+      'GET /users/:id/reveal-temp-password if email delivery fails. Use this when the ' +
       'original temporary password was lost before first login.',
   })
   @ApiResponse({
@@ -250,7 +251,8 @@ export class UsersController {
     schema: {
       example: {
         success: true,
-        smsEnqueued: true,
+        emailEnqueued: true,
+        tempPasswordExpiresAt: '2026-07-13T15:30:00.000Z',
         user: {
           id: '550e8400-e29b-41d4-a716-446655440000',
           email: 'member@example.com',
@@ -258,8 +260,7 @@ export class UsersController {
           lastName: 'Doe',
           role: 'MEMBER',
         },
-        message:
-          'Temporary password generated and sent via SMS. An admin can also retrieve it via GET /users/:id/reveal-temp-password.',
+        message: 'Temporary password generated and sent via email.',
       },
     },
   })

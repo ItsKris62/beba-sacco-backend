@@ -1,4 +1,4 @@
-import {
+﻿import {
   Injectable,
   UnauthorizedException,
   ConflictException,
@@ -51,7 +51,7 @@ interface PasswordResetPayload {
   sub: string; // userId
   email: string;
   purpose: 'password_reset';
-  /** Random nonce stored as argon2 hash in DB — single-use enforcement */
+  /** Random nonce stored as argon2 hash in DB â€” single-use enforcement */
   nonce: string;
 }
 
@@ -82,15 +82,15 @@ export interface AuthProfileDto {
  * - Full audit trail on every auth event
  *
  * Password Reset Flow (industry-grade, stateless):
- *   1. POST /auth/forgot-password  → generates signed JWT (15 min) + stores nonce hash in DB
+ *   1. POST /auth/forgot-password  â†’ generates signed JWT (15 min) + stores nonce hash in DB
  *   2. Email sent with link: /reset-password?token=<jwt>
- *   3. POST /auth/reset-password   → verifies JWT, verifies nonce hash, sets new password,
+ *   3. POST /auth/reset-password   â†’ verifies JWT, verifies nonce hash, sets new password,
  *                                    clears nonce (single-use), invalidates all sessions
  *
  * Security properties:
- *   - Token is a signed JWT → tamper-proof, expiry enforced cryptographically
- *   - Nonce hash in DB → single-use (replay attack prevention)
- *   - Constant-time response on forgot-password → no user enumeration
+ *   - Token is a signed JWT â†’ tamper-proof, expiry enforced cryptographically
+ *   - Nonce hash in DB â†’ single-use (replay attack prevention)
+ *   - Constant-time response on forgot-password â†’ no user enumeration
  *   - argon2id for all password hashes (memory-hard, GPU-resistant)
  *   - All sessions invalidated on successful reset
  */
@@ -128,7 +128,7 @@ export class AuthService {
       );
   }
 
-  // ─────────────────────────── LOGIN ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ LOGIN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private readonly BLOCK_THRESHOLD = 5; // auto-block after N failures
   private readonly BLOCK_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -218,6 +218,8 @@ export class AuthService {
           lastName: true,
           tenantId: true,
           mustChangePassword: true,
+          tempPasswordEncrypted: true,
+          tempPasswordExpiresAt: true,
           pinLoginRequired: true,
           phoneVerified: true,
           lastPasswordChangeAt: true,
@@ -285,18 +287,44 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // First-login temp-password accounts must verify phone ownership via a 6-digit
-    // SMS OTP before tokens are issued. Scoped to mustChangePassword (not just
-    // !phoneVerified) so already-onboarded accounts — which also default to
-    // phoneVerified=false unless they went through this or the legacy PIN flow —
-    // are never affected; this only ever fires for genuinely new accounts.
-    // SMS_OTP_BYPASS_ADMIN_CREATED (off by default) skips this gate entirely — the
-    // account still lands on the mustChangePassword-forced /change-password step via
-    // the existing JwtAuthGuard enforcement, it just never has to clear phone
-    // verification first. Does not touch OTP generation/verification/resend below.
+    if (
+      user.mustChangePassword &&
+      user.tempPasswordEncrypted &&
+      user.tempPasswordExpiresAt &&
+      user.tempPasswordExpiresAt.getTime() <= Date.now()
+    ) {
+      await this.writeAuditSafe({
+        tenantId,
+        userId: user.id,
+        action: 'AUTH.LOGIN.FAILED',
+        resource: 'User',
+        resourceId: user.id,
+        metadata: { reason: 'temporary_password_expired' },
+        ipAddress,
+      });
+      throw new UnauthorizedException(
+        'Temporary password has expired. Ask an administrator to generate a new temporary password.',
+      );
+    }
+
+    // First-login temp-password member/legacy accounts still verify phone ownership
+    // before tokens are issued. Staff accounts created through Staff Users are email-only
+    // and skip this SMS OTP gate; they still land on the forced change-password step.
+    // Scoped to mustChangePassword so already-onboarded accounts are never affected.
+    // SMS_OTP_BYPASS_ADMIN_CREATED (off by default) keeps the older global bypass behavior.
     const bypassOtpForAdminCreated =
       this.configService.get<string>('app.features.smsOtpBypassAdminCreated') === 'true';
-    if (user.mustChangePassword && !user.phoneVerified && !bypassOtpForAdminCreated) {
+    const emailOnlyStaffTempPassword =
+      user.mustChangePassword &&
+      Boolean(user.tempPasswordEncrypted) &&
+      user.role !== UserRole.MEMBER &&
+      user.role !== UserRole.CHAIRMAN;
+    if (
+      user.mustChangePassword &&
+      !user.phoneVerified &&
+      !bypassOtpForAdminCreated &&
+      !emailOnlyStaffTempPassword
+    ) {
       const rawPhone = user.phone ?? user.phoneNumber;
       if (!rawPhone) {
         throw new UnauthorizedException('No phone number on file for verification');
@@ -467,11 +495,11 @@ export class AuthService {
     };
   }
 
-  // ─────────────────────────── VERIFY PIN (first login / onboarding) ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ VERIFY PIN (first login / onboarding) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Verify a first-login PIN and issue a full session, exactly like login().
-   * mustChangePassword remains true — the existing JwtAuthGuard enforcement forces
+   * mustChangePassword remains true â€” the existing JwtAuthGuard enforcement forces
    * the client straight to PATCH /auth/change-password, which clears both
    * mustChangePassword and pinLoginRequired once a real password is set.
    */
@@ -579,7 +607,7 @@ export class AuthService {
     };
   }
 
-  // ─────────────────────────── VERIFY LOGIN OTP (phone verification) ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ VERIFY LOGIN OTP (phone verification) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Given an already-normalized 254XXXXXXXXX phone, return every raw format a
@@ -610,8 +638,9 @@ export class AuthService {
 
     // dto.phone arrives as the canonical 254XXXXXXXXX format (echoed back from
     // login()'s response), but stored User rows may still be in local
-    // 0XXXXXXXXX format — match against both so the lookup works either way.
-    const normalizedPhone = normalizePhone(dto.phone).normalized ?? dto.phone.trim().replace(/^\+/, '');
+    // 0XXXXXXXXX format â€” match against both so the lookup works either way.
+    const normalizedPhone =
+      normalizePhone(dto.phone).normalized ?? dto.phone.trim().replace(/^\+/, '');
     const lookupPhones = this.phoneLookupVariants(normalizedPhone);
 
     const candidate = await tenantAsyncStorage.run(undefined, () =>
@@ -704,13 +733,14 @@ export class AuthService {
     };
   }
 
-  /** Regenerate and re-send the login OTP — rate-limited at the controller. */
+  /** Regenerate and re-send the login OTP â€” rate-limited at the controller. */
   async resendLoginOtp(
     dto: ResendLoginOtpDto,
     tenantId: string,
     ipAddress?: string,
   ): Promise<void> {
-    const normalizedPhone = normalizePhone(dto.phone).normalized ?? dto.phone.trim().replace(/^\+/, '');
+    const normalizedPhone =
+      normalizePhone(dto.phone).normalized ?? dto.phone.trim().replace(/^\+/, '');
     const lookupPhones = this.phoneLookupVariants(normalizedPhone);
 
     const candidate = await tenantAsyncStorage.run(undefined, () =>
@@ -726,7 +756,7 @@ export class AuthService {
     );
 
     // Always behave the same whether or not the phone is registered, to avoid
-    // leaking account existence — mirrors requestPasswordResetSms's approach.
+    // leaking account existence â€” mirrors requestPasswordResetSms's approach.
     if (!candidate) return;
 
     const otp = await this.otpService.generate(normalizedPhone);
@@ -749,11 +779,11 @@ export class AuthService {
     });
   }
 
-  // ─────────────────────────── REGISTER ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ REGISTER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Self-registration endpoint.
-   * Role is always MEMBER – admin account creation is handled via POST /users.
+   * Role is always MEMBER â€“ admin account creation is handled via POST /users.
    * Tenant is validated upstream by TenantInterceptor and passed in here.
    */
   async register(
@@ -833,7 +863,7 @@ export class AuthService {
       ipAddress,
     });
 
-    // Send welcome email — fetch tenant name for personalisation
+    // Send welcome email â€” fetch tenant name for personalisation
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
       select: { name: true },
@@ -857,7 +887,7 @@ export class AuthService {
     };
   }
 
-  // ─────────────────────────── REFRESH ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ REFRESH â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Rotate the refresh token.
@@ -992,7 +1022,7 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  // ─────────────────────────── LOGOUT ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ LOGOUT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Invalidate the current session by clearing the stored refresh token hash.
@@ -1048,7 +1078,7 @@ export class AuthService {
     });
   }
 
-  // ─────────────────────────── FORGOT PASSWORD ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ FORGOT PASSWORD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Initiate password reset.
@@ -1091,7 +1121,7 @@ export class AuthService {
       ipAddress,
     });
 
-    // Silently exit if user not found or inactive — no error to prevent enumeration
+    // Silently exit if user not found or inactive â€” no error to prevent enumeration
     if (!user || user.accountStatus !== AccountStatus.ACTIVE) {
       return;
     }
@@ -1116,7 +1146,7 @@ export class AuthService {
       },
     });
 
-    // Sign a JWT containing the plaintext nonce — this is what goes in the email link
+    // Sign a JWT containing the plaintext nonce â€” this is what goes in the email link
     const resetPayload: PasswordResetPayload = {
       sub: user.id,
       email: user.email,
@@ -1129,7 +1159,7 @@ export class AuthService {
       expiresIn: `${this.RESET_TOKEN_TTL_SECONDS}s`,
     });
 
-    // Build reset URL — use APP_URL env or fall back to localhost
+    // Build reset URL â€” use APP_URL env or fall back to localhost
     const appUrl = this.configService.get<string>('app.appUrl') ?? 'http://localhost:3000';
     const resetUrl = `${appUrl}/reset-password?token=${resetToken}`;
 
@@ -1147,7 +1177,7 @@ export class AuthService {
     this.logger.log(`Password reset email queued for ${user.email}`);
   }
 
-  // ─────────────────────────── RESET PASSWORD ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ RESET PASSWORD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Complete password reset using the signed JWT token from the email link.
@@ -1157,7 +1187,7 @@ export class AuthService {
    * 2. purpose claim must be 'password_reset'
    * 3. User exists and is active
    * 4. DB nonce hash exists and has not expired (belt-and-suspenders on top of JWT expiry)
-   * 5. argon2.verify(storedNonceHash, jwtNonce) — single-use enforcement
+   * 5. argon2.verify(storedNonceHash, jwtNonce) â€” single-use enforcement
    * 6. New password meets complexity requirements (validated by DTO)
    * 7. Clear nonce hash + invalidate all sessions after successful reset
    */
@@ -1270,7 +1300,7 @@ export class AuthService {
     this.logger.log(`Password reset successful for ${user.email}`);
   }
 
-  // ─────────────────────────── SMS PASSWORD RESET ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ SMS PASSWORD RESET â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Initiate unified email/SMS password reset.
@@ -1451,7 +1481,7 @@ export class AuthService {
     this.logger.log(`Password reset successful for ${user.email} via ${dto.method}`);
   }
 
-  // ─────────────────────────── PUBLIC PIN PASSWORD RESET ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ PUBLIC PIN PASSWORD RESET â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   //
   // Distinct from the legacy /auth/forgot-password + /auth/reset-password (email-link JWT)
   // and the unified /auth/password-reset/request + /verify (email/SMS OTP via OtpService)
@@ -1460,7 +1490,7 @@ export class AuthService {
 
   /**
    * Request a password-reset PIN via SMS. Always resolves generically (no user
-   * enumeration) — a PIN is only actually issued if a matching ACTIVE account
+   * enumeration) â€” a PIN is only actually issued if a matching ACTIVE account
    * exists in this exact tenant.
    */
   async requestPasswordResetPin(
@@ -1503,7 +1533,7 @@ export class AuthService {
   }
 
   /**
-   * Verify a password-reset PIN and set a new password. No tokens are issued —
+   * Verify a password-reset PIN and set a new password. No tokens are issued â€”
    * the client must call POST /auth/login with the new password afterwards.
    * Also clears pinLoginRequired, covering the "lost initial onboarding PIN" case.
    */
@@ -1588,10 +1618,10 @@ export class AuthService {
     this.logger.log(`PIN password reset successful for ${user.email}`);
   }
 
-  // ─────────────────────────── CHANGE PASSWORD ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ CHANGE PASSWORD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
-   * Change password – requires current password verification.
+   * Change password â€“ requires current password verification.
    * Clears mustChangePassword flag and invalidates existing refresh sessions.
    */
   async changePassword(
@@ -1618,7 +1648,7 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
-    // Accounts still in the PIN-onboarding flow have no real password yet — PIN
+    // Accounts still in the PIN-onboarding flow have no real password yet â€” PIN
     // verification was the auth factor, so there is nothing to check here.
     if (!user.pinLoginRequired) {
       if (!dto.currentPassword) {
@@ -1655,9 +1685,10 @@ export class AuthService {
           passwordHash: newHash,
           mustChangePassword: false,
           // Bounds how long an admin-issued temp password remains revealable via
-          // GET /users/:id/reveal-temp-password — once the member sets their own
+          // GET /users/:id/reveal-temp-password â€” once the member sets their own
           // password, the encrypted value is no longer needed.
           tempPasswordEncrypted: null,
+          tempPasswordExpiresAt: null,
           lastPasswordChangeAt: new Date(),
           refreshToken: null,
           ...(user.pinLoginRequired && { pinLoginRequired: false, phoneVerified: true }),
@@ -1681,7 +1712,7 @@ export class AuthService {
     });
   }
 
-  // ─────────────────────────── VALIDATE USER (for local strategy) ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ VALIDATE USER (for local strategy) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Used by unit tests and optional LocalStrategy.
@@ -1726,7 +1757,7 @@ export class AuthService {
     };
   }
 
-  // ─────────────────────────── PRIVATE HELPERS ───────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ PRIVATE HELPERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private async assertPasswordResetRequestAllowed(
     identifier: string,
@@ -1838,7 +1869,7 @@ export class AuthService {
   /**
    * Legacy email-link and legacy email/SMS-OTP reset flows are superseded by the
    * PIN-based flow (/auth/request-password-reset + /auth/reset-password/confirm).
-   * Disabled by default via FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED — callers get a
+   * Disabled by default via FEATURE_LEGACY_AUTH_ENDPOINTS_ENABLED â€” callers get a
    * 410 Gone pointing at the replacement endpoints.
    */
   private assertLegacyAuthEndpointsEnabled(): void {
@@ -1927,7 +1958,7 @@ export class AuthService {
   }
 
   /**
-   * Fire-and-forget audit write – never let an audit failure break the auth flow.
+   * Fire-and-forget audit write â€“ never let an audit failure break the auth flow.
    */
   private async writeAuditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {
     try {

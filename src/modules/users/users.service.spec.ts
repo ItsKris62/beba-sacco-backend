@@ -1,11 +1,11 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+﻿import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { UsersService } from './users.service';
 
 jest.mock('@sentry/nestjs', () => ({ captureException: jest.fn() }));
 import * as Sentry from '@sentry/nestjs';
 
-describe('UsersService — role hierarchy enforcement (canManageRole consolidation)', () => {
+describe('UsersService â€” role hierarchy enforcement (canManageRole consolidation)', () => {
   let service: UsersService;
   let prismaMock: any;
   let auditMock: any;
@@ -24,6 +24,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
   let smsServiceMock: any;
   let encryptionMock: any;
   let configMock: any;
+  let emailQueueMock: any;
 
   beforeEach(() => {
     prismaMock = {
@@ -48,6 +49,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       assertIssuanceRateLimit: jest.fn().mockResolvedValue(undefined),
     } as any;
     smsServiceMock = { enqueueSms: jest.fn().mockResolvedValue(true) };
+    emailQueueMock = { add: jest.fn().mockResolvedValue(undefined) };
     encryptionMock = {
       encrypt: jest.fn().mockResolvedValue({
         ciphertext: 'ciphertext',
@@ -66,7 +68,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       smsServiceMock,
       encryptionMock,
       configMock,
-      { add: jest.fn() } as any,
+      emailQueueMock,
     );
   });
 
@@ -79,69 +81,69 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       role: UserRole.TELLER,
     } as any;
 
-    it('generates a temp password, hashes it, and enqueues an SMS instead of using PinService', async () => {
+    it('generates a temp password, hashes it, expires it, and enqueues email instead of SMS', async () => {
       prismaMock.user.findFirst.mockResolvedValue(null); // email not already registered
       prismaMock.user.create.mockResolvedValue({ id: 'new-user-id', ...newUserDto });
+      const before = Date.now();
 
       const result = await service.create(newUserDto, 'tenant-1', manager);
 
       expect(result.success).toBe(true);
-      expect((result as any).temporaryPassword).toBeUndefined(); // never returned — use reveal-temp-password
-      expect(result.smsEnqueued).toBe(true);
+      expect((result as any).temporaryPassword).toBeUndefined(); // never returned - use reveal-temp-password
+      expect((result as any).smsEnqueued).toBeUndefined();
+      expect(result.emailEnqueued).toBe(true);
+      expect(result.tempPasswordExpiresAt).toEqual(expect.any(Date));
 
       const { data } = prismaMock.user.create.mock.calls[0][0];
       expect(data.passwordHash).toMatch(/^\$argon2id\$/);
       expect(data.mustChangePassword).toBe(true);
-      expect(data.pinLoginRequired).toBeUndefined(); // no longer set — PIN flow retired for new accounts
+      expect(data.emailVerified).toBe(true);
+      expect(data.phoneVerified).toBe(true);
+      expect(data.pinLoginRequired).toBeUndefined(); // no longer set - PIN flow retired for new accounts
       expect(typeof data.tempPasswordEncrypted).toBe('string');
       expect(JSON.parse(data.tempPasswordEncrypted)).toEqual(
         await encryptionMock.encrypt.mock.results[0].value,
       );
       expect(encryptionMock.encrypt).toHaveBeenCalledWith(expect.any(String), 'tenant-1');
+      expect(data.tempPasswordExpiresAt).toEqual(expect.any(Date));
+      expect(data.tempPasswordExpiresAt.getTime()).toBeGreaterThan(before + 23 * 60 * 60 * 1000);
+      expect(data.tempPasswordExpiresAt.getTime()).toBeLessThanOrEqual(
+        Date.now() + 24 * 60 * 60 * 1000,
+      );
 
-      expect(smsServiceMock.enqueueSms).toHaveBeenCalledWith(
+      expect(smsServiceMock.enqueueSms).not.toHaveBeenCalled();
+      expect(emailQueueMock.add).toHaveBeenCalledWith(
+        'send',
         expect.objectContaining({
-          type: 'TEMP_PASSWORD',
-          phone: newUserDto.phone,
-          message: expect.stringContaining('{{TEMP_PASSWORD}}'),
+          type: 'STAFF_ACCOUNT_CREATED',
+          to: newUserDto.email,
+          role: newUserDto.role,
+          expiresAt: data.tempPasswordExpiresAt.toISOString(),
+          purpose: 'ACCOUNT_CREATED',
           encryptedPayload: data.tempPasswordEncrypted,
           tenantId: 'tenant-1',
         }),
-        expect.any(String),
+        expect.any(Object),
       );
     });
 
-    it('reports smsEnqueued: false (without failing the request) when the SMS queue is down', async () => {
+    it('reports emailEnqueued: false without failing the request when the email queue is down', async () => {
       prismaMock.user.findFirst.mockResolvedValue(null);
       prismaMock.user.create.mockResolvedValue({ id: 'new-user-id', ...newUserDto });
-      smsServiceMock.enqueueSms.mockResolvedValueOnce(false);
+      emailQueueMock.add.mockRejectedValueOnce(new Error('email queue down'));
 
       const result = await service.create(newUserDto, 'tenant-1', manager);
 
       expect(result.success).toBe(true);
-      expect(result.smsEnqueued).toBe(false);
+      expect(result.emailEnqueued).toBe(false);
+      expect((result as any).smsEnqueued).toBeUndefined();
       expect((result as any).temporaryPassword).toBeUndefined();
+      expect(smsServiceMock.enqueueSms).not.toHaveBeenCalled();
     });
 
-    it('enqueues a STAFF_ACCOUNT_CREATED email alongside the SMS, without plaintext in the payload', async () => {
+    it('enqueues a STAFF_ACCOUNT_CREATED email without plaintext in the payload', async () => {
       prismaMock.user.findFirst.mockResolvedValue(null);
       prismaMock.user.create.mockResolvedValue({ id: 'new-user-id', ...newUserDto });
-      const addMock = jest.fn().mockResolvedValue(undefined);
-      service = new UsersService(
-        prismaMock,
-        auditMock,
-        {} as any,
-        {
-          generateAndIssuePin: jest.fn(),
-          validatePin: jest.fn(),
-          regenerateAndRevealPin: jest.fn(),
-          assertIssuanceRateLimit: jest.fn().mockResolvedValue(undefined),
-        } as any,
-        smsServiceMock,
-        encryptionMock,
-        configMock,
-        { add: addMock } as any,
-      );
 
       const result = await service.create(newUserDto, 'tenant-1', manager);
 
@@ -150,7 +152,7 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
         where: { id: 'tenant-1' },
         select: { name: true },
       });
-      const [, payload] = addMock.mock.calls[0];
+      const [, payload] = emailQueueMock.add.mock.calls[0];
       expect(payload).toEqual(
         expect.objectContaining({
           type: 'STAFF_ACCOUNT_CREATED',
@@ -158,6 +160,8 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
           role: newUserDto.role,
           saccoName: 'Test SACCO',
           tenantId: 'tenant-1',
+          expiresAt: expect.any(String),
+          purpose: 'ACCOUNT_CREATED',
         }),
       );
       expect(payload).not.toHaveProperty('tempPassword'); // plaintext must never enter the job payload
@@ -175,9 +179,9 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
     it.each([UserRole.MEMBER, UserRole.CHAIRMAN])(
       'blocks creating a %s account via this endpoint (would be an orphaned User with no Member row)',
       async (role) => {
-        await expect(
-          service.create({ ...newUserDto, role }, 'tenant-1', manager),
-        ).rejects.toThrow(BadRequestException);
+        await expect(service.create({ ...newUserDto, role }, 'tenant-1', manager)).rejects.toThrow(
+          BadRequestException,
+        );
 
         expect(prismaMock.user.create).not.toHaveBeenCalled();
       },
@@ -236,16 +240,16 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
     it('allows MANAGER to force-reset an ACCOUNTANT target', async () => {
       prismaMock.user.findFirst.mockResolvedValue(makeTarget(UserRole.ACCOUNTANT));
       prismaMock.user.update.mockResolvedValue({});
-      await expect(
-        service.forcePasswordReset('target-id', 'tenant-1', manager),
-      ).resolves.toEqual(expect.objectContaining({ success: true }));
+      await expect(service.forcePasswordReset('target-id', 'tenant-1', manager)).resolves.toEqual(
+        expect.objectContaining({ success: true }),
+      );
     });
 
     it('blocks MANAGER from force-resetting a TENANT_ADMIN target', async () => {
       prismaMock.user.findFirst.mockResolvedValue(makeTarget(UserRole.TENANT_ADMIN));
-      await expect(
-        service.forcePasswordReset('target-id', 'tenant-1', manager),
-      ).rejects.toThrow(ForbiddenException);
+      await expect(service.forcePasswordReset('target-id', 'tenant-1', manager)).rejects.toThrow(
+        ForbiddenException,
+      );
     });
   });
 
@@ -271,7 +275,13 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       prismaMock.user.findFirst.mockResolvedValue({
         id: 'target-id',
         role: UserRole.LOAN_OFFICER,
-        tempPasswordEncrypted: JSON.stringify({ ciphertext: 'c', iv: 'i', tag: 't', keyId: 'k', algorithm: 'aes-256-gcm' }),
+        tempPasswordEncrypted: JSON.stringify({
+          ciphertext: 'c',
+          iv: 'i',
+          tag: 't',
+          keyId: 'k',
+          algorithm: 'aes-256-gcm',
+        }),
       });
 
       const result = await service.revealTemporaryPassword('target-id', 'tenant-1', manager);
@@ -282,7 +292,10 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
         'tenant-1',
       );
       expect(auditMock.create).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'USER.TEMPORARY_PASSWORD_REVEALED', entityId: 'target-id' }),
+        expect.objectContaining({
+          action: 'USER.TEMPORARY_PASSWORD_REVEALED',
+          entityId: 'target-id',
+        }),
       );
       // Never logs the decrypted value itself
       const auditCall = auditMock.create.mock.calls[0][0];
@@ -301,11 +314,37 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
       ).rejects.toThrow('already set their own password');
     });
 
+    it('rejects when the temp password has expired', async () => {
+      prismaMock.user.findFirst.mockResolvedValue({
+        id: 'target-id',
+        role: UserRole.LOAN_OFFICER,
+        tempPasswordEncrypted: JSON.stringify({
+          ciphertext: 'c',
+          iv: 'i',
+          tag: 't',
+          keyId: 'k',
+          algorithm: 'aes-256-gcm',
+        }),
+        tempPasswordExpiresAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(
+        service.revealTemporaryPassword('target-id', 'tenant-1', manager),
+      ).rejects.toThrow('expired');
+      expect(encryptionMock.decrypt).not.toHaveBeenCalled();
+    });
+
     it('blocks MANAGER from revealing a temp password for a TENANT_ADMIN target', async () => {
       prismaMock.user.findFirst.mockResolvedValue({
         id: 'target-id',
         role: UserRole.TENANT_ADMIN,
-        tempPasswordEncrypted: JSON.stringify({ ciphertext: 'c', iv: 'i', tag: 't', keyId: 'k', algorithm: 'aes-256-gcm' }),
+        tempPasswordEncrypted: JSON.stringify({
+          ciphertext: 'c',
+          iv: 'i',
+          tag: 't',
+          keyId: 'k',
+          algorithm: 'aes-256-gcm',
+        }),
       });
 
       await expect(
@@ -314,30 +353,28 @@ describe('UsersService — role hierarchy enforcement (canManageRole consolidati
     });
   });
 
-  describe('deactivate() — now routed through canManageRole()', () => {
+  describe('deactivate() â€” now routed through canManageRole()', () => {
     it.each([UserRole.LOAN_OFFICER, UserRole.ACCOUNTANT])(
       'allows MANAGER to deactivate a %s target',
       async (role) => {
         prismaMock.user.findFirst.mockResolvedValue(makeTarget(role));
         prismaMock.user.update.mockResolvedValue(makeTarget(role));
-        await expect(
-          service.deactivate('target-id', 'tenant-1', manager),
-        ).resolves.toBeDefined();
+        await expect(service.deactivate('target-id', 'tenant-1', manager)).resolves.toBeDefined();
       },
     );
 
     it('blocks MANAGER from deactivating a TENANT_ADMIN target (unchanged from the old inline check)', async () => {
       prismaMock.user.findFirst.mockResolvedValue(makeTarget(UserRole.TENANT_ADMIN));
-      await expect(
-        service.deactivate('target-id', 'tenant-1', manager),
-      ).rejects.toThrow(ForbiddenException);
+      await expect(service.deactivate('target-id', 'tenant-1', manager)).rejects.toThrow(
+        ForbiddenException,
+      );
     });
 
     it('blocks MANAGER from deactivating a peer MANAGER target (behavior change: previously allowed, no inline check covered this pair)', async () => {
       prismaMock.user.findFirst.mockResolvedValue(makeTarget(UserRole.MANAGER));
-      await expect(
-        service.deactivate('target-id', 'tenant-1', manager),
-      ).rejects.toThrow(ForbiddenException);
+      await expect(service.deactivate('target-id', 'tenant-1', manager)).rejects.toThrow(
+        ForbiddenException,
+      );
     });
   });
 });

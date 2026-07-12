@@ -260,6 +260,10 @@ export interface StaffAccountCreatedEmailPayload extends BaseEmailPayload {
   role: string;
   /** Login URL, e.g. `${APP_URL}/login` */
   portalUrl: string;
+  /** ISO timestamp for when the temporary password stops working. */
+  expiresAt: string;
+  /** Distinguishes a new account from a later admin-generated replacement password. */
+  purpose?: 'ACCOUNT_CREATED' | 'TEMP_PASSWORD_REGENERATED';
   /**
    * JSON-stringified EncryptedPayload, decrypted by EmailProcessor at send time —
    * mirrors SmsProcessor's TEMP_PASSWORD handling so plaintext never sits in the

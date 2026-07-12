@@ -1,4 +1,4 @@
-import {
+﻿import {
   Injectable,
   Logger,
   NotFoundException,
@@ -21,7 +21,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { IdempotencyService } from '../../common/services/idempotency.service';
-import { QUEUE_NAMES, EmailJobPayload, TEMP_PASSWORD_PLACEHOLDER } from '../queue/queue.constants';
+import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
 import { PinService } from '../pin/pin.service';
 import { SmsService } from '../sms/sms.service';
 import { EncryptionService, EncryptedPayload } from '../zero-trust/encryption/encryption.service';
@@ -32,6 +32,7 @@ const TEMP_PASSWORD_DIGITS = '23456789';
 const TEMP_PASSWORD_SYMBOLS = '@#$!';
 const TEMP_PASSWORD_ALL =
   TEMP_PASSWORD_UPPER + TEMP_PASSWORD_LOWER + TEMP_PASSWORD_DIGITS + TEMP_PASSWORD_SYMBOLS;
+const TEMP_PASSWORD_TTL_MS = 24 * 60 * 60 * 1000;
 
 const USER_SELECT = {
   id: true,
@@ -78,7 +79,7 @@ export class UsersService {
   }
 
   /**
-   * Awaited variant of enqueueEmail — used where the caller needs to know
+   * Awaited variant of enqueueEmail â€” used where the caller needs to know
    * (and report back, e.g. `emailEnqueued` in the create() response) whether
    * the job was actually queued, mirroring SmsService.enqueueSms's contract.
    */
@@ -97,23 +98,26 @@ export class UsersService {
     }
   }
 
-  // ─── CREATE (admin channel) ──────────────────────────────────
+  private createTempPasswordExpiry(): Date {
+    return new Date(Date.now() + TEMP_PASSWORD_TTL_MS);
+  }
+
+  // â”€â”€â”€ CREATE (admin channel) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
-   * Create a staff/member account. No password is ever typed by the admin —
-   * a temporary password is generated server-side, sent to `dto.phone` via SMS,
-   * and stored only as an Argon2id hash (for login) plus an AES-256-GCM encrypted
-   * blob (for admin recovery via GET /users/:id/reveal-temp-password if the SMS
-   * fails to send — the plaintext is never returned in this response). The user
-   * logs in with the temp password (POST /auth/login), is then required to verify
-   * their phone via a 6-digit SMS OTP before tokens are issued (AuthService.login()'s
-   * mustChangePassword + !phoneVerified gate, unless SMS_OTP_BYPASS_ADMIN_CREATED is
-   * enabled), and finally must set a permanent password (mustChangePassword starts true).
+   * Create a staff account. No password is ever typed by the admin.
+   * A 24-hour temporary password is generated server-side, sent to the staff
+   * member by email, and stored only as an Argon2id hash plus an encrypted
+   * recovery blob until the staff member changes it.
+   *
+   * The user logs in with the temp password and is forced to set a permanent
+   * password before accessing protected resources. No SMS PIN or login OTP is
+   * required for this staff onboarding path.
    *
    * Role restrictions:
    *   - SUPER_ADMIN cannot be assigned via this endpoint (platform-only role)
    *   - MEMBER/CHAIRMAN cannot be assigned via this endpoint (would create a User
-   *     with no linked Member profile — use POST /members instead)
+   *     with no linked Member profile â€” use POST /members instead)
    *   - MANAGER cannot create TENANT_ADMIN accounts (role hierarchy)
    *   - TENANT_ADMIN can create any tenant-level role
    */
@@ -127,7 +131,7 @@ export class UsersService {
       throw new ForbiddenException('SUPER_ADMIN cannot be assigned via this endpoint');
     }
 
-    // Belt-and-suspenders alongside the DTO's STAFF_ASSIGNABLE_ROLES whitelist —
+    // Belt-and-suspenders alongside the DTO's STAFF_ASSIGNABLE_ROLES whitelist â€”
     // a User created here never gets a linked Member row, so MEMBER/CHAIRMAN
     // accounts created through this endpoint would be orphaned.
     if (dto.role === UserRole.MEMBER || dto.role === UserRole.CHAIRMAN) {
@@ -136,7 +140,7 @@ export class UsersService {
       );
     }
 
-    // Role hierarchy enforcement — DTO validation only confirms dto.role is an
+    // Role hierarchy enforcement â€” DTO validation only confirms dto.role is an
     // assignable role in general; it does not know the actor. That check happens here.
     if (!canCreateUserWithRole(actor.role, dto.role)) {
       throw new ForbiddenException(`${actor.role} cannot create accounts with role ${dto.role}`);
@@ -157,6 +161,7 @@ export class UsersService {
     });
     const encryptedPayload = await this.encryption.encrypt(temporaryPassword, tenantId);
     const tempPasswordEncrypted = JSON.stringify(encryptedPayload);
+    const tempPasswordExpiresAt = this.createTempPasswordExpiry();
 
     const user = await this.prisma.user.create({
       data: {
@@ -164,33 +169,27 @@ export class UsersService {
         email: dto.email.toLowerCase(),
         passwordHash,
         tempPasswordEncrypted,
+        tempPasswordExpiresAt,
         firstName: dto.firstName,
         lastName: dto.lastName,
-        phone: dto.phone,
+        phone: dto.phone || null,
         role: dto.role,
         accountStatus: AccountStatus.ACTIVE,
         mustChangePassword: true,
+        emailVerified: true,
+        phoneVerified: true,
         createdById: actor.id,
       },
       select: USER_SELECT,
     });
 
-    const smsEnqueued = await this.smsService.enqueueSms(
-      {
-        type: 'TEMP_PASSWORD',
-        phone: dto.phone,
-        message: `Your Beba SACCO temporary password is ${TEMP_PASSWORD_PLACEHOLDER}. You must verify your phone and change it on first login.`,
-        encryptedPayload: tempPasswordEncrypted,
-        tenantId,
-      },
-      `users.create:${user.id}`,
-    );
-
-    // Email fallback alongside SMS — if the phone number on file is wrong or
-    // unreachable, the admin/user isn't stuck waiting on a TENANT_ADMIN to run
-    // reveal-temp-password. Mirrors the SMS TEMP_PASSWORD pattern: the plaintext
-    // never enters the Redis-backed payload, only the encrypted blob + tenant scope.
-    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } });
+    // The plaintext never enters the Redis-backed email payload, only the encrypted
+    // blob plus tenant scope. If queueing fails, a tenant admin can use the reveal
+    // fallback before the one-day expiry.
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    });
     const appUrl = this.config.get<string>('app.appUrl') ?? 'http://localhost:3000';
     const emailEnqueued = await this.enqueueEmailAwaited(
       {
@@ -200,6 +199,8 @@ export class UsersService {
         saccoName: tenant?.name ?? 'Beba SACCO',
         role: user.role,
         portalUrl: `${appUrl}/login`,
+        expiresAt: tempPasswordExpiresAt.toISOString(),
+        purpose: 'ACCOUNT_CREATED',
         encryptedPayload: tempPasswordEncrypted,
         tenantId,
       },
@@ -218,22 +219,26 @@ export class UsersService {
         accountStatus: user.accountStatus,
         createdById: actor.id,
       },
-      metadata: { ipAddress, smsEnqueued, emailEnqueued },
+      metadata: {
+        ipAddress,
+        emailEnqueued,
+        tempPasswordExpiresAt: tempPasswordExpiresAt.toISOString(),
+      },
       ipAddress,
     });
 
     return {
       success: true,
-      message: smsEnqueued
-        ? 'User created. Temporary password sent via SMS.'
-        : 'User created, but SMS enqueue failed. An admin can retrieve it via GET /users/:id/reveal-temp-password.',
-      smsEnqueued,
+      message: emailEnqueued
+        ? 'User created. Temporary password sent via email.'
+        : 'User created, but email enqueue failed. A tenant admin can retrieve it via GET /users/:id/reveal-temp-password.',
       emailEnqueued,
+      tempPasswordExpiresAt,
       user,
     };
   }
 
-  // ─── LIST ────────────────────────────────────────────────────
+  // â”€â”€â”€ LIST â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async findAll(
     tenantId: string,
@@ -276,7 +281,7 @@ export class UsersService {
     return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
-  // ─── FIND ONE ────────────────────────────────────────────────
+  // â”€â”€â”€ FIND ONE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async findOne(id: string, tenantId: string) {
     const user = await this.prisma.user.findFirst({
@@ -297,7 +302,7 @@ export class UsersService {
     return user;
   }
 
-  // ─── UPDATE ──────────────────────────────────────────────────
+  // â”€â”€â”€ UPDATE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async update(
     id: string,
@@ -353,16 +358,16 @@ export class UsersService {
     return updated;
   }
 
-  // ─── UPDATE STATUS (Approval Workflow) ───────────────────────
+  // â”€â”€â”€ UPDATE STATUS (Approval Workflow) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Explicit approval state machine.
    *
    * Valid transitions:
-   *   PENDING   → APPROVED
-   *   PENDING   → REJECTED
-   *   APPROVED  → SUSPENDED
-   *   SUSPENDED → APPROVED
+   *   PENDING   â†’ APPROVED
+   *   PENDING   â†’ REJECTED
+   *   APPROVED  â†’ SUSPENDED
+   *   SUSPENDED â†’ APPROVED
    *
    * Only MANAGER, TENANT_ADMIN, SUPER_ADMIN can change status.
    */
@@ -389,7 +394,7 @@ export class UsersService {
     const allowed = validTransitions[target.accountStatus];
     if (!allowed.includes(dto.status as unknown as AccountStatus)) {
       throw new BadRequestException(
-        `Invalid status transition: ${target.accountStatus} → ${dto.status}. Allowed: [${allowed.join(', ')}]`,
+        `Invalid status transition: ${target.accountStatus} â†’ ${dto.status}. Allowed: [${allowed.join(', ')}]`,
       );
     }
 
@@ -442,7 +447,7 @@ export class UsersService {
     return result;
   }
 
-  // ─── DEACTIVATE ──────────────────────────────────────────────
+  // â”€â”€â”€ DEACTIVATE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async deactivate(
     id: string,
@@ -487,7 +492,7 @@ export class UsersService {
     return updated;
   }
 
-  // ─── FORCE PASSWORD RESET ────────────────────────────────────
+  // â”€â”€â”€ FORCE PASSWORD RESET â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async forcePasswordReset(
     id: string,
@@ -503,7 +508,7 @@ export class UsersService {
 
     if (id === actor.id) {
       throw new ForbiddenException(
-        'Cannot force-reset your own password via this endpoint — use PATCH /auth/change-password',
+        'Cannot force-reset your own password via this endpoint â€” use PATCH /auth/change-password',
       );
     }
 
@@ -546,11 +551,11 @@ export class UsersService {
     };
   }
 
-  // ─── ADMIN "REVEAL PIN" FALLBACK ─────────────────────────────
+  // â”€â”€â”€ ADMIN "REVEAL PIN" FALLBACK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Admin fallback for "view and share the PIN directly" (e.g. SMS delivery
-   * failed). Never returns a previously-issued PIN — always revokes it and
+   * failed). Never returns a previously-issued PIN â€” always revokes it and
    * issues + sends a brand new one, so no plaintext PIN is ever retained at rest.
    */
   async revealPin(
@@ -577,7 +582,7 @@ export class UsersService {
       );
     }
 
-    // Reveal always triggers a fresh SMS (Option B) — same abuse cap as resend-pin.
+    // Reveal always triggers a fresh SMS (Option B) â€” same abuse cap as resend-pin.
     await this.pinService.assertIssuanceRateLimit(`reveal-pin:admin:${actor.id}`, 5, 3600);
 
     const issued = await this.pinService.regenerateAndRevealPin(
@@ -591,7 +596,7 @@ export class UsersService {
     return { pin: issued.pin, expiresAt: issued.expiresAt };
   }
 
-  // ─── RESEND PIN ───────────────────────────────────────────────
+  // â”€â”€â”€ RESEND PIN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Regenerate and re-send the first-login PIN (e.g. the original SMS never
@@ -621,7 +626,7 @@ export class UsersService {
       );
     }
 
-    // SMS costs money — cap regardless of how many different users this admin targets.
+    // SMS costs money â€” cap regardless of how many different users this admin targets.
     await this.pinService.assertIssuanceRateLimit(`resend-pin:admin:${actor.id}`, 5, 3600);
 
     const issued = await this.pinService.generateAndIssuePin(
@@ -644,7 +649,7 @@ export class UsersService {
     return { success: true, message: 'New PIN sent.' };
   }
 
-  // ─── STALE ACCOUNT CLEANUP ───────────────────────────────────
+  // â”€â”€â”€ STALE ACCOUNT CLEANUP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Cron job that runs daily at 2:00 AM (EAT).
@@ -692,39 +697,43 @@ export class UsersService {
     });
     const encryptedPayload = await this.encryption.encrypt(temporaryPassword, tenantId);
     const tempPasswordEncrypted = JSON.stringify(encryptedPayload);
+    const tempPasswordExpiresAt = this.createTempPasswordExpiry();
 
     await this.prisma.user.update({
       where: { id },
       data: {
         passwordHash,
         tempPasswordEncrypted,
+        tempPasswordExpiresAt,
         mustChangePassword: true,
+        phoneVerified: true,
         lastPasswordChangeAt: new Date(),
         refreshToken: null,
       },
     });
 
-    // Best-effort SMS notification — enqueue never throws (SmsService catches
-    // internally), so this can't fail the request. `smsEnqueued` reflects whether
-    // the job was queued, not final delivery. If it fails to queue, the admin can
-    // still retrieve the value via GET /users/:id/reveal-temp-password.
-    const phone = target.phone ?? target.phoneNumber;
-    let smsEnqueued = false;
-    if (phone) {
-      smsEnqueued = await this.smsService.enqueueSms(
-        {
-          type: 'TEMP_PASSWORD',
-          phone,
-          message: `Your Beba SACCO temporary password is ${TEMP_PASSWORD_PLACEHOLDER}. You must change it on your next login.`,
-          encryptedPayload: tempPasswordEncrypted,
-          tenantId,
-        },
-        `users.temp_password:${id}`,
-      );
-    } else {
-      this.logger.warn(
-        `Temp password generated for user=${id} but no phone on file — SMS not sent`,
-      );
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    });
+    const appUrl = this.config.get<string>('app.appUrl') ?? 'http://localhost:3000';
+    const emailEnqueued = await this.enqueueEmailAwaited(
+      {
+        type: 'STAFF_ACCOUNT_CREATED',
+        to: target.email,
+        firstName: target.firstName,
+        saccoName: tenant?.name ?? 'Beba SACCO',
+        role: target.role,
+        portalUrl: `${appUrl}/login`,
+        expiresAt: tempPasswordExpiresAt.toISOString(),
+        purpose: 'TEMP_PASSWORD_REGENERATED',
+        encryptedPayload: tempPasswordEncrypted,
+        tenantId,
+      },
+      `users.temp_password.email:${id}`,
+    );
+    if (emailEnqueued === false) {
+      this.logger.warn(`Temp password generated for user=${id} but email queueing failed`);
     }
 
     await this.auditSafe({
@@ -738,7 +747,8 @@ export class UsersService {
         targetRole: target.role,
         requestedBy: actor.id,
         actorRole: actor.role,
-        smsEnqueued,
+        emailEnqueued,
+        tempPasswordExpiresAt: tempPasswordExpiresAt.toISOString(),
         ipAddress,
       },
       ipAddress,
@@ -746,7 +756,8 @@ export class UsersService {
 
     return {
       success: true,
-      smsEnqueued,
+      emailEnqueued,
+      tempPasswordExpiresAt,
       user: {
         id: target.id,
         email: target.email,
@@ -754,20 +765,20 @@ export class UsersService {
         lastName: target.lastName,
         role: target.role,
       },
-      message: smsEnqueued
-        ? 'Temporary password generated and sent via SMS. An admin can also retrieve it via GET /users/:id/reveal-temp-password.'
-        : 'Temporary password generated, but SMS enqueue failed. Retrieve it via GET /users/:id/reveal-temp-password.',
+      message: emailEnqueued
+        ? 'Temporary password generated and sent via email.'
+        : 'Temporary password generated, but email enqueue failed. Retrieve it via GET /users/:id/reveal-temp-password.',
     };
   }
 
-  // ─── ADMIN "REVEAL TEMP PASSWORD" FALLBACK ────────────────────
+  // â”€â”€â”€ ADMIN "REVEAL TEMP PASSWORD" FALLBACK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
-   * Admin fallback to retrieve the current temporary password when SMS delivery
-   * failed (or was never sent). Decrypts the AES-256-GCM blob stored alongside the
-   * Argon2id hash — the plaintext is never persisted anywhere else. Once the member
-   * sets their own password (PATCH /auth/change-password), tempPasswordEncrypted is
-   * cleared and this endpoint stops working for that account.
+   * Admin fallback to retrieve the current temporary password when email delivery
+   * failed (or the original message was lost). Decrypts the AES-256-GCM blob stored
+   * alongside the Argon2id hash - the plaintext is never persisted anywhere else.
+   * Once the staff user sets their own password (PATCH /auth/change-password),
+   * tempPasswordEncrypted is cleared and this endpoint stops working for that account.
    */
   async revealTemporaryPassword(
     id: string,
@@ -777,7 +788,7 @@ export class UsersService {
   ) {
     const target = await this.prisma.user.findFirst({
       where: { id, tenantId },
-      select: { id: true, role: true, tempPasswordEncrypted: true },
+      select: { id: true, role: true, tempPasswordEncrypted: true, tempPasswordExpiresAt: true },
     });
     if (!target) throw new NotFoundException('User not found');
 
@@ -787,15 +798,25 @@ export class UsersService {
       );
     }
 
+    if (target.tempPasswordExpiresAt && target.tempPasswordExpiresAt.getTime() <= Date.now()) {
+      throw new BadRequestException(
+        'This temporary password has expired. Generate a new temporary password for this user.',
+      );
+    }
+
     if (!canManageRole(actor.role, target.role)) {
       throw new ForbiddenException(
         `${actor.role} cannot reveal a temporary password for a ${target.role} account`,
       );
     }
 
-    // Same abuse cap as reveal-pin — SMS/decryption cost aside, this is a plaintext
+    // Same abuse cap as reveal-pin - this is a plaintext
     // credential disclosure endpoint and should be rate-limited accordingly.
-    await this.pinService.assertIssuanceRateLimit(`reveal-temp-password:admin:${actor.id}`, 5, 3600);
+    await this.pinService.assertIssuanceRateLimit(
+      `reveal-temp-password:admin:${actor.id}`,
+      5,
+      3600,
+    );
 
     const payload = JSON.parse(target.tempPasswordEncrypted) as EncryptedPayload;
     const temporaryPassword = await this.encryption.decrypt(payload, tenantId);
@@ -897,7 +918,7 @@ export class UsersService {
     this.logger.log(`Successfully deleted ${result.count} stale PENDING accounts.`);
   }
 
-  // ─── PRIVATE HELPERS ─────────────────────────────────────────
+  // â”€â”€â”€ PRIVATE HELPERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async disableUser2fa(
     userId: string,
@@ -938,9 +959,9 @@ export class UsersService {
   }
 
   /**
-   * Fire-and-forget audit write — never let an audit failure break the user flow.
+   * Fire-and-forget audit write â€” never let an audit failure break the user flow.
    * A dropped entry here breaks the tamper-evident hash chain (SASRA compliance),
-   * so beyond the local log line it's also reported to Sentry — a silent gap in
+   * so beyond the local log line it's also reported to Sentry â€” a silent gap in
    * the chain should never be discoverable only by grepping server logs.
    */
   private async auditSafe(params: Parameters<AuditService['create']>[0]): Promise<void> {
