@@ -38,6 +38,15 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
+    if (response.headersSent) {
+      this.logger.error(
+        `[${this.correlationId(request) ?? 'no-id'}] Exception after response already sent: ${
+          exception instanceof Error ? exception.message : String(exception)
+        }`,
+      );
+      return;
+    }
+
     let status: number;
     let detail: string | string[];
     let errorCode: string;

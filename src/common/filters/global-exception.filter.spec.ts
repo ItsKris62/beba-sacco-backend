@@ -147,4 +147,26 @@ describe('GlobalExceptionFilter [H-3]', () => {
       }),
     );
   });
+
+  // ── headersSent guard ─────────────────────────────────────────────────────
+
+  it('does not write to the response when headers are already sent', () => {
+    const json = jest.fn();
+    const typeFn = jest.fn(() => ({ json }));
+    const statusFn = jest.fn(() => ({ type: typeFn }));
+    const loggerSpy = jest.spyOn((filter as unknown as { logger: { error: jest.Mock } }).logger, 'error');
+    const host = {
+      switchToHttp: () => ({
+        getResponse: () => ({ status: statusFn, headersSent: true }),
+        getRequest: () => ({ url: '/api/test', headers: {} }),
+      }),
+    } as unknown as ArgumentsHost;
+
+    expect(() => filter.catch(new Error('boom after send'), host)).not.toThrow();
+
+    expect(statusFn).not.toHaveBeenCalled();
+    expect(json).not.toHaveBeenCalled();
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+    expect(loggerSpy).toHaveBeenCalledWith(expect.stringContaining('boom after send'));
+  });
 });
