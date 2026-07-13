@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/node';
 
 interface ProblemDetail {
@@ -63,6 +64,24 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           extraFields = rest;
         }
       }
+    } else if (
+      exception instanceof Prisma.PrismaClientInitializationError ||
+      (exception instanceof Prisma.PrismaClientKnownRequestError && exception.code === 'P2024')
+    ) {
+      // A Neon autosuspend/wake stall (or any other DB connection failure)
+      // surfaces as PrismaClientInitializationError (P1001/P1002, thrown before
+      // any query runs) or, if the stall exhausts pool_timeout waiting for a
+      // connection, PrismaClientKnownRequestError P2024. Both mean "the app is
+      // fine, the database wasn't reachable in time" — distinct from a 500
+      // application bug, so the client can show connection-specific messaging.
+      status = HttpStatus.SERVICE_UNAVAILABLE;
+      detail = 'Database connection unavailable';
+      errorCode = 'DATABASE_UNAVAILABLE';
+      this.logger.error(
+        `[${this.correlationId(request) ?? 'no-id'}] Database connection failure: ${exception.message}`,
+        exception.stack,
+      );
+      Sentry.captureException(exception);
     } else if (exception instanceof Error) {
       status = HttpStatus.INTERNAL_SERVER_ERROR;
       detail = 'Internal server error';
