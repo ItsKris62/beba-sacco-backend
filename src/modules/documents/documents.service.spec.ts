@@ -6,6 +6,7 @@ import { DocumentsService } from './documents.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { StorageService } from '../storage/storage.service';
+import { AlertsService } from '../alerts/alerts.service';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import type { RequestDocumentUploadUrlDto } from './dto/document.dto';
 
@@ -39,6 +40,7 @@ describe('DocumentsService — HEIC/HEIF + octet-stream fallback', () => {
         { provide: PrismaService, useValue: {} },
         { provide: AuditService, useValue: {} },
         { provide: StorageService, useValue: {} },
+        { provide: AlertsService, useValue: { sendSlackAlert: jest.fn(), sendOpsEmail: jest.fn() } },
         { provide: getQueueToken(QUEUE_NAMES.DOCUMENT_CLEANUP), useValue: mockQueue },
         { provide: getQueueToken(QUEUE_NAMES.KYC_REVIEW), useValue: mockQueue },
       ],
