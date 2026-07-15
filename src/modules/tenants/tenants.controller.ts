@@ -16,7 +16,7 @@ import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 @ApiTags('Tenants')
 @ApiBearerAuth()
 @ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
-@Controller('api/v1/tenants')
+@Controller('tenants')
 export class TenantsController {
   constructor(private readonly tenantsService: TenantsService) {}
 

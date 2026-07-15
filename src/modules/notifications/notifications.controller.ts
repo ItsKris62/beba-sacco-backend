@@ -10,7 +10,7 @@ import type { Tenant } from '@prisma/client';
 @ApiTags('Notifications')
 @ApiBearerAuth()
 @ApiHeader({ name: 'X-Tenant-ID', description: 'Tenant identifier for multi-tenancy', required: true })
-@Controller('api/v1/notifications')
+@Controller('notifications')
 export class NotificationsController {
   constructor(private readonly notificationsService: InAppNotificationService) {}
 

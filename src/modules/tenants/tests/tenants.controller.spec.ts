@@ -69,7 +69,7 @@ describe('TenantsController - GET /tenants/public-info', () => {
   });
 
   it('is reachable without an Authorization header or user role', async () => {
-    const res = await request(app.getHttpServer()).get('/api/v1/tenants/public-info').expect(200);
+    const res = await request(app.getHttpServer()).get('/tenants/public-info').expect(200);
 
     expect(tenantsService.getPublicInfo).toHaveBeenCalledWith(tenantId);
     expect(res.body).toEqual({
@@ -103,7 +103,7 @@ describe('TenantsController - PATCH /tenants/settings', () => {
     app = await buildApp(new StubAuthGuard(UserRole.MEMBER), tenantsService);
 
     await request(app.getHttpServer())
-      .patch('/api/v1/tenants/settings')
+      .patch('/tenants/settings')
       .send({ name: 'Updated Name' })
       .expect(403);
 
@@ -114,7 +114,7 @@ describe('TenantsController - PATCH /tenants/settings', () => {
     app = await buildApp(new StubAuthGuard(UserRole.TENANT_ADMIN), tenantsService);
 
     await request(app.getHttpServer())
-      .patch('/api/v1/tenants/settings')
+      .patch('/tenants/settings')
       .send({ name: 'Updated Name', contactEmail: 'new@kcboda.co.ke' })
       .expect(200);
 

@@ -5,7 +5,7 @@ import { TwoFactorSetupGuard } from './guards/two-factor-setup.guard';
 import { PrismaService } from '../../prisma/prisma.service';
 import * as argon2 from 'argon2';
 
-@Controller('api/v1/auth/2fa')
+@Controller('auth/2fa')
 export class TwoFactorController {
   constructor(
     private readonly twoFactorService: TwoFactorService,
