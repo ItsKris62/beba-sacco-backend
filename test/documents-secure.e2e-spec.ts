@@ -95,7 +95,7 @@ describe('Secure Upload Flow (FEATURE_SECURE_UPLOAD_V2=true)', () => {
   });
 
   it('quarantines documents when server-side checksum verification fails', async () => {
-    const { service, prisma, storage } = createDocumentsServiceHarness();
+    const { service, prisma, storage, alerts } = createDocumentsServiceHarness();
     storage.getFileStream.mockResolvedValueOnce(
       (async function* () {
         yield Buffer.from('tampered content');
@@ -120,6 +120,7 @@ describe('Secure Upload Flow (FEATURE_SECURE_UPLOAD_V2=true)', () => {
         }),
       }),
     );
+    expect(alerts.sendSlackAlert).toHaveBeenCalledWith(expect.stringContaining(documentId));
   });
 
   it('accepts matching checksums and moves documents to pending review', async () => {
@@ -238,10 +239,16 @@ function createDocumentsServiceHarness() {
     add: jest.fn().mockResolvedValue({ id: 'kyc-job' }),
   };
 
+  const alerts = {
+    sendSlackAlert: jest.fn().mockResolvedValue(undefined),
+    sendOpsEmail: jest.fn().mockResolvedValue(undefined),
+  };
+
   const service = new DocumentsService(
     prisma as never,
     audit as never,
     storage as never,
+    alerts as never,
     cleanupQueue as never,
     kycReviewQueue as never,
   );
@@ -252,6 +259,7 @@ function createDocumentsServiceHarness() {
     documentRecord,
     audit,
     storage,
+    alerts,
     cleanupQueue,
     kycReviewQueue,
   };

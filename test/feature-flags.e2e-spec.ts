@@ -195,10 +195,16 @@ function createDocumentsServiceHarness() {
     add: jest.fn().mockResolvedValue({ id: 'kyc-job' }),
   };
 
+  const alerts = {
+    sendSlackAlert: jest.fn().mockResolvedValue(undefined),
+    sendOpsEmail: jest.fn().mockResolvedValue(undefined),
+  };
+
   const service = new DocumentsService(
     prisma as never,
     audit as never,
     storage as never,
+    alerts as never,
     cleanupQueue as never,
     kycReviewQueue as never,
   );

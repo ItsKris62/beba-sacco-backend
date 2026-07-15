@@ -496,15 +496,27 @@ export class AdminService {
    */
   async getPendingMembers(
     tenantId: string,
-    opts: { search?: string; page?: number; limit?: number } = {},
+    opts: {
+      search?: string;
+      page?: number;
+      limit?: number;
+      statusFilter?: 'ALL' | 'PENDING_REVIEW' | 'INCOMPLETE';
+    } = {},
   ) {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
     const skip = (page - 1) * limit;
 
+    const kycStatus =
+      opts.statusFilter === 'INCOMPLETE'
+        ? KycStatus.PENDING_UPLOAD
+        : opts.statusFilter === 'PENDING_REVIEW'
+          ? KycStatus.PENDING_REVIEW
+          : { in: [KycStatus.PENDING_REVIEW, KycStatus.PENDING_UPLOAD] };
+
     const where = {
       tenantId,
-      kycStatus: KycStatus.PENDING_REVIEW,
+      kycStatus,
       ...(opts.search && {
         OR: [
           { memberNumber: { contains: opts.search, mode: 'insensitive' as const } },
@@ -538,7 +550,34 @@ export class AdminService {
       this.prisma.member.count({ where }),
     ]);
 
-    return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+    const memberIds = data.map((member) => member.id);
+    const uploadedByMember = new Map<string, number>();
+    if (memberIds.length > 0) {
+      const uploaded = await this.prisma.document.findMany({
+        where: {
+          tenantId,
+          memberId: { in: memberIds },
+          type: { in: REQUIRED_KYC_DOCUMENT_TYPES },
+          status: { in: [DocumentStatus.PENDING_REVIEW, DocumentStatus.APPROVED] },
+        },
+        distinct: ['memberId', 'type'],
+        select: { memberId: true },
+      });
+      for (const doc of uploaded) {
+        uploadedByMember.set(doc.memberId, (uploadedByMember.get(doc.memberId) ?? 0) + 1);
+      }
+    }
+
+    const enriched = data.map((member) => {
+      const documentsUploaded = uploadedByMember.get(member.id) ?? 0;
+      return {
+        ...member,
+        documentsUploaded,
+        isComplete: documentsUploaded >= REQUIRED_KYC_DOCUMENT_TYPES.length,
+      };
+    });
+
+    return { data: enriched, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
   // ─── KYC REVIEW (APPROVE / REJECT) ───────────────────────────

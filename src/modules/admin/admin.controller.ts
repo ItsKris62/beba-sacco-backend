@@ -76,20 +76,24 @@ export class AdminController {
   @Get('members/pending')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
   @ApiOperation({
-    summary: 'List members pending KYC review (oldest first)',
-    description: 'Returns members with kycStatus = PENDING_REVIEW in FIFO order.',
+    summary: 'List members pending KYC review or with incomplete submissions',
+    description:
+      'PENDING_REVIEW returns members awaiting staff review (all required docs uploaded), ' +
+      'INCOMPLETE returns members still missing required documents, ALL returns both, in FIFO order.',
   })
   @ApiQuery({ name: 'search', required: false })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
-  @ApiResponse({ status: 200, description: 'Paginated pending members' })
+  @ApiQuery({ name: 'statusFilter', required: false, enum: ['ALL', 'PENDING_REVIEW', 'INCOMPLETE'] })
+  @ApiResponse({ status: 200, description: 'Paginated pending/incomplete members' })
   getPendingMembers(
     @CurrentTenant() tenant: Tenant,
     @Query('search') search?: string,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
+    @Query('statusFilter') statusFilter?: 'ALL' | 'PENDING_REVIEW' | 'INCOMPLETE',
   ) {
-    return this.adminService.getPendingMembers(tenant.id, { search, page, limit });
+    return this.adminService.getPendingMembers(tenant.id, { search, page, limit, statusFilter });
   }
 
   // ─── TRANSACTIONS ─────────────────────────────────────────────

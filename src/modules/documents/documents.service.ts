@@ -17,6 +17,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { FeatureFlags } from '../../config/feature-flags';
 import { AuditService } from '../audit/audit.service';
 import { StorageService } from '../storage/storage.service';
+import { AlertsService } from '../alerts/alerts.service';
 import {
   ConfirmDocumentUploadDto,
   DocumentUploadUrlResponseDto,
@@ -68,6 +69,7 @@ export class DocumentsService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly storage: StorageService,
+    private readonly alerts: AlertsService,
     @InjectQueue(QUEUE_NAMES.DOCUMENT_CLEANUP)
     private readonly cleanupQueue: Queue,
     @InjectQueue(QUEUE_NAMES.KYC_REVIEW)
@@ -969,6 +971,17 @@ export class DocumentsService {
               objectKey: document.objectKey,
             },
           });
+
+          this.alerts
+            .sendSlackAlert(
+              `:warning: KYC document quarantined — checksum mismatch\n` +
+                `Document: ${document.id}\n` +
+                `Expected: \`${expectedChecksum}\`\n` +
+                `Actual: \`${actualChecksum}\``,
+            )
+            .catch((err: unknown) =>
+              this.logger.error('Quarantine alert dispatch failed', err instanceof Error ? err.stack : err),
+            );
 
           throw new BadRequestException('FILE_INTEGRITY_CHECK_FAILED');
         }

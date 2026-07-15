@@ -123,6 +123,14 @@ services:
         value: "true"
       - key: FEATURE_EMAIL_VERIFICATION_ENFORCED
         value: "true"
+      # Staged rollout per docs/UAT-HANDOFF.md — "canary" scopes server-side checksum
+      # verification to the tenant IDs below instead of enabling it tenant-wide.
+      # Replace the placeholder with a real tenant UUID before this takes effect;
+      # rollback procedure: docs/ROLLBACK.md.
+      - key: FEATURE_SECURE_UPLOAD_V2
+        value: canary
+      - key: FEATURE_SECURE_UPLOAD_V2_CANARY_TENANTS
+        value: REPLACE_WITH_CANARY_TENANT_UUID
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID
@@ -244,6 +252,12 @@ services:
         value: Beba SACCO
       - key: ENABLE_PRODUCT_RULES
         value: "true"
+      # Mirrors beba-api — no worker code path reads this today, but kept in sync
+      # so a future async KYC job doesn't silently see a different flag state.
+      - key: FEATURE_SECURE_UPLOAD_V2
+        value: canary
+      - key: FEATURE_SECURE_UPLOAD_V2_CANARY_TENANTS
+        value: REPLACE_WITH_CANARY_TENANT_UUID
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID
