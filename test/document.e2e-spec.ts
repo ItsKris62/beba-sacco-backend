@@ -7,9 +7,13 @@ import {
 } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import * as argon2 from 'argon2';
+import { createHash } from 'crypto';
 import { TestAppContext, TestAppFactory } from './helpers/test-app.factory';
 import { StorageService } from '../src/modules/storage/storage.service';
 import { DocumentsService } from '../src/modules/documents/documents.service';
+
+const MOCK_UPLOAD_BYTES = Buffer.from('member-e2e-upload-content');
+const MOCK_UPLOAD_CHECKSUM = createHash('sha256').update(MOCK_UPLOAD_BYTES).digest('hex');
 
 describe('Document Workflow E2E', () => {
   let ctx: TestAppContext;
@@ -36,6 +40,12 @@ describe('Document Workflow E2E', () => {
       lastModified: new Date(),
     });
     jest.spyOn(storage, 'deleteFile').mockResolvedValue(undefined);
+    jest.spyOn(storage, 'validateUploadedSize').mockResolvedValue(undefined);
+    jest.spyOn(storage, 'getFileStream').mockImplementation(async () => {
+      return (async function* () {
+        yield MOCK_UPLOAD_BYTES;
+      })();
+    });
 
     const loanOfficerId = uuidv4();
     await ctx.prisma.user.create({
@@ -48,9 +58,8 @@ describe('Document Workflow E2E', () => {
         firstName: 'Loan',
         lastName: 'Officer',
         phone: '254744444444',
-        isActive: true,
+        accountStatus: 'ACTIVE',
         emailVerified: true,
-        status: 'APPROVED',
       },
     });
 
@@ -87,19 +96,30 @@ describe('Document Workflow E2E', () => {
       .send({
         type: DocumentType.NATIONAL_ID_FRONT,
         mimeType: 'image/jpeg',
-        fileSize: 1024,
+        fileSize: MOCK_UPLOAD_BYTES.length,
+        checksum: MOCK_UPLOAD_CHECKSUM,
       })
       .expect(201);
 
     expect(urlRes.body.documentId).toBeDefined();
     expect(urlRes.body.preSignedUrl).toBeDefined();
 
+    // storage.headFile is mocked to report this length regardless of key —
+    // keep the two mocks' byte counts consistent so validateUploadedSize's
+    // real (non-mocked in this spec) 5% tolerance check would also pass.
+    jest.spyOn(storage, 'headFile').mockResolvedValueOnce({
+      contentLength: MOCK_UPLOAD_BYTES.length,
+      contentType: 'image/jpeg',
+      eTag: '"test-etag"',
+      lastModified: new Date(),
+    });
+
     await ctx
       .request()
       .post(`/api/members/documents/${urlRes.body.documentId}/confirm`)
       .set('Authorization', `Bearer ${ctx.seed.memberToken}`)
       .set('X-Tenant-ID', ctx.seed.tenantId)
-      .send({})
+      .send({ checksum: MOCK_UPLOAD_CHECKSUM, uploadToken: urlRes.body.uploadToken })
       .expect(200);
 
     const document = await ctx.prisma.document.findFirst({
@@ -108,7 +128,11 @@ describe('Document Workflow E2E', () => {
     expect(document?.status).toBe(DocumentStatus.PENDING_REVIEW);
   });
 
-  it('blocks LOAN_OFFICER from approving KYC documents', async () => {
+  // LOAN_OFFICER is a deliberate reviewer role (documents.service.ts REVIEW_ROLES,
+  // admin-documents.controller.ts @Roles + comment, admin-documents.controller.spec.ts
+  // STAFF_REVIEW_ROLES) — loan officers review member KYC as part of onboarding.
+  // This is not a maker-checker-sensitive action like loan disbursement.
+  it('allows LOAN_OFFICER to approve KYC documents', async () => {
     const pendingDoc = await ctx.prisma.document.findFirst({
       where: { tenantId: ctx.seed.tenantId, status: DocumentStatus.PENDING_REVIEW },
     });
@@ -120,7 +144,7 @@ describe('Document Workflow E2E', () => {
       .set('Authorization', `Bearer ${loanOfficerToken}`)
       .set('X-Tenant-ID', ctx.seed.tenantId)
       .send({ status: DocumentStatus.APPROVED })
-      .expect(403);
+      .expect(200);
   });
 
   it('allows MANAGER to approve all mandatory docs and updates Member.kycStatus', async () => {

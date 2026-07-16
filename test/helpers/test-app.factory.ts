@@ -252,7 +252,10 @@ export class TestAppFactory {
     app: INestApplication,
   ): Promise<TestSeed> {
     const tenantId = uuidv4();
-    const tenantSlug = 'test-sacco';
+    // Unique per run: AuditLog rows are immutable (DB trigger blocks DELETE/UPDATE),
+    // so cleanDatabase() can silently fail to remove a prior run's Tenant once it has
+    // audit logs, leaving a slug collision on the next run if this were hardcoded.
+    const tenantSlug = `test-sacco-${tenantId.slice(0, 8)}`;
     const passwordHash = await argon2.hash('TestPassword123!');
 
     // Tenant
