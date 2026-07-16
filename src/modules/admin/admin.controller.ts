@@ -1,16 +1,28 @@
 import {
-  Controller, Get, Patch, Param, Body,
-  Query, HttpCode, HttpStatus, ParseUUIDPipe, Req,
+  Controller,
+  Get,
+  Patch,
+  Param,
+  Body,
+  Query,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+  Req,
 } from '@nestjs/common';
 import {
-  ApiTags, ApiBearerAuth, ApiSecurity, ApiOperation,
-  ApiResponse, ApiQuery, ApiHeader,
+  ApiTags,
+  ApiBearerAuth,
+  ApiSecurity,
+  ApiOperation,
+  ApiResponse,
+  ApiQuery,
+  ApiHeader,
 } from '@nestjs/swagger';
 import { TransactionStatus, TransactionType, UserRole, AccountStatus } from '@prisma/client';
 import { Request } from 'express';
 import { AdminService } from './admin.service';
 import { UpdateKycDto } from './dto/update-kyc.dto';
-import { ReviewMemberDto } from './dto/review-member.dto';
 import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
 import {
   GetTransactionStatsQueryDto,
@@ -27,7 +39,11 @@ import { ApiErrorExamples } from '../../common/swagger/error-response-examples';
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@ApiHeader({ name: 'X-Correlation-ID', required: false, description: 'Optional request tracing ID' })
+@ApiHeader({
+  name: 'X-Correlation-ID',
+  required: false,
+  description: 'Optional request tracing ID',
+})
 @Controller('admin')
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
@@ -53,7 +69,11 @@ export class AdminController {
   @Get('members')
   @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR)
   @ApiOperation({ summary: 'Paginated, searchable member list with role and status filters' })
-  @ApiQuery({ name: 'search', required: false, description: 'Search by name, email, member number, or national ID' })
+  @ApiQuery({
+    name: 'search',
+    required: false,
+    description: 'Search by name, email, member number, or national ID',
+  })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'accountStatus', required: false, enum: AccountStatus })
@@ -68,7 +88,14 @@ export class AdminController {
     @Query('recentlyActive') recentlyActive?: boolean,
     @Query('role') role?: UserRole,
   ) {
-    return this.adminService.getMembers(tenant.id, { search, page, limit, accountStatus, recentlyActive, role });
+    return this.adminService.getMembers(tenant.id, {
+      search,
+      page,
+      limit,
+      accountStatus,
+      recentlyActive,
+      role,
+    });
   }
 
   // ─── PENDING KYC QUEUE ───────────────────────────────────────
@@ -84,7 +111,11 @@ export class AdminController {
   @ApiQuery({ name: 'search', required: false })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
-  @ApiQuery({ name: 'statusFilter', required: false, enum: ['ALL', 'PENDING_REVIEW', 'INCOMPLETE'] })
+  @ApiQuery({
+    name: 'statusFilter',
+    required: false,
+    enum: ['ALL', 'PENDING_REVIEW', 'INCOMPLETE'],
+  })
   @ApiResponse({ status: 200, description: 'Paginated pending/incomplete members' })
   getPendingMembers(
     @CurrentTenant() tenant: Tenant,
@@ -104,7 +135,7 @@ export class AdminController {
     summary: 'Aggregated transaction flow stats',
     description:
       'Returns completed transaction inflows, outflows, volume, and net flow. ' +
-      'TENANT_ADMIN / MANAGER / AUDITOR see only their tenant\'s transactions. ' +
+      "TENANT_ADMIN / MANAGER / AUDITOR see only their tenant's transactions. " +
       'SUPER_ADMIN omits tenant scoping to query across all tenants.',
   })
   @ApiQuery({ name: 'from', required: false, description: 'ISO 8601 start date' })
@@ -125,7 +156,7 @@ export class AdminController {
   @ApiOperation({
     summary: 'Paginated, filterable transaction list',
     description:
-      'TENANT_ADMIN / MANAGER / AUDITOR see only their tenant\'s transactions. ' +
+      "TENANT_ADMIN / MANAGER / AUDITOR see only their tenant's transactions. " +
       'SUPER_ADMIN omits tenant scoping to query across all tenants.',
   })
   @ApiQuery({ name: 'type', required: false, enum: TransactionType })
@@ -143,40 +174,6 @@ export class AdminController {
   ) {
     const tenantId = user.role === UserRole.SUPER_ADMIN ? undefined : tenant.id;
     return this.adminService.getTransactions(tenantId, query);
-  }
-
-  // ─── KYC REVIEW (APPROVE / REJECT) ───────────────────────────
-
-  @Patch('members/:id/review')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Approve or reject a member KYC submission',
-    deprecated: true,
-    description:
-      'Deprecated: use PATCH /admin/members/:id/kyc with verified, documentIds, notes, and checklist. ' +
-      'APPROVE: atomically sets kycStatus = APPROVED and creates FOSA + BOSA accounts. ' +
-      'REJECT: sets kycStatus = REJECTED and stores the rejection reason. ' +
-      'Both actions send an email notification and audit log.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Review recorded',
-    schema: { example: { success: true, action: 'APPROVE' } },
-  })
-  @ApiResponse({ status: 400, ...ApiErrorExamples.badUploadRequest })
-  @ApiResponse({ status: 401, ...ApiErrorExamples.authenticationRequired })
-  @ApiResponse({ status: 403, ...ApiErrorExamples.forbiddenTenant })
-  @ApiResponse({ status: 404, ...ApiErrorExamples.notFound })
-  @ApiResponse({ status: 500, ...ApiErrorExamples.internalServerError })
-  reviewMember(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: ReviewMemberDto,
-    @CurrentTenant() tenant: Tenant,
-    @CurrentUser() actor: AuthenticatedUser,
-    @Req() req: Request,
-  ) {
-    return this.adminService.reviewMember(id, dto, tenant.id, actor, req.ip, req.get('user-agent'));
   }
 
   // ─── KYC UPDATE ──────────────────────────────────────────────

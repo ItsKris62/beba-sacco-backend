@@ -57,6 +57,9 @@ export const QUEUE_NAMES = {
   REPORT_GENERATION: 'reports.generation',
   REPORT_GENERATION_DLQ: 'reports.generation.dlq',
   DOCUMENT_CLEANUP: 'documents.cleanup',
+  // Phase 3 – ingest externally-hosted KYC documents (see onboarding.service.ts's
+  // documentUrl seeding) into the managed R2/MinIO bucket
+  DOCUMENT_INGESTION: 'documents.ingestion',
   DR_DRILL: 'sre.dr-drill',
   // Phase 1 – KYC document review async pipeline
   KYC_REVIEW: 'kyc.review',
@@ -331,6 +334,23 @@ export interface PasswordResetOtpEmailPayload extends BaseEmailPayload {
   type: 'PASSWORD_RESET_OTP';
   otp: string;
   expiresInMinutes: number;
+}
+
+// ─── Phase 3 – document ingestion job payload ─────────────────────────────────
+
+/**
+ * Ingests a document whose Document.objectKey is currently a raw external URL
+ * (seeded by onboarding.service.ts from MemberApplication.documentUrl — see the
+ * Phase 1/2 audit) into the managed R2/MinIO bucket, replacing objectKey with a
+ * real internal key. See DocumentIngestionProcessor.
+ */
+export interface DocumentIngestionJobPayload {
+  tenantId: string;
+  documentId: string;
+  memberId: string;
+  /** Informational only — the processor resolves the document by documentId. */
+  documentType: string;
+  sourceUrl: string;
 }
 
 // ─── SMS job payloads ─────────────────────────────────────────────────────────

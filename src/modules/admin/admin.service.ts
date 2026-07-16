@@ -21,9 +21,8 @@ import { AuditService } from '../audit/audit.service';
 import { DOMAIN_EVENTS, DomainEventName } from '../../common/constants/events';
 import { RedisService } from '../../common/services/redis.service';
 import { CacheService } from '../../common/services/cache.service';
-import { QUEUE_NAMES, type EmailJobPayload } from '../queue/queue.constants';
+import { QUEUE_NAMES } from '../queue/queue.constants';
 import { UpdateKycDto } from './dto/update-kyc.dto';
-import { ReviewMemberDto, ReviewAction } from './dto/review-member.dto';
 import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
 import { FeatureFlags } from '../../config/feature-flags';
 import { resolveKycStatus, toBusinessStatus } from '../members/member.types';
@@ -293,7 +292,11 @@ export class AdminService {
       // daily accrual job, so this reads it rather than recomputing arrears here.
       // DB-side sum — same perf constraint as activeLoansAgg above.
       this.prisma.loan.aggregate({
-        where: { tenantId, status: LoanStatus.ACTIVE, staging: { in: [LoanStaging.WATCHLIST, LoanStaging.NPL] } },
+        where: {
+          tenantId,
+          status: LoanStatus.ACTIVE,
+          staging: { in: [LoanStaging.WATCHLIST, LoanStaging.NPL] },
+        },
         _sum: { outstandingBalance: true },
       }),
       this.prisma.loan.aggregate({
@@ -323,7 +326,11 @@ export class AdminService {
       // Withdrawals stuck past the auto-refund grace window — see
       // WithdrawalReconciliationProcessor / AdminReconciliationService.
       this.prisma.mpesaTransaction.count({
-        where: { tenantId, referenceType: 'FOSA_WITHDRAWAL', status: TransactionStatus.RECON_PENDING },
+        where: {
+          tenantId,
+          referenceType: 'FOSA_WITHDRAWAL',
+          status: TransactionStatus.RECON_PENDING,
+        },
       }),
     ]);
 
@@ -580,192 +587,6 @@ export class AdminService {
     return { data: enriched, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
-  // ─── KYC REVIEW (APPROVE / REJECT) ───────────────────────────
-
-  /**
-   * Approve or reject a member's KYC submission.
-   *
-   * APPROVE path (atomic transaction):
-   *   1. Set kycStatus = APPROVED, record reviewer + timestamp
-   *   2. Increment TenantCounter.accountSeq by 2 (FOSA + BOSA)
-   *   3. Create FOSA account (ACC-FOSA-XXXXXX)
-   *   4. Create BOSA account (ACC-BOSA-XXXXXX)
-   *
-   * REJECT path:
-   *   1. Set kycStatus = REJECTED, store reason + reviewer + timestamp
-   *
-   * Both paths:
-   *   - Enqueue email notification (fire-and-forget)
-   *   - Audit log
-   *   - Invalidate dashboard cache
-   */
-  async reviewMember(
-    memberId: string,
-    dto: ReviewMemberDto,
-    tenantId: string,
-    actor: { id: string; role: UserRole },
-    ipAddress?: string,
-    userAgent?: string,
-  ) {
-    const member = await this.prisma.member.findFirst({
-      where: { id: memberId, tenantId, kycStatus: KycStatus.PENDING_REVIEW },
-      include: {
-        user: { select: { email: true, firstName: true, lastName: true } },
-      },
-    });
-    if (!member) {
-      throw new NotFoundException('Pending member not found - may already have been reviewed');
-    }
-
-    if (dto.action === ReviewAction.APPROVE) {
-      await this.assertMemberHasApprovedKycDocuments(tenantId, memberId);
-    } else if (!dto.reason?.trim()) {
-      throw new BadRequestException('A rejection reason is required');
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      const oldValue = await tx.member.findFirst({
-        where: { id: memberId, tenantId },
-        select: {
-          id: true,
-          memberNumber: true,
-          kycStatus: true,
-          kycReviewedAt: true,
-          kycReviewedByUserId: true,
-          kycRejectionReason: true,
-        },
-      });
-      if (!oldValue) throw new NotFoundException('Member not found');
-
-      const reviewedAt = new Date();
-      const updated = await tx.member.update({
-        where: { id: memberId },
-        data:
-          dto.action === ReviewAction.APPROVE
-            ? {
-                kycStatus: KycStatus.APPROVED,
-                kycReviewedAt: reviewedAt,
-                kycReviewedByUserId: actor.id,
-                kycRejectionReason: null,
-              }
-            : {
-                kycStatus: KycStatus.REJECTED,
-                kycReviewedAt: reviewedAt,
-                kycReviewedByUserId: actor.id,
-                kycRejectionReason: dto.reason!.trim(),
-              },
-        select: {
-          id: true,
-          memberNumber: true,
-          kycStatus: true,
-          kycReviewedAt: true,
-          kycReviewedByUserId: true,
-          kycRejectionReason: true,
-        },
-      });
-
-      if (dto.action === ReviewAction.APPROVE) {
-        // Atomically claim two account sequence numbers
-        const counter = await tx.tenantCounter.upsert({
-          where: { tenantId },
-          update: { accountSeq: { increment: 2 } },
-          create: { tenantId, memberSeq: 0, accountSeq: 2, loanSeq: 0 },
-          select: { accountSeq: true },
-        });
-
-        const fosaSeq = counter.accountSeq - 1;
-        const bosaSeq = counter.accountSeq;
-
-        await tx.account.create({
-          data: {
-            tenantId,
-            memberId,
-            accountNumber: `ACC-FOSA-${String(fosaSeq).padStart(6, '0')}`,
-            accountType: AccountType.FOSA,
-          },
-        });
-
-        await tx.account.create({
-          data: {
-            tenantId,
-            memberId,
-            accountNumber: `ACC-BOSA-${String(bosaSeq).padStart(6, '0')}`,
-            accountType: AccountType.BOSA,
-          },
-        });
-      }
-
-      await this.audit.logAtomic(tx, {
-        tenantId,
-        actorId: actor.id,
-        action: dto.action === ReviewAction.APPROVE ? 'MEMBER.KYC_APPROVE' : 'MEMBER.KYC_REJECT',
-        entityType: 'Member',
-        entityId: memberId,
-        oldValue,
-        newValue: updated,
-        metadata: {
-          action: dto.action,
-          reason: dto.reason,
-          reviewedBy: actor.id,
-          actorRole: actor.role,
-        },
-        ipAddress,
-        userAgent,
-      });
-    });
-
-    const kycStatus = dto.action === ReviewAction.APPROVE ? KycStatus.APPROVED : KycStatus.REJECTED;
-    this.emitDomainEvent(DOMAIN_EVENTS.KYC.STATUS_CHANGED, {
-      tenantId,
-      memberId,
-      kycStatus,
-      actorId: actor.id,
-    });
-    this.emitDomainEvent(
-      dto.action === ReviewAction.APPROVE ? DOMAIN_EVENTS.KYC.APPROVED : DOMAIN_EVENTS.KYC.REJECTED,
-      {
-        tenantId,
-        memberId,
-        kycStatus,
-        actorId: actor.id,
-      },
-    );
-
-    if (dto.action === ReviewAction.APPROVE) {
-      this.emitDomainEvent(DOMAIN_EVENTS.MEMBER.ACCOUNT_ACTIVATED, {
-        tenantId,
-        memberId,
-        actorId: actor.id,
-      });
-      await this.emailQueue
-        .add('send', {
-          type: 'MEMBER_APPROVED',
-          to: member.user.email,
-          firstName: member.user.firstName,
-          saccoName: 'Your SACCO', // Phase 3: resolve from tenant.name
-          memberNumber: member.memberNumber,
-        } satisfies EmailJobPayload)
-        .catch((e: unknown) => this.logger.error('Email enqueue failed (non-fatal)', e));
-      recordSaccoMetric('sacco.kyc.approved', 1, {
-        tenantId,
-        memberId,
-        flow: 'reviewMember',
-      });
-    } else {
-      await this.emailQueue
-        .add('send', {
-          type: 'MEMBER_REJECTED',
-          to: member.user.email,
-          firstName: member.user.firstName,
-          reason: dto.reason!.trim(),
-        } satisfies EmailJobPayload)
-        .catch((e: unknown) => this.logger.error('Email enqueue failed (non-fatal)', e));
-    }
-
-    await this.invalidateDashboardCache(tenantId);
-
-    return { success: true, action: dto.action };
-  }
   // ─── KYC UPDATE ──────────────────────────────────────────────
 
   async updateKyc(
@@ -1126,29 +947,6 @@ export class AdminService {
     const missing = REQUIRED_KYC_DOCUMENT_TYPES.filter((type) => !approvedTypes.has(type));
     if (missing.length > 0) {
       throw new BadRequestException(`Approved KYC documents missing: ${missing.join(', ')}`);
-    }
-  }
-
-  private async assertMemberHasApprovedKycDocuments(
-    tenantId: string,
-    memberId: string,
-  ): Promise<void> {
-    const documents = await this.prisma.document.findMany({
-      where: {
-        tenantId,
-        memberId,
-        status: DocumentStatus.APPROVED,
-        type: { in: REQUIRED_KYC_DOCUMENT_TYPES },
-      },
-      distinct: ['type'],
-      select: { type: true },
-    });
-    const approvedTypes = new Set(documents.map((document) => document.type));
-    const missing = REQUIRED_KYC_DOCUMENT_TYPES.filter((type) => !approvedTypes.has(type));
-    if (missing.length > 0) {
-      throw new BadRequestException(
-        `Cannot approve KYC until required documents are approved: ${missing.join(', ')}`,
-      );
     }
   }
 }

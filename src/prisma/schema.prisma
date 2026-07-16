@@ -258,10 +258,12 @@ model Member {
   kycChecklist        Json?
   kycReviewNotes      String?
   isBlacklisted       Boolean            @default(false)
+  memberApplicationId String?            @unique
   accounts            Account[]
   documents           Document[]
   guarantors          LoanGuarantor[]
   loans               Loan[]
+  memberApplication   MemberApplication? @relation(fields: [memberApplicationId], references: [id])
   tenant              Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   stageAssignments    MemberStage[]
@@ -1298,7 +1300,7 @@ model MemberApplication {
   idNumber    String
   phoneNumber String
   stageName   String
-  position    String            @default("MEMBER")
+  position    StagePosition     @default(MEMBER)
   wardId      String
   status      ApplicationStatus @default(SUBMITTED)
   documentUrl String?
@@ -1308,6 +1310,7 @@ model MemberApplication {
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
   ward        Ward              @relation(fields: [wardId], references: [id])
+  member      Member?
 
   @@index([tenantId])
   @@index([tenantId, status])

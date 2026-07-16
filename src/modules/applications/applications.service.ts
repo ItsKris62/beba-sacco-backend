@@ -5,7 +5,7 @@ import {
   ConflictException,
   BadRequestException,
 } from '@nestjs/common';
-import { ApplicationStatus } from '@prisma/client';
+import { ApplicationStatus, StagePosition } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
@@ -62,12 +62,7 @@ export class ApplicationsService {
 
   // ─── SUBMIT ──────────────────────────────────────────────────────────────────
 
-  async create(
-    dto: CreateApplicationDto,
-    tenantId: string,
-    actorId: string,
-    ipAddress?: string,
-  ) {
+  async create(dto: CreateApplicationDto, tenantId: string, actorId: string, ipAddress?: string) {
     // Resolve stage → derive wardId and stageName so the caller only needs a stageId.
     const stage = await this.prisma.stage.findFirst({
       where: { id: dto.stageId, tenantId },
@@ -108,10 +103,7 @@ export class ApplicationsService {
     const existingUser = await this.prisma.user.findFirst({
       where: {
         tenantId,
-        OR: [
-          { idNumber: dto.idNumber },
-          { phoneNumber: dto.phoneNumber },
-        ],
+        OR: [{ idNumber: dto.idNumber }, { phoneNumber: dto.phoneNumber }],
       },
       select: { id: true },
     });
@@ -125,9 +117,9 @@ export class ApplicationsService {
         lastName: dto.lastName,
         idNumber: dto.idNumber,
         phoneNumber: dto.phoneNumber,
-        stageName,          // derived from stage lookup
-        position: dto.position ?? 'MEMBER',
-        wardId,             // derived from stage lookup
+        stageName, // derived from stage lookup
+        position: dto.position ?? StagePosition.MEMBER,
+        wardId, // derived from stage lookup
         documentUrl: dto.documentUrl,
         tenantId,
         status: ApplicationStatus.SUBMITTED,
@@ -150,7 +142,9 @@ export class ApplicationsService {
       ipAddress,
     });
 
-    this.logger.log(`Application submitted: ${application.id} for ${dto.firstName} ${dto.lastName}`);
+    this.logger.log(
+      `Application submitted: ${application.id} for ${dto.firstName} ${dto.lastName}`,
+    );
     return application;
   }
 
@@ -166,7 +160,9 @@ export class ApplicationsService {
 
     const where = {
       tenantId,
-      status: opts.status ?? { in: [ApplicationStatus.SUBMITTED, ApplicationStatus.PENDING_REVIEW] },
+      status: opts.status ?? {
+        in: [ApplicationStatus.SUBMITTED, ApplicationStatus.PENDING_REVIEW],
+      },
       ...(opts.search && {
         OR: [
           { firstName: { contains: opts.search, mode: 'insensitive' as const } },

@@ -35,13 +35,23 @@ import { ApiErrorExamples } from '../../common/swagger/error-response-examples';
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@ApiHeader({ name: 'X-Correlation-ID', required: false, description: 'Optional request tracing ID' })
+@ApiHeader({
+  name: 'X-Correlation-ID',
+  required: false,
+  description: 'Optional request tracing ID',
+})
 @Controller('admin/kyc/documents')
 export class AdminDocumentsController {
   constructor(private readonly documents: DocumentsService) {}
 
   @Get()
-  @Roles(UserRole.MEMBER)
+  @Roles(
+    UserRole.TENANT_ADMIN,
+    UserRole.MANAGER,
+    UserRole.CHAIRMAN,
+    UserRole.LOAN_OFFICER,
+    UserRole.AUDITOR,
+  )
   @ApiOperation({
     summary: 'List tenant-scoped KYC documents',
     description:
@@ -60,7 +70,13 @@ export class AdminDocumentsController {
   }
 
   @Get(':id/download')
-  @Roles(UserRole.MEMBER)
+  @Roles(
+    UserRole.TENANT_ADMIN,
+    UserRole.MANAGER,
+    UserRole.CHAIRMAN,
+    UserRole.LOAN_OFFICER,
+    UserRole.AUDITOR,
+  )
   @ApiOperation({ summary: 'Generate a short-lived download URL for staff review' })
   @ApiResponse({ status: 200, description: 'Pre-signed download URL' })
   getDownloadUrl(
@@ -73,12 +89,13 @@ export class AdminDocumentsController {
   }
 
   @Patch(':id/review')
-  @Roles(UserRole.MEMBER)
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.CHAIRMAN, UserRole.LOAN_OFFICER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Approve or reject a KYC document (synchronous)',
     description:
-      'Only MANAGER and CHAIRMAN may approve or reject, enforced inside the service as exact-role policy.',
+      'TENANT_ADMIN, MANAGER, CHAIRMAN, and LOAN_OFFICER may approve or reject — enforced ' +
+      'both here and inside documents.service.ts#assertCanReview (REVIEW_ROLES).',
   })
   @ApiResponse({ status: 200, description: 'Document review recorded' })
   reviewDocument(
@@ -92,13 +109,14 @@ export class AdminDocumentsController {
   }
 
   @Post(':id/review')
-  @Roles(UserRole.MANAGER, UserRole.CHAIRMAN)
+  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.CHAIRMAN, UserRole.LOAN_OFFICER)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Enqueue async KYC document review (recommended)',
     description:
       'Enqueues the approve/reject action to BullMQ. Returns 202 with jobId immediately. ' +
-      'The worker updates member KYC status, auto-provisions accounts on full approval, and sends email.',
+      'The worker updates member KYC status, auto-provisions accounts on full approval, and sends email. ' +
+      'Roles kept in lockstep with documents.service.ts#REVIEW_ROLES — see Phase 2 completion report.',
   })
   @ApiResponse({ status: 202, description: 'Review job enqueued' })
   enqueueReview(

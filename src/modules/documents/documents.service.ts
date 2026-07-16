@@ -50,9 +50,22 @@ const ALLOWED_MIME_TYPES = new Set([
 // Some mobile browsers/file pickers don't report a real MIME type for HEIC/HEIF
 // captures (or any file) and send "application/octet-stream" instead — mirrors
 // the same fallback the frontend applies in app/member/profile/page.tsx.
-const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.pdf', '.heic', '.heif']);
+const ALLOWED_UPLOAD_EXTENSIONS = new Set([
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+  '.pdf',
+  '.heic',
+  '.heif',
+]);
 
-const REVIEW_ROLES = new Set<UserRole>([UserRole.MANAGER, UserRole.CHAIRMAN]);
+const REVIEW_ROLES = new Set<UserRole>([
+  UserRole.TENANT_ADMIN,
+  UserRole.MANAGER,
+  UserRole.CHAIRMAN,
+  UserRole.LOAN_OFFICER,
+]);
 const VIEW_ROLES = new Set<UserRole>([
   UserRole.TENANT_ADMIN,
   UserRole.MANAGER,
@@ -106,7 +119,13 @@ export class DocumentsService {
 
     const uploadTtlSeconds = this.uploadUrlTtlSeconds(tenantId);
     const version = await this.nextDocumentVersion(tenantId, member.id, dto.type);
-    const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType, dto.originalFileName);
+    const objectKey = this.buildObjectKey(
+      tenantId,
+      member.id,
+      dto.type,
+      dto.mimeType,
+      dto.originalFileName,
+    );
     const expiresAt = new Date(Date.now() + uploadTtlSeconds * 1000);
     const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
     const secureUpload = this.secureUploadTokenFields(tenantId, expiresAt);
@@ -324,7 +343,13 @@ export class DocumentsService {
 
     const uploadTtlSeconds = this.uploadUrlTtlSeconds(tenantId);
     const version = await this.nextDocumentVersion(tenantId, member.id, dto.type);
-    const objectKey = this.buildObjectKey(tenantId, member.id, dto.type, dto.mimeType, dto.originalFileName);
+    const objectKey = this.buildObjectKey(
+      tenantId,
+      member.id,
+      dto.type,
+      dto.mimeType,
+      dto.originalFileName,
+    );
     const expiresAt = new Date(Date.now() + uploadTtlSeconds * 1000);
     const declaredSizeBytes = this.getDeclaredSizeBytes(dto);
     const secureUpload = this.secureUploadTokenFields(tenantId, expiresAt);
@@ -562,7 +587,7 @@ export class DocumentsService {
     });
     if (!document) throw new NotFoundException('Document not found');
 
-    const downloadUrl = await this.storage.getDownloadUrl(document.objectKey, 300);
+    const downloadUrl = await this.resolveDownloadUrl(document.objectKey, 300);
     await this.auditSafe({
       tenantId,
       userId,
@@ -617,7 +642,7 @@ export class DocumentsService {
     });
     if (!document) throw new NotFoundException('Document not found');
 
-    const downloadUrl = await this.storage.getDownloadUrl(document.objectKey, 300);
+    const downloadUrl = await this.resolveDownloadUrl(document.objectKey, 300);
     await this.auditSafe({
       tenantId,
       userId: actor.id,
@@ -980,7 +1005,10 @@ export class DocumentsService {
                 `Actual: \`${actualChecksum}\``,
             )
             .catch((err: unknown) =>
-              this.logger.error('Quarantine alert dispatch failed', err instanceof Error ? err.stack : err),
+              this.logger.error(
+                'Quarantine alert dispatch failed',
+                err instanceof Error ? err.stack : err,
+              ),
             );
 
           throw new BadRequestException('FILE_INTEGRITY_CHECK_FAILED');
@@ -1197,9 +1225,34 @@ export class DocumentsService {
   }
 
   private assertCanReview(role: UserRole): void {
-    if (!REVIEW_ROLES.has(role)) {
-      throw new ForbiddenException('Only MANAGER and CHAIRMAN can review KYC documents');
+    if (!REVIEW_ROLES.has(role) && role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException(
+        'Only TENANT_ADMIN, MANAGER, CHAIRMAN, and LOAN_OFFICER can review KYC documents',
+      );
     }
+  }
+
+  /** True for a documentUrl-seeded record (see onboarding.service.ts) whose objectKey
+   * is still a raw external URL rather than a key inside the managed R2/MinIO bucket.
+   *
+   * DocumentIngestionProcessor (Phase 3) normally re-hosts these within seconds of
+   * approval and swaps objectKey for a real key, so this should be rare/transient in
+   * practice. Deliberately kept (not removed) as a fallback for the window before
+   * ingestion completes, and for any record where ingestion permanently failed
+   * (Sentry-alerted — see DocumentIngestionProcessor#onFailed) or pre-dates the
+   * ingestion pipeline. Removing it would leave those documents with no working
+   * download path at all. */
+  private isExternalUrl(objectKey: string): boolean {
+    return /^https?:\/\//i.test(objectKey);
+  }
+
+  /** Resolves a document's download URL, bypassing the storage service's pre-signing
+   * for externally-hosted documents (their objectKey already *is* the URL). */
+  private async resolveDownloadUrl(objectKey: string, expiresIn: number): Promise<string> {
+    if (this.isExternalUrl(objectKey)) {
+      return objectKey;
+    }
+    return this.storage.getDownloadUrl(objectKey, expiresIn);
   }
 
   private async resolveMemberForUser(tenantId: string, userId: string) {

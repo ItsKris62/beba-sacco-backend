@@ -1,18 +1,6 @@
-import {
-  IsString,
-  IsNotEmpty,
-  IsOptional,
-  IsEnum,
-  Matches,
-} from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsEnum, Matches } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-
-export enum ApplicationPosition {
-  CHAIRMAN = 'CHAIRMAN',
-  SECRETARY = 'SECRETARY',
-  TREASURER = 'TREASURER',
-  MEMBER = 'MEMBER',
-}
+import { StagePosition } from '@prisma/client';
 
 /**
  * DTO for submitting a new member application form.
@@ -55,20 +43,31 @@ export class CreateApplicationDto {
   phoneNumber!: string;
 
   @ApiProperty({
-    description: 'ID of the registered boda boda stage (cuid). wardId and stageName are derived server-side.',
+    description:
+      'ID of the registered boda boda stage (cuid). wardId and stageName are derived server-side.',
   })
   @IsString()
   @IsNotEmpty()
   stageId!: string;
 
   @ApiPropertyOptional({
-    enum: ApplicationPosition,
-    default: ApplicationPosition.MEMBER,
-    description: 'Position at the stage',
+    description:
+      'Ward ID (cuid), used client-side to filter the stage picker. Not authoritative — ' +
+      'the server always derives wardId from the resolved stageId and ignores this value ' +
+      'if it disagrees, so it is optional and not cross-validated.',
   })
   @IsOptional()
-  @IsEnum(ApplicationPosition)
-  position?: ApplicationPosition;
+  @IsString()
+  wardId?: string;
+
+  @ApiPropertyOptional({
+    enum: StagePosition,
+    default: StagePosition.MEMBER,
+    description: 'Position at the stage — matches the Stage/StageAssignment.position enum.',
+  })
+  @IsOptional()
+  @IsEnum(StagePosition)
+  position?: StagePosition;
 
   @ApiPropertyOptional({
     description: 'MinIO pre-signed URL for the uploaded KYC form scan',

@@ -6,11 +6,14 @@ import { StorageModule } from '../storage/storage.module';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { DocumentsService } from './documents.service';
 import { DocumentCleanupProcessor } from './processors/document-cleanup.processor';
+import { DocumentIngestionProcessor } from './processors/document-ingestion.processor';
 import { isWorkerRuntime } from '../queue/worker-runtime';
 import { AlertsService } from '../alerts/alerts.service';
 import { PlunkService } from '../../common/services/plunk.service';
 
-const DOCUMENT_WORKER_PROVIDERS = isWorkerRuntime() ? [DocumentCleanupProcessor] : [];
+const DOCUMENT_WORKER_PROVIDERS = isWorkerRuntime()
+  ? [DocumentCleanupProcessor, DocumentIngestionProcessor]
+  : [];
 
 @Module({
   imports: [
@@ -18,6 +21,7 @@ const DOCUMENT_WORKER_PROVIDERS = isWorkerRuntime() ? [DocumentCleanupProcessor]
     StorageModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.DOCUMENT_CLEANUP }),
     BullModule.registerQueue({ name: QUEUE_NAMES.KYC_REVIEW }),
+    BullModule.registerQueue({ name: QUEUE_NAMES.DOCUMENT_INGESTION }),
   ],
   providers: [
     DocumentsService,

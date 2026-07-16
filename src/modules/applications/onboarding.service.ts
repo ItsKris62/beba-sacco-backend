@@ -6,12 +6,23 @@ import {
   ConflictException,
   InternalServerErrorException,
 } from '@nestjs/common';
-import { ApplicationStatus, AccountType, KycStatus, UserRole, AccountStatus } from '@prisma/client';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import {
+  ApplicationStatus,
+  AccountType,
+  KycStatus,
+  UserRole,
+  AccountStatus,
+  DocumentType,
+  DocumentStatus,
+} from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { SmsService } from '../sms/sms.service';
+import { QUEUE_NAMES, DocumentIngestionJobPayload } from '../queue/queue.constants';
 import { ApproveApplicationDto, RejectApplicationDto } from './dto/review-application.dto';
 
 /**
@@ -49,6 +60,8 @@ export class OnboardingService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly smsService: SmsService,
+    @InjectQueue(QUEUE_NAMES.DOCUMENT_INGESTION)
+    private readonly documentIngestionQueue: Queue<DocumentIngestionJobPayload>,
   ) {}
 
   // ─── APPROVE ─────────────────────────────────────────────────────────────────
@@ -172,6 +185,7 @@ export class OnboardingService {
           stage: { id: string; name: string };
           assignment: { id: string; position: string };
           tempPassword: string;
+          seededDocument: { id: string; type: DocumentType } | null;
         }
       | undefined;
 
@@ -210,9 +224,36 @@ export class OnboardingService {
               nationalId: app.idNumber,
               kycStatus: KycStatus.PENDING_UPLOAD,
               isActive: true,
+              memberApplicationId: app.id,
             },
             select: { id: true, memberNumber: true },
           });
+
+          // 2b. Seed a KYC document from the application's collected form URL (if any)
+          // so it surfaces in the KYC Queue instead of being discarded on approval.
+          // This alone does not complete KYC — the member still needs the remaining
+          // REQUIRED_KYC_DOCUMENT_TYPES (admin.service.ts) uploaded and reviewed.
+          //
+          // objectKey is seeded with the raw external URL for now — DocumentIngestionProcessor
+          // (enqueued below, outside this transaction) fetches it and swaps objectKey for a
+          // real key in the managed bucket. If ingestion fails, DocumentsService#resolveDownloadUrl's
+          // isExternalUrl fallback keeps the document downloadable via the original URL.
+          const seededDocument = app.documentUrl
+            ? await tx.document.create({
+                data: {
+                  tenantId,
+                  memberId: member.id,
+                  uploadedById: actorId,
+                  objectKey: app.documentUrl,
+                  originalFileName: this.fileNameFromUrl(app.documentUrl),
+                  mimeType: this.mimeTypeFromUrl(app.documentUrl),
+                  sizeBytes: 0,
+                  type: DocumentType.MEMBER_FORM,
+                  status: DocumentStatus.PENDING_REVIEW,
+                },
+                select: { id: true, type: true },
+              })
+            : null;
 
           // 3. Create FOSA account
           const fosaAccount = await tx.account.create({
@@ -263,8 +304,9 @@ export class OnboardingService {
             data: {
               userId: user.id,
               stageId: stage.id,
-              position:
-                (app.position as 'CHAIRMAN' | 'SECRETARY' | 'TREASURER' | 'MEMBER') ?? 'MEMBER',
+              // app.position is StagePosition (non-nullable) since the enum migration —
+              // no cast/fallback needed anymore.
+              position: app.position,
               isActive: true,
             },
             select: { id: true, position: true },
@@ -287,6 +329,7 @@ export class OnboardingService {
             stage,
             assignment,
             tempPassword,
+            seededDocument,
           };
         });
 
@@ -366,6 +409,28 @@ export class OnboardingService {
       },
       `applications.approve:${result.user.id}`,
     );
+
+    // Best-effort ingestion of the seeded document's external URL into the managed
+    // bucket (outside the transaction — a slow/failing fetch must not hold up member
+    // creation or the response). Never throws: DocumentIngestionProcessor leaves the
+    // Document row untouched on failure, and resolveDownloadUrl's external-URL
+    // fallback keeps it downloadable in the meantime.
+    if (result.seededDocument) {
+      await this.documentIngestionQueue
+        .add('ingest', {
+          tenantId,
+          documentId: result.seededDocument.id,
+          memberId: result.member.id,
+          documentType: result.seededDocument.type,
+          sourceUrl: app.documentUrl!,
+        } satisfies DocumentIngestionJobPayload)
+        .catch((e: unknown) =>
+          this.logger.error(
+            'Document ingestion enqueue failed (non-fatal)',
+            e instanceof Error ? e.stack : e,
+          ),
+        );
+    }
 
     // Audit log (outside transaction – non-fatal)
     await this.auditSafe({
@@ -493,6 +558,31 @@ export class OnboardingService {
   private generateAccountNumber(type: 'FOSA' | 'BOSA'): string {
     const num = Math.floor(100000 + Math.random() * 900000);
     return `${type}-${num}`;
+  }
+
+  /** Best-effort original filename derived from a documentUrl's path segment. */
+  private fileNameFromUrl(url: string): string {
+    try {
+      const segment = new URL(url).pathname.split('/').pop();
+      return segment ? decodeURIComponent(segment) : 'application-form';
+    } catch {
+      return 'application-form';
+    }
+  }
+
+  /** Best-effort MIME type derived from a documentUrl's file extension. */
+  private mimeTypeFromUrl(url: string): string {
+    const ext = url.split('?')[0].split('.').pop()?.toLowerCase();
+    const byExtension: Record<string, string> = {
+      pdf: 'application/pdf',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      png: 'image/png',
+      webp: 'image/webp',
+      heic: 'image/heic',
+      heif: 'image/heif',
+    };
+    return (ext && byExtension[ext]) || 'application/octet-stream';
   }
 
   private generateTempPassword(): string {

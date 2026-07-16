@@ -40,7 +40,8 @@
         "e2e:create-pending-deposit": "ts-node --transpile-only -r tsconfig-paths/register scripts/e2e-create-pending-deposit.ts",
         "sentry:sourcemaps": "sentry-cli sourcemaps inject --org veriwoks --project kolwa-beba-app ./dist && sentry-cli sourcemaps upload --org veriwoks --project kolwa-beba-app ./dist",
         "bullmq:repeatables:clean": "node scripts/clean-stale-repeatables.js",
-        "backfill:accounts": "ts-node --transpile-only -r tsconfig-paths/register src/database/scripts/backfill-missing-accounts.ts"
+        "backfill:accounts": "ts-node --transpile-only -r tsconfig-paths/register src/database/scripts/backfill-missing-accounts.ts",
+        "backfill:member-applications": "ts-node --transpile-only -r tsconfig-paths/register src/database/scripts/backfill-member-applications.ts"
     },
     "dependencies": {
         "@aws-sdk/client-s3": "^3.490.0",
