@@ -98,7 +98,6 @@ export class StorageService {
       Bucket: this.bucketName,
       Key: objectKey,
       ContentType: params.contentType,
-      ServerSideEncryption: 'AES256',
     });
 
     const uploadUrl = await getSignedUrl(this.s3Client, command, { expiresIn: UPLOAD_URL_TTL });
@@ -127,7 +126,6 @@ export class StorageService {
       Bucket: this.bucketName,
       Key: params.objectKey,
       ContentType: params.contentType,
-      ServerSideEncryption: 'AES256',
     });
 
     const uploadUrl = await getSignedUrl(this.s3Client, command, { expiresIn });
