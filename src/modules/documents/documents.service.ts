@@ -873,6 +873,17 @@ export class DocumentsService {
 
     await this.storage.validateUploadedSize(document.objectKey, document.sizeBytes);
 
+    // Verify integrity BEFORE marking the document confirmed. Checking after
+    // the atomic update (as this used to) meant a failed/mismatched checksum
+    // briefly left the row as PENDING_REVIEW — visible to the member and
+    // counted as "uploaded" — before being corrected to QUARANTINE, and any
+    // non-mismatch failure here (e.g. a storage read error) left it stuck at
+    // PENDING_REVIEW with no correction at all.
+    await this.verifyChecksumServerSide(
+      { id: document.id, objectKey: document.objectKey, sizeBytes: metadata.contentLength },
+      dto.checksum,
+    );
+
     const confirmedAt = new Date();
     const updatedCount = await this.withSentrySpan(
       'documents.confirmSecureUpload.atomicUpdate',
@@ -912,7 +923,6 @@ export class DocumentsService {
       include: { member: { select: { id: true, kycStatus: true } } },
     });
 
-    await this.verifyChecksumServerSide(updated, dto.checksum);
     await this.syncMemberReviewReadiness(tenantId, memberId);
 
     await this.auditSafe({
