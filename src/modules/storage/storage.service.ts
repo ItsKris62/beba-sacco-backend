@@ -23,10 +23,13 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'image/png',
   'image/gif',
   'image/webp',
+  'image/heic',
+  'image/heif',
   'application/pdf',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'text/csv',
+  'application/octet-stream',
 ]);
 
 const UPLOAD_URL_TTL = 300; // 5 minutes
