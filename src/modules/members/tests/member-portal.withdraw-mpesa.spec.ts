@@ -182,16 +182,20 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
 
   // ── Failure releases the key for retry ──────────────────────────────────────
 
-  it('releases the idempotency key when the withdrawal fails validation', async () => {
-    const { service, idempotency, ledger } = buildService({
-      idempotencyStatus: 'NEW',
-      fosaBalance: '100', // less than the requested 500
-    });
+  // Balance/lockedBalance/frozenSavings sufficiency is now enforced centrally by
+  // LedgerService.applyBalanceChange() (see ledger.service.spec.ts), not here — this
+  // test instead proves withdrawMpesa() correctly releases the idempotency key when
+  // the ledger rejects the debit for any reason (e.g. insufficient available funds).
+  it('releases the idempotency key when the ledger rejects the debit', async () => {
+    const { service, idempotency, ledger } = buildService({ idempotencyStatus: 'NEW' });
+    ledger.postEntry.mockRejectedValueOnce(
+      new BadRequestException('Insufficient available funds (below minimum balance, or amount is committed to a guarantor hold), or concurrent modification'),
+    );
 
     await expect(service.withdrawMpesa(userId, phone, 500, tenantId, '127.0.0.1', 'key-1')).rejects.toThrow(
       BadRequestException,
     );
-    expect(ledger.postEntry).not.toHaveBeenCalled();
+    expect(ledger.postEntry).toHaveBeenCalledTimes(1);
     expect(idempotency.release).toHaveBeenCalledTimes(1);
     expect(idempotency.complete).not.toHaveBeenCalled();
   });

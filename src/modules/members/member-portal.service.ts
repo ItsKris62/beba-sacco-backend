@@ -421,16 +421,11 @@ export class MemberPortalService {
         throw new NotFoundException('No active FOSA account found for withdrawal');
       }
 
-      // lockedBalance/frozenSavings are not enforced by LedgerService.postEntry()'s
-      // minimum-balance floor (it only knows about minimumBalance/allowsNegative), so
-      // this withdrawal-specific check must stay here, ahead of the ledger post below.
-      const availableBalance = new Decimal(fosaAccount.balance.toString()).minus(
-        new Decimal(fosaAccount.lockedBalance.toString()).plus(new Decimal(fosaAccount.frozenSavings.toString()))
-      );
-
-      if (availableBalance.lessThan(totalDeduction)) {
-        throw new BadRequestException('Insufficient FOSA available balance');
-      }
+      // lockedBalance/frozenSavings (guarantor holds) are now enforced centrally by
+      // LedgerService.applyBalanceChange() for every DEBIT — see Phase 1 fix — so the
+      // hand-rolled availableBalance check that used to live here has been removed.
+      // postEntry() below throws BadRequestException if this withdrawal would dip into
+      // committed/frozen funds or the minimum-balance floor.
 
       // Deterministic reference scoped to the caller-supplied idempotencyKey — never
       // Date.now() here. A wall-clock-based reference is not replay-safe: a client

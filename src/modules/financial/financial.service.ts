@@ -3,6 +3,7 @@ import { ConflictException, Injectable, Logger, Optional } from '@nestjs/common'
 import { Decimal } from 'decimal.js';
 import {
   AccountType,
+  InstallmentStatus,
   LoanStatus,
   Prisma,
   TransactionType,
@@ -119,6 +120,7 @@ export class FinancialService {
       principalAmount: Decimal;
       interestRate: Decimal;
       dueDate: Date | null;
+      disbursedAt: Date | null;
       arrearsDays: number;
       accruedInterest?: Decimal;
       lastAccrualDate?: Date | null;
@@ -132,22 +134,22 @@ export class FinancialService {
     if (outstanding.lte(0)) return;
 
     const annualRate = new Decimal(loan.interestRate.toString());
-    // Daily interest = outstanding * (annual_rate / 365)
-    const dailyInterest = outstanding.times(annualRate).dividedBy(365).toDecimalPlaces(4);
+    // Phase 4: interest is accrued against the QUOTED per-installment
+    // interestDue, pro-rated over that installment's exact day-count — NOT
+    // outstanding * annualRate / 365, which is only correct for
+    // REDUCING_BALANCE and silently mis-accrues FLAT-rate loans (whose
+    // interestDue is fixed per the schedule regardless of how much principal
+    // has been paid down). See computeScheduleBasedDailyInterest() below.
+    const dailyInterest = await this.computeScheduleBasedDailyInterest(loan, accrualDate);
 
-    // Penalty: if past due date, add a daily penalty of 0.1% of outstanding
+    // Legacy final-maturity penalty: if the loan's OWN final due date (disbursedAt +
+    // grace + tenure) has passed, debit 0.1% of outstanding directly from FOSA.
+    // Deliberately left as-is (out of Phase 2's scope) — it debits a balance and
+    // posts its own Transaction/GL leg, and never touches Loan.arrearsAmount/
+    // arrearsDays/staging, so it doesn't race with the installment-based arrears
+    // rollup below.
     const isPastDue = loan.dueDate && accrualDate > loan.dueDate;
     const dailyPenalty = isPastDue ? outstanding.times(0.001).toDecimalPlaces(4) : new Decimal(0);
-
-    // Determine arrears days (days since due date)
-    let newArrearsDays = 0;
-    if (isPastDue && loan.dueDate) {
-      const msPerDay = 24 * 60 * 60 * 1000;
-      newArrearsDays = Math.floor((accrualDate.getTime() - loan.dueDate.getTime()) / msPerDay);
-    }
-
-    // Staging classification
-    const staging = this.classifyStaging(newArrearsDays);
 
     // Find FOSA account to post the charge
     const fosaAccount = loan.member.accounts[0];
@@ -259,19 +261,26 @@ export class FinancialService {
         }
       }
 
+      // Consolidated overdue-installment penalty accrual + arrears/staging rollup
+      // (formerly split across this job and the separately-scheduled
+      // LoanPenaltyProcessor, which raced to overwrite Loan.arrearsAmount on the
+      // same midnight cron — see Phase 2 audit fix). This is now the single
+      // source of truth for arrearsDays/arrearsAmount/staging, computed from the
+      // LoanRepayment installment schedule rather than Loan.dueDate (the loan's
+      // final maturity, which never reflects a missed installment mid-tenure).
+      const arrears = await this.applyOverdueInstallmentsAndArrears(tx, loan, fosaAccount.id, accrualDate);
+
       // Update loan arrears + staging + running accruedInterest total
       await tx.loan.update({
         where: { id: loan.id },
         data: {
-          arrearsDays: newArrearsDays,
-          arrearsAmount: isPastDue
-            ? new Decimal(loan.outstandingBalance.toString()).toDecimalPlaces(4).toString()
-            : '0',
-          staging,
+          arrearsDays: arrears.arrearsDays,
+          arrearsAmount: arrears.arrearsAmount.toString(),
+          staging: arrears.staging,
           lastAccrualDate: accrualDate,
           accruedInterest: { increment: dailyInterest.toDecimalPlaces(4).toNumber() },
           // Transition to DEFAULTED if NPL
-          ...(staging === LoanStaging.NPL && loan.loanProduct && { status: LoanStatus.DEFAULTED }),
+          ...(arrears.staging === LoanStaging.NPL && { status: LoanStatus.DEFAULTED }),
         },
       });
     }, { isolationLevel: 'Serializable' as const });
@@ -298,6 +307,216 @@ export class FinancialService {
       `audit.INTEREST.ACCRUAL.${loan.tenantId}.${loan.id}.${accrualDateStr}`,
       correlationId,
     );
+  }
+
+  /**
+   * Pro-rates the CURRENT unpaid installment's quoted `interestDue` over its
+   * exact day-count, instead of charging outstanding*annualRate/365 (which
+   * only happens to be correct for REDUCING_BALANCE). By the installment's
+   * own due date, the sum of daily accruals across that period equals exactly
+   * its quoted interestDue — for FLAT loans too, since it never looks at
+   * outstandingBalance at all.
+   *
+   * "Current installment" = the earliest unpaid row with dueDate >= today; if
+   * every unpaid row is already past due (the loan is in arrears), there is no
+   * "current" period to smoothly accrue toward — that installment's interest
+   * has already fully come due in one lump, and reprising it daily would just
+   * keep re-accruing against an elapsed window. In that case this returns 0
+   * and defers entirely to applyOverdueInstallmentsAndArrears()'s penalty
+   * engine, which already owns overdue installments.
+   */
+  private async computeScheduleBasedDailyInterest(
+    loan: { id: string; tenantId: string; disbursedAt: Date | null },
+    accrualDate: Date,
+  ): Promise<Decimal> {
+    const unpaidInstallments = await this.prisma.loanRepayment.findMany({
+      where: {
+        tenantId: loan.tenantId,
+        loanId: loan.id,
+        status: { not: InstallmentStatus.PAID },
+      },
+      orderBy: { dueDate: 'asc' },
+    });
+
+    if (unpaidInstallments.length === 0) {
+      return new Decimal(0); // fully paid (or no schedule yet) — nothing to accrue
+    }
+
+    const current =
+      unpaidInstallments.find((row) => row.dueDate >= accrualDate) ?? unpaidInstallments[0];
+
+    if (current.dueDate < accrualDate) {
+      // In arrears — stop normal accrual for this installment, defer to penalties.
+      return new Decimal(0);
+    }
+
+    // Period start = the PREVIOUS installment's due date (looked up by dayNumber,
+    // regardless of its paid status — by the time we're a few installments in,
+    // earlier ones are normally already PAID and wouldn't appear in
+    // unpaidInstallments above), or the loan's disbursement date for the very
+    // first installment.
+    let periodStart: Date | null = null;
+    if (current.dayNumber > 1) {
+      const previous = await this.prisma.loanRepayment.findFirst({
+        where: { tenantId: loan.tenantId, loanId: loan.id, dayNumber: current.dayNumber - 1 },
+        select: { dueDate: true },
+      });
+      periodStart = previous?.dueDate ?? null;
+    }
+    periodStart ??= loan.disbursedAt ?? current.dueDate;
+
+    const msPerDay = 24 * 60 * 60 * 1000;
+    // getTime() diffs handle month-length differences correctly (e.g. Jan 31 ->
+    // Feb 28 is exactly 28 days of elapsed time) — round rather than floor to
+    // absorb sub-day drift from DST/timezone noise, not calendar arithmetic.
+    const daysInPeriod = Math.max(
+      1,
+      Math.round((current.dueDate.getTime() - periodStart.getTime()) / msPerDay),
+    );
+
+    const interestDue = new Decimal(current.interestDue.toString());
+    return interestDue.dividedBy(daysInPeriod).toDecimalPlaces(4);
+  }
+
+  /**
+   * Single source of truth for overdue-installment penalty accrual AND the
+   * resulting arrears/staging rollup — consolidated here (Phase 2 audit fix)
+   * because this used to be split across two separately-scheduled cron jobs
+   * (this job and the standalone LoanPenaltyProcessor) that both ran at
+   * midnight and raced to write Loan.arrearsAmount, each with different
+   * semantics (one incremented per overdue installment, the other blanket-
+   * overwrote based on Loan.dueDate — the loan's final maturity date, which
+   * never reflects a missed installment mid-tenure). LoanPenaltyProcessor is
+   * no longer scheduled (see daily-jobs.scheduler.ts) — this is the only
+   * writer of LoanRepayment.penaltyDue and Loan.arrearsDays/arrearsAmount/
+   * staging now.
+   *
+   * Runs inside the caller's own transaction so penalty accrual and the
+   * arrears rollup it feeds are atomic with the rest of that day's accrual.
+   */
+  private async applyOverdueInstallmentsAndArrears(
+    tx: Prisma.TransactionClient,
+    loan: { id: string; tenantId: string },
+    fosaAccountId: string,
+    accrualDate: Date,
+  ): Promise<{ arrearsDays: number; arrearsAmount: Decimal; staging: LoanStaging }> {
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const PENALTY_GRACE_DAYS = 3;
+    const penaltyCutoff = new Date(accrualDate.getTime() - PENALTY_GRACE_DAYS * msPerDay);
+    const penaltyRate = new Decimal('0.01');
+
+    // 1. Accrue today's penalty on installments overdue past the grace period —
+    //    ported from the former LoanPenaltyProcessor.applyPenalty(), same rate
+    //    and grace window, now writing exactly once per installment per day via
+    //    the same lastPenaltyAccrualDate guard.
+    const penaltyEligible = await tx.loanRepayment.findMany({
+      where: {
+        tenantId: loan.tenantId,
+        loanId: loan.id,
+        status: { not: InstallmentStatus.PAID },
+        dueDate: { lt: penaltyCutoff },
+        OR: [{ lastPenaltyAccrualDate: null }, { lastPenaltyAccrualDate: { lt: accrualDate } }],
+      },
+    });
+
+    for (const installment of penaltyEligible) {
+      const principalDue = new Decimal(installment.principalDue.toString());
+      const interestDue = new Decimal(installment.interestDue.toString());
+      const penalty = principalDue.plus(interestDue).times(penaltyRate).toDecimalPlaces(4);
+      if (penalty.lte(0)) continue;
+
+      // Conditional update (not a plain update()) so a concurrent run that
+      // already accrued this installment today loses the race harmlessly
+      // instead of double-charging it.
+      const updated = await tx.loanRepayment.updateMany({
+        where: {
+          id: installment.id,
+          tenantId: loan.tenantId,
+          OR: [{ lastPenaltyAccrualDate: null }, { lastPenaltyAccrualDate: { lt: accrualDate } }],
+        },
+        data: {
+          penaltyDue: { increment: penalty.toString() },
+          lastPenaltyAccrualDate: accrualDate,
+          status: InstallmentStatus.OVERDUE,
+        },
+      });
+      if (updated.count === 0) continue;
+
+      const accrualDateStr = accrualDate.toISOString().slice(0, 10);
+      const reference = `PENALTY-${loan.tenantId}-${loan.id}-${installment.id}-${accrualDateStr}`;
+      const existingPenaltyTxn = await tx.transaction.findFirst({
+        where: { tenantId: loan.tenantId, reference },
+      });
+      if (!existingPenaltyTxn) {
+        // No Account.balance change here — this penalty is recognized as owed,
+        // not yet collected (collection happens later via the repayment
+        // waterfall) — same accrual-accounting shape as the original processor.
+        const account = await tx.account.findFirst({
+          where: { id: fosaAccountId },
+          select: { balance: true },
+        });
+        const balance = new Decimal(account?.balance?.toString() ?? '0');
+        const penaltyTxn = await tx.transaction.create({
+          data: {
+            tenantId: loan.tenantId,
+            accountId: fosaAccountId,
+            loanId: loan.id,
+            type: TransactionType.PENALTY,
+            status: TransactionStatus.COMPLETED,
+            amount: penalty.toString(),
+            balanceBefore: balance.toString(),
+            balanceAfter: balance.toString(),
+            reference,
+            description: `Daily overdue installment penalty for loan ${loan.id}`,
+            processedBy: 'SYSTEM',
+          },
+        });
+        await this.ledger.postPenaltyReceivableEntry({
+          tx,
+          tenantId: loan.tenantId,
+          reference,
+          amount: penalty,
+          transactionId: penaltyTxn.id,
+          description: `Daily overdue installment penalty for loan ${loan.id}`,
+        });
+      }
+    }
+
+    // 2. Roll up arrears from the installment schedule (re-fetched fresh so this
+    //    sees today's penalty increments above), NOT Loan.dueDate. Per-spec: any
+    //    unpaid installment whose own due date has passed counts toward arrears,
+    //    with no grace period — the grace above only delays when a *penalty*
+    //    starts accruing, not when a missed payment is first recognized as overdue.
+    const overdueInstallments = await tx.loanRepayment.findMany({
+      where: {
+        tenantId: loan.tenantId,
+        loanId: loan.id,
+        status: { not: InstallmentStatus.PAID },
+        dueDate: { lt: accrualDate },
+      },
+      orderBy: { dueDate: 'asc' },
+    });
+
+    if (overdueInstallments.length === 0) {
+      return { arrearsDays: 0, arrearsAmount: new Decimal(0), staging: this.classifyStaging(0) };
+    }
+
+    const earliestDueDate = overdueInstallments[0].dueDate;
+    const arrearsDays = Math.floor((accrualDate.getTime() - earliestDueDate.getTime()) / msPerDay);
+
+    const arrearsAmount = overdueInstallments
+      .reduce((sum, row) => {
+        const due = new Decimal(row.principalDue.toString())
+          .plus(row.interestDue.toString())
+          .plus(row.penaltyDue.toString());
+        const paid = new Decimal(row.principalPaid.toString())
+          .plus(row.interestPaid.toString())
+          .plus(row.penaltyPaid.toString());
+        return sum.plus(Decimal.max(due.minus(paid), new Decimal(0)));
+      }, new Decimal(0))
+      .toDecimalPlaces(4);
+
+    return { arrearsDays, arrearsAmount, staging: this.classifyStaging(arrearsDays) };
   }
 
   private async debitAccountWithCas(

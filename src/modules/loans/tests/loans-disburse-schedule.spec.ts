@@ -92,6 +92,7 @@ function buildApprovedLoan(overrides = {}) {
     tenureMonths: 12,
     gracePeriodMonths: 0,
     monthlyInstalment: '4438.9149',
+    interestRate: '0.1200',
     repaymentScheduleGenerated: false,
     member: { user: { email: 'jane@example.com', firstName: 'Jane' } },
     ...overrides,
@@ -134,6 +135,8 @@ function setupDisburseMocks(loanOverrides: Record<string, unknown> = {}) {
       tenureMonths: 12,
       gracePeriodMonths: 0,
       monthlyInstalment: '4438.9149',
+      interestRate: '0.1200',
+      interestType: 'REDUCING_BALANCE',
       repaymentScheduleGenerated: false,
       ...loanOverrides,
     },
@@ -197,14 +200,19 @@ describe('LoansService.disburse() — schedule generation', () => {
     expect(data.map((r: any) => r.dayNumber)).toEqual([1, 2, 3]);
   });
 
-  it('sets amountPaid to monthlyInstalment for each entry', async () => {
+  it('initializes amountPaid, principalPaid, interestPaid, and penaltyPaid to 0 for each entry (Phase 3 fix)', async () => {
+    // Previously amountPaid was seeded to the scheduled instalment amount even
+    // though nothing had been paid yet — a genuine bug this replaces.
     setupDisburseMocks({ tenureMonths: 2, monthlyInstalment: '4438.9149' });
 
     await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
 
     const { data } = mockTx.loanRepayment.createMany.mock.calls[0][0];
     data.forEach((r: any) => {
-      expect(parseFloat(r.amountPaid)).toBeCloseTo(4438.91, 1);
+      expect(r.amountPaid).toBe('0');
+      expect(r.principalPaid).toBe('0');
+      expect(r.interestPaid).toBe('0');
+      expect(r.penaltyPaid).toBe('0');
     });
   });
 
@@ -352,5 +360,85 @@ describe('LoansService.disburse() — schedule generation', () => {
     mockPrisma.member.findFirst.mockResolvedValueOnce({ kycStatus: 'PENDING' });
     await expect(service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY)).rejects.toThrow(BadRequestException);
     expect(mockTx.loanRepayment.createMany).not.toHaveBeenCalled();
+  });
+
+  // ── Amortization split: principalDue / interestDue (Phase 3 audit fix) ────
+  //
+  // Before this fix, principalDue was hard-set to the whole instalment and
+  // interestDue was always 0 — every LoanRepayment row silently mislabeled
+  // 100% of every future payment as principal. These tests exercise
+  // LoansService's private buildAmortizationSchedule() indirectly through
+  // disburse(), the same way the rest of this file does.
+
+  describe('principalDue / interestDue amortization split', () => {
+    /** Reference closed-form instalment formula (same one calculateInstalment() uses) — used only to derive a realistic instalment to feed into the mock fixture, not to re-test that formula itself. */
+    function reducingBalanceInstalment(principal: number, annualRate: number, tenureMonths: number): Decimal {
+      const P = new Decimal(principal);
+      const r = new Decimal(annualRate).dividedBy(12);
+      const onePlusRPowN = new Decimal(1).plus(r).pow(tenureMonths);
+      return P.times(r).times(onePlusRPowN).dividedBy(onePlusRPowN.minus(1));
+    }
+
+    it('REDUCING_BALANCE: interestDue strictly decreases and principalDue strictly increases month over month', async () => {
+      const principal = 10000;
+      const annualRate = 0.12;
+      const tenureMonths = 6;
+      const instalment = reducingBalanceInstalment(principal, annualRate, tenureMonths);
+
+      setupDisburseMocks({
+        principalAmount: `${principal}.0000`,
+        interestRate: `${annualRate}`,
+        interestType: 'REDUCING_BALANCE',
+        tenureMonths,
+        monthlyInstalment: instalment.toDecimalPlaces(4).toString(),
+      });
+
+      await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
+
+      const { data } = mockTx.loanRepayment.createMany.mock.calls[0][0];
+      const interestDues = data.map((r: any) => new Decimal(r.interestDue));
+      const principalDues = data.map((r: any) => new Decimal(r.principalDue));
+
+      for (let i = 1; i < interestDues.length; i++) {
+        expect(interestDues[i].lessThan(interestDues[i - 1])).toBe(true);
+        expect(principalDues[i].greaterThan(principalDues[i - 1])).toBe(true);
+      }
+
+      // Every non-final period's principal+interest reconstitutes the level instalment.
+      for (let i = 0; i < data.length - 1; i++) {
+        expect(principalDues[i].plus(interestDues[i]).toDecimalPlaces(2).toString()).toBe(
+          instalment.toDecimalPlaces(2).toString(),
+        );
+      }
+
+      // The schedule fully amortizes the original principal (last period is
+      // plugged to absorb rounding drift).
+      const totalPrincipal = principalDues.reduce((sum: Decimal, p: Decimal) => sum.plus(p), new Decimal(0));
+      expect(totalPrincipal.toDecimalPlaces(2).toString()).toBe(new Decimal(principal).toDecimalPlaces(2).toString());
+    });
+
+    it('FLAT: interestDue is identical every period (interest on original principal, not outstanding balance)', async () => {
+      // Chosen so every figure divides evenly — no rounding remainder to
+      // reason about: totalInterest = 12000*0.12 = 1440, /12 = 120/period;
+      // instalment = (12000+1440)/12 = 1120; principalDue = 1120-120 = 1000/period.
+      setupDisburseMocks({
+        principalAmount: '12000.0000',
+        interestRate: '0.1200',
+        interestType: 'FLAT',
+        tenureMonths: 12,
+        monthlyInstalment: '1120.0000',
+      });
+
+      await service.disburse(LOAN_ID, TENANT_ID, DISBURSED_BY);
+
+      const { data } = mockTx.loanRepayment.createMany.mock.calls[0][0];
+      data.forEach((r: any) => {
+        expect(new Decimal(r.interestDue).toDecimalPlaces(2).toString()).toBe('120');
+        expect(new Decimal(r.principalDue).toDecimalPlaces(2).toString()).toBe('1000');
+      });
+
+      const totalPrincipal = data.reduce((sum: Decimal, r: any) => sum.plus(r.principalDue), new Decimal(0));
+      expect(totalPrincipal.toDecimalPlaces(2).toString()).toBe('12000');
+    });
   });
 });

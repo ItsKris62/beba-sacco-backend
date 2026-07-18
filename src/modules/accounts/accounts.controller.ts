@@ -134,7 +134,7 @@ export class AccountsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Post a cash withdrawal',
-    description: 'Debits the account via LedgerService.postEntry() (debit the account\'s deposit-liability GL code, credit CASH). Enforces the account\'s minimum-balance floor unless allowsNegative is set.',
+    description: 'Debits the account via LedgerService.postEntry() (debit the account\'s deposit-liability GL code, credit CASH). Enforces the account\'s minimum-balance floor unless allowsNegative is set, and never permits a debit into funds committed to a guarantor hold (lockedBalance/frozenSavings) regardless of allowsNegative.',
   })
   @ApiResponse({ status: 200, description: 'Withdrawal posted' })
   @ApiResponse({ status: 404, description: 'Account not found or inactive' })

@@ -178,6 +178,106 @@ describe('LedgerService', () => {
       expect(tx.journalEntry.create).not.toHaveBeenCalled();
     });
 
+    it('rejects a WITHDRAWAL that would dip into guarantor-held funds (lockedBalance/frozenSavings), writing nothing', async () => {
+      const tx = buildTx();
+      tx.account.findFirst.mockResolvedValue({
+        balance: '1000.0000',
+        minimumBalance: '0.0000',
+        allowsNegative: false,
+        accountType: AccountType.FOSA,
+        lockedBalance: '0.0000',
+        frozenSavings: '600.0000', // e.g. held as guarantor collateral
+      });
+      // Available = 1000 - 0 - 600 = 400, which is below the requested 500.
+      tx.account.updateMany.mockResolvedValue({ count: 0 });
+      (mockPrisma.$transaction as jest.Mock).mockImplementationOnce(async (cb) => cb(tx));
+
+      await expect(
+        service.postEntry({
+          tenantId: TENANT_ID,
+          reference: 'WDR-002',
+          journalType: JournalEntryType.WITHDRAWAL,
+          accountId: 'account-1',
+          amount: new Decimal(500),
+          direction: 'DEBIT',
+          actorId: ACTOR_ID,
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      // The compare-and-swap floor must include the frozen amount: balance >= frozenSavings + amount.
+      expect(tx.account.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ balance: { gte: '1100' } }),
+        }),
+      );
+      expect(tx.transaction.create).not.toHaveBeenCalled();
+      expect(tx.journalEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('permits a WITHDRAWAL that stays within the balance not committed to guarantor holds', async () => {
+      const tx = buildTx();
+      tx.account.findFirst.mockResolvedValue({
+        balance: '1000.0000',
+        minimumBalance: '0.0000',
+        allowsNegative: false,
+        accountType: AccountType.FOSA,
+        lockedBalance: '0.0000',
+        frozenSavings: '600.0000',
+      });
+      tx.transaction.create.mockResolvedValue({ id: 'txn-wdr-ok' });
+      tx.journalEntry.create.mockResolvedValue({ id: 'je-wdr-ok' });
+      (mockPrisma.$transaction as jest.Mock).mockImplementationOnce(async (cb) => cb(tx));
+
+      // Available = 1000 - 600 = 400 >= requested 300.
+      const result = await service.postEntry({
+        tenantId: TENANT_ID,
+        reference: 'WDR-003',
+        journalType: JournalEntryType.WITHDRAWAL,
+        accountId: 'account-1',
+        amount: new Decimal(300),
+        direction: 'DEBIT',
+        actorId: ACTOR_ID,
+      });
+
+      expect(result.transaction.id).toBe('txn-wdr-ok');
+      // Compare-and-swap floor: balance >= frozenSavings + amount = 600 + 300 = 900.
+      expect(tx.account.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ balance: { gte: '900' } }) }),
+      );
+    });
+
+    it('enforces the guarantor-hold floor even when allowsNegative is true', async () => {
+      const tx = buildTx();
+      tx.account.findFirst.mockResolvedValue({
+        balance: '1000.0000',
+        minimumBalance: '500.0000',
+        allowsNegative: true, // would normally bypass the minimum-balance floor entirely
+        accountType: AccountType.FOSA,
+        lockedBalance: '0.0000',
+        frozenSavings: '600.0000',
+      });
+      tx.account.updateMany.mockResolvedValue({ count: 0 });
+      (mockPrisma.$transaction as jest.Mock).mockImplementationOnce(async (cb) => cb(tx));
+
+      await expect(
+        service.postEntry({
+          tenantId: TENANT_ID,
+          reference: 'WDR-004',
+          journalType: JournalEntryType.WITHDRAWAL,
+          accountId: 'account-1',
+          amount: new Decimal(500),
+          direction: 'DEBIT',
+          actorId: ACTOR_ID,
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      // allowsNegative waives the minimumBalance floor (policyFloor=0), but never the
+      // committed-funds floor: balance >= frozenSavings + amount = 600 + 500 = 1100.
+      expect(tx.account.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ balance: { gte: '1100' } }) }),
+      );
+    });
+
     it('falls back to the tenant SYSTEM user when actorId is omitted, and memoizes the lookup', async () => {
       const tx = buildTx();
       tx.account.findFirst.mockResolvedValue({

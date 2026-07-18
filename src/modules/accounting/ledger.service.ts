@@ -957,10 +957,19 @@ export class LedgerService {
   }
 
   /**
-   * Atomically apply a balance change to one account, enforcing its
-   * minimum-balance floor (unless allowsNegative) via a conditional WHERE clause
-   * on the same updateMany() call — a compare-and-swap that avoids the
-   * check-then-write race a separate SELECT + UPDATE would have.
+   * Atomically apply a balance change to one account, enforcing (for DEBITs):
+   *   1. The committed-funds floor: `lockedBalance` + `frozenSavings` are never
+   *      touchable regardless of `allowsNegative` — this is what backs guarantor
+   *      collateral holds (GuarantorValidationService.placeGuarantorHolds()).
+   *      Previously this was only enforced ad hoc at one call site (the M-Pesa
+   *      FOSA withdrawal in MemberPortalService); centralizing it here means
+   *      every debit path (teller withdrawal, internal transfer, reversal)
+   *      gets it for free.
+   *   2. The minimum-balance floor (unless allowsNegative) — unchanged from
+   *      before.
+   * Both are enforced via a conditional WHERE clause on the same updateMany()
+   * call — a compare-and-swap that avoids the check-then-write race a separate
+   * SELECT + UPDATE would have.
    */
   private async applyBalanceChange(
     tx: PrismaTx,
@@ -970,7 +979,14 @@ export class LedgerService {
 
     const account = await tx.account.findFirst({
       where: { id: accountId, tenantId, isActive: true },
-      select: { balance: true, minimumBalance: true, allowsNegative: true, accountType: true },
+      select: {
+        balance: true,
+        minimumBalance: true,
+        allowsNegative: true,
+        accountType: true,
+        lockedBalance: true,
+        frozenSavings: true,
+      },
     });
     if (!account) {
       throw new NotFoundException(`Account ${accountId} not found or inactive in this tenant`);
@@ -981,10 +997,21 @@ export class LedgerService {
     const balanceAfter = balanceBefore.plus(delta).toDecimalPlaces(4);
 
     const where: Prisma.AccountWhereInput = { id: accountId, tenantId, isActive: true };
-    if (direction === 'DEBIT' && !account.allowsNegative) {
+    if (direction === 'DEBIT') {
+      // Committed funds (guarantor holds / other locks) are never debitable,
+      // regardless of allowsNegative: balance >= lockedBalance + frozenSavings + amount.
+      const lockedBalance = new Decimal(account.lockedBalance?.toString() ?? '0');
+      const frozenSavings = new Decimal(account.frozenSavings?.toString() ?? '0');
+      const committedFloor = lockedBalance.plus(frozenSavings).plus(amount);
+
+      // Minimum-balance policy floor (unless allowsNegative):
       // balance - amount >= minimumBalance  <=>  balance >= minimumBalance + amount
       const minimumBalance = new Decimal(account.minimumBalance.toString());
-      where.balance = { gte: minimumBalance.plus(amount).toDecimalPlaces(4).toString() };
+      const policyFloor = account.allowsNegative
+        ? new Decimal(0)
+        : minimumBalance.plus(amount);
+
+      where.balance = { gte: Decimal.max(committedFloor, policyFloor).toDecimalPlaces(4).toString() };
     }
 
     const updated = await tx.account.updateMany({
@@ -1000,7 +1027,7 @@ export class LedgerService {
 
     if (updated.count === 0) {
       throw new BadRequestException(
-        'Insufficient funds or below minimum balance requirement, or concurrent modification',
+        'Insufficient available funds (below minimum balance, or amount is committed to a guarantor hold), or concurrent modification',
       );
     }
 

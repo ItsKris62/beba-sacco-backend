@@ -17,12 +17,19 @@ describe('Tier 4 audit logging', () => {
     const auditQueue = { add: jest.fn().mockResolvedValue({ id: 'audit-job' }) };
     const prisma = {
       loan: { findMany: jest.fn() },
+      // computeScheduleBasedDailyInterest() reads via this.prisma (not tx),
+      // before the per-loan transaction opens — see financial.service.ts.
+      loanRepayment: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
       $transaction: jest.fn(async (cb: (tx: any) => Promise<unknown>) => cb(mockTx)),
     };
     const redis = { set: jest.fn().mockResolvedValue(true) };
     const ledger = {
       postInterestAccrualEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-interest-1' }, replayed: false }),
       postPenaltyDeductionEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-penalty-1' }, replayed: false }),
+      postPenaltyReceivableEntry: jest.fn().mockResolvedValue({ journalEntry: { id: 'je-penalty-receivable-1' }, replayed: false }),
     };
 
     beforeEach(() => {
@@ -34,11 +41,17 @@ describe('Tier 4 audit logging', () => {
         },
         account: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          findFirst: jest.fn().mockResolvedValue({ balance: '10000.0000' }),
         },
         // debitAccountWithCas() locks the account via `SELECT ... FOR UPDATE`
         // before writing a version-guarded updateMany() — see financial.service.ts.
         $queryRaw: jest.fn().mockResolvedValue([{ balance: '10000.0000', version: 0 }]),
         loan: { update: jest.fn().mockResolvedValue({}) },
+        // applyOverdueInstallmentsAndArrears() — no overdue installments in this fixture.
+        loanRepayment: {
+          findMany: jest.fn().mockResolvedValue([]),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
       };
     });
 

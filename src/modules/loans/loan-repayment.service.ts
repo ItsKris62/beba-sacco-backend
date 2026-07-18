@@ -526,6 +526,9 @@ export class LoanRepaymentService {
       const nextPenaltyPaid = penaltyPaid.plus(addPenalty).toDecimalPlaces(4);
       const nextInterestPaid = interestPaid.plus(addInterest).toDecimalPlaces(4);
       const nextPrincipalPaid = principalPaid.plus(addPrincipal).toDecimalPlaces(4);
+      // amountPaid is the running total of the three *Paid legs above — always
+      // kept in lockstep with them (Phase 3 audit fix: this used to be left at
+      // whatever value schedule generation seeded it with and never updated).
       const paidTotal = nextPenaltyPaid.plus(nextInterestPaid).plus(nextPrincipalPaid);
       const dueTotal = penaltyDue.plus(interestDue).plus(principalDue);
       const status = paidTotal.greaterThanOrEqualTo(dueTotal) ? 'PAID' : 'PARTIAL';
@@ -536,6 +539,7 @@ export class LoanRepaymentService {
           penaltyPaid: nextPenaltyPaid.toString(),
           interestPaid: nextInterestPaid.toString(),
           principalPaid: nextPrincipalPaid.toString(),
+          amountPaid: paidTotal.toDecimalPlaces(4).toString(),
           status,
           paidAt: status === 'PAID' ? paidAt : null,
           method: 'WATERFALL',

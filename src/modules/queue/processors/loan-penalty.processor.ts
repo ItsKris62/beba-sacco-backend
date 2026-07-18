@@ -8,6 +8,27 @@ import { AuditService as AuditLogService } from '../../audit/audit.service';
 import { LedgerService } from '../../accounting/ledger.service';
 import { APPLY_DAILY_PENALTIES_JOB, QUEUE_NAMES } from '../queue.constants';
 
+/**
+ * SUPERSEDED (Phase 2 audit fix) — no longer scheduled anywhere.
+ *
+ * This used to run on its own midnight-EAT repeatable cron
+ * (DailyJobsScheduler) at the exact same time as
+ * CronOrchestratorService.runDailyAccrualFanout() -> FinancialService.
+ * runDailyAccrual(). Both independently wrote Loan.arrearsAmount with
+ * different, incompatible semantics (this processor incremented it per
+ * overdue installment; the other job blanket-overwrote it from Loan.dueDate,
+ * the loan's final maturity date) — whichever ran last each night silently
+ * clobbered the other's bookkeeping.
+ *
+ * The overdue-installment penalty accrual logic below has been ported into
+ * FinancialService.applyOverdueInstallmentsAndArrears(), which now runs
+ * inside runDailyAccrual()'s own per-loan transaction and is the single
+ * writer of LoanRepayment.penaltyDue and Loan.arrearsDays/arrearsAmount/
+ * staging. This class is kept only so the queue/module wiring and its
+ * behavior remain documented and testable; DailyJobsScheduler no longer
+ * enqueues APPLY_DAILY_PENALTIES_JOB, so process() below never runs in
+ * production.
+ */
 @Processor(QUEUE_NAMES.LOAN_PENALTY_QUEUE, { concurrency: 2 })
 export class LoanPenaltyProcessor extends WorkerHost {
   private readonly logger = new Logger(LoanPenaltyProcessor.name);

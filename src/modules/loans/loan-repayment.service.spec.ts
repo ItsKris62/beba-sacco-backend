@@ -112,7 +112,14 @@ describe('LoanRepaymentService', () => {
     expect(result.allocatedToPrincipal.toFixed(2)).toBe('1000.00');
     expect(result.status).toBe(LoanStatus.FULLY_PAID);
     expect(tx.loanRepayment.update as MockFn).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: 'PAID' }),
+      data: expect.objectContaining({
+        penaltyPaid: '100',
+        interestPaid: '400',
+        principalPaid: '1000',
+        // amountPaid must equal the sum of the three *Paid legs above (Phase 3 fix).
+        amountPaid: '1500',
+        status: 'PAID',
+      }),
     }));
 
     // Every leg posts its GL-only entry (Cash vs Income/Receivable) via LedgerService.
@@ -167,6 +174,42 @@ describe('LoanRepaymentService', () => {
     expect(tx.transaction.create as MockFn).not.toHaveBeenCalled();
     expect(ledger.postLoanRepaymentLegEntry).not.toHaveBeenCalled();
     expect(ledger.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('marks an installment PARTIAL and keeps amountPaid in lockstep with the sub-fields when underpaid', async () => {
+    // Only enough to cover the penalty and part of the interest — dueTotal for
+    // the fixture installment is 100 (penalty) + 400 (interest) + 1000 (principal) = 1500.
+    const { service, tx } = buildService({
+      paymentAmount: new Decimal('250'),
+      outstanding: '1000',
+      accruedInterest: '400',
+      arrearsAmount: '100',
+    });
+
+    const result = await service.processRepayment({
+      tenantId,
+      amount: new Decimal('250'),
+      reference: 'MPESA-R4',
+      processedBy: 'MPESA_SYSTEM',
+      loanId,
+    });
+
+    // 250 -> 100 to penalty, 150 to interest, 0 to principal.
+    expect(result.allocatedToPenalty.toFixed(2)).toBe('100.00');
+    expect(result.allocatedToInterest.toFixed(2)).toBe('150.00');
+    expect(result.allocatedToPrincipal.toFixed(2)).toBe('0.00');
+    expect(result.status).toBe(LoanStatus.ACTIVE);
+
+    expect(tx.loanRepayment.update as MockFn).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        penaltyPaid: '100',
+        interestPaid: '150',
+        principalPaid: '0',
+        amountPaid: '250', // 100 + 150 + 0 — always the sum of the three *Paid legs
+        status: 'PARTIAL',
+        paidAt: null,
+      }),
+    }));
   });
 
   it('cancels delayed guarantor debit jobs after a curing repayment', async () => {

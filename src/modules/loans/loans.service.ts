@@ -835,13 +835,16 @@ export class LoansService {
             gracePeriodMonths: number | null;
             monthlyInstalment: string;
             repaymentScheduleGenerated: boolean;
+            interestRate: string;
+            interestType: InterestType;
           }>
         >`
-          SELECT id, status, "principalAmount", "processingFee", "tenureMonths", "gracePeriodMonths",
-                 "monthlyInstalment", "repaymentScheduleGenerated"
-          FROM "Loan"
-          WHERE id = ${id} AND "tenantId" = ${tenantId}
-          FOR UPDATE
+          SELECT l.id, l.status, l."principalAmount", l."processingFee", l."tenureMonths", l."gracePeriodMonths",
+                 l."monthlyInstalment", l."repaymentScheduleGenerated", l."interestRate", lp."interestType"
+          FROM "Loan" l
+          JOIN "LoanProduct" lp ON lp.id = l."loanProductId"
+          WHERE l.id = ${id} AND l."tenantId" = ${tenantId}
+          FOR UPDATE OF l
         `;
         const lockedLoan = lockedLoans[0];
         if (!lockedLoan) throw new NotFoundException('Loan not found');
@@ -924,8 +927,15 @@ export class LoansService {
         // skipDuplicates guards against re-runs inside the same Serializable tx.
         if (!lockedLoan.repaymentScheduleGenerated) {
           const instalment = new Decimal(lockedLoan.monthlyInstalment.toString());
+          const schedule = this.buildAmortizationSchedule(
+            new Decimal(lockedLoan.principalAmount.toString()),
+            new Decimal(lockedLoan.interestRate.toString()),
+            lockedLoan.tenureMonths,
+            lockedLoan.interestType,
+            instalment,
+          );
           await tx.loanRepayment.createMany({
-            data: Array.from({ length: lockedLoan.tenureMonths }, (_, i) => {
+            data: schedule.map((period, i) => {
               const paymentDate = new Date(disbursedAt);
               paymentDate.setMonth(
                 paymentDate.getMonth() + (lockedLoan.gracePeriodMonths ?? 0) + i + 1,
@@ -934,9 +944,13 @@ export class LoansService {
                 tenantId,
                 loanId: id,
                 dayNumber: i + 1,
-                amountPaid: instalment.toDecimalPlaces(2).toString(),
+                amountPaid: '0',
                 dueDate: paymentDate,
-                principalDue: instalment.toDecimalPlaces(4).toString(),
+                principalDue: period.principalDue.toDecimalPlaces(4).toString(),
+                interestDue: period.interestDue.toDecimalPlaces(4).toString(),
+                principalPaid: '0',
+                interestPaid: '0',
+                penaltyPaid: '0',
                 paymentDate,
                 method: 'SCHEDULED',
                 status: 'PENDING',
@@ -1774,5 +1788,77 @@ export class LoansService {
     const onePlusRPowN = onePlusR.pow(n);
 
     return principal.times(r).times(onePlusRPowN).dividedBy(onePlusRPowN.minus(1));
+  }
+
+  /**
+   * Splits the level `instalment` (from calculateInstalment() above) into a
+   * per-period principalDue/interestDue amortization schedule — the real
+   * split that LoanRepayment rows were missing before Phase 3 (interestDue
+   * was always 0, principalDue held the whole instalment).
+   *
+   * REDUCING_BALANCE: interest is charged on the *outstanding* balance each
+   * period, so interestDue strictly decreases and principalDue strictly
+   * increases month over month, converging to the standard amortization
+   * table.
+   *
+   * FLAT: interest is charged on the *original* principal for the full
+   * tenure (matching calculateInstalment()'s FLAT formula above), split
+   * evenly — interestDue is identical every period by definition, not
+   * balance-dependent.
+   *
+   * The final period is "plugged" (principalDue = principal minus everything
+   * already allocated, same for interestDue on FLAT) so the schedule always
+   * sums to exactly the original principal / total interest despite each
+   * period being rounded to 4dp along the way.
+   */
+  private buildAmortizationSchedule(
+    principal: Decimal,
+    annualRate: Decimal,
+    tenureMonths: number,
+    interestType: InterestType,
+    instalment: Decimal,
+  ): Array<{ principalDue: Decimal; interestDue: Decimal }> {
+    const schedule: Array<{ principalDue: Decimal; interestDue: Decimal }> = [];
+
+    if (interestType === InterestType.FLAT) {
+      const totalInterest = principal
+        .times(annualRate)
+        .times(tenureMonths)
+        .dividedBy(12)
+        .toDecimalPlaces(4);
+      const interestPerPeriod = totalInterest.dividedBy(tenureMonths).toDecimalPlaces(4);
+
+      let principalAccrued = new Decimal(0);
+      let interestAccrued = new Decimal(0);
+      for (let i = 1; i <= tenureMonths; i++) {
+        const isLast = i === tenureMonths;
+        const interestDue = isLast ? totalInterest.minus(interestAccrued) : interestPerPeriod;
+        const principalDue = isLast
+          ? principal.minus(principalAccrued)
+          : instalment.minus(interestPerPeriod).toDecimalPlaces(4);
+        principalAccrued = principalAccrued.plus(principalDue);
+        interestAccrued = interestAccrued.plus(interestDue);
+        schedule.push({ principalDue, interestDue });
+      }
+      return schedule;
+    }
+
+    // REDUCING_BALANCE
+    const monthlyRate = annualRate.dividedBy(12);
+    let outstanding = principal;
+    let principalAccrued = new Decimal(0);
+    for (let i = 1; i <= tenureMonths; i++) {
+      const isLast = i === tenureMonths;
+      const interestDue = monthlyRate.isZero()
+        ? new Decimal(0)
+        : outstanding.times(monthlyRate).toDecimalPlaces(4);
+      const principalDue = isLast
+        ? principal.minus(principalAccrued)
+        : Decimal.min(instalment.minus(interestDue).toDecimalPlaces(4), outstanding);
+      outstanding = outstanding.minus(principalDue).toDecimalPlaces(4);
+      principalAccrued = principalAccrued.plus(principalDue);
+      schedule.push({ principalDue, interestDue });
+    }
+    return schedule;
   }
 }
