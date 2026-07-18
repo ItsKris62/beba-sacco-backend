@@ -1,0 +1,19 @@
+=== SEEDING TEST BORROWER/GUARANTOR ACCOUNTS ===
+Tenant ID: 1011f6c3-5e43-4e59-affa-b7212d278688
+Approved KYC for existing demo member: member@beba-sacco.com
+User upserted: member2@beba-sacco.com
+Member profile upserted: M-000002 (KYC APPROVED)
+Accounts upserted: ACC-FOSA-000002 (KES 60000), ACC-BOSA-000002 (KES 150000)
+User upserted: member3@beba-sacco.com
+Member profile upserted: M-000003 (KYC APPROVED)
+Accounts upserted: ACC-FOSA-000003 (KES 45000), ACC-BOSA-000003 (KES 95000)
+
+=== SUMMARY ===
+Tenant ID: 1011f6c3-5e43-4e59-affa-b7212d278688
+X-Tenant-ID header: 1011f6c3-5e43-4e59-affa-b7212d278688
+member@beba-sacco.com  / Member@1234  (KYC now APPROVED) — M-000001, FOSA 50000 / BOSA 120000
+member2@beba-sacco.com / Member@1234  (KYC APPROVED)     — M-000002, FOSA 60000 / BOSA 150000
+member3@beba-sacco.com / Member@1234  (KYC APPROVED)     — M-000003, FOSA 45000 / BOSA 95000
+
+All three members are mutually eligible to guarantor each other's loans (FOSA accounts, KYC APPROVED, not blacklisted).
+=== DONE ===
