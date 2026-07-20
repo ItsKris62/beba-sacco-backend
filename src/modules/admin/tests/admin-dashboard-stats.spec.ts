@@ -53,6 +53,7 @@ describe('AdminService.getDashboardStats()', () => {
       cache as never,
       emailQueue as never,
       eventEmitter as never,
+      { release: jest.fn(), exists: jest.fn(), checkAndReserve: jest.fn(), complete: jest.fn() } as never,
     );
   }
 

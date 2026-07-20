@@ -52,7 +52,12 @@ export class IdempotencyService {
     const redisKey = this.buildKey(key, tenantId);
 
     // Try to reserve with SET NX (only set if key does NOT exist)
-    const reserved = await this.redis.set(redisKey, JSON.stringify({ status: 'PROCESSING' }), ttlSeconds, true);
+    const reserved = await this.redis.set(
+      redisKey,
+      JSON.stringify({ status: 'PROCESSING' }),
+      ttlSeconds,
+      true,
+    );
 
     if (reserved) {
       this.logger.debug(`Idempotency NEW: ${redisKey}`);
@@ -106,11 +111,7 @@ export class IdempotencyService {
    */
   async complete<T>(key: string, tenantId: string, result: T, ttlSeconds = 3600): Promise<void> {
     const redisKey = this.buildKey(key, tenantId);
-    await this.redis.set(
-      redisKey,
-      JSON.stringify({ status: 'COMPLETED', result }),
-      ttlSeconds,
-    );
+    await this.redis.set(redisKey, JSON.stringify({ status: 'COMPLETED', result }), ttlSeconds);
     this.logger.debug(`Idempotency COMPLETED: ${redisKey}`);
   }
 
@@ -123,6 +124,17 @@ export class IdempotencyService {
     const redisKey = this.buildKey(key, tenantId);
     await this.redis.del(redisKey);
     this.logger.debug(`Idempotency RELEASED: ${redisKey}`);
+  }
+
+  /**
+   * Check whether a key currently exists (PROCESSING or COMPLETED), without
+   * consuming or modifying it. Added for incident 2026-07-20's one-time admin
+   * cleanup endpoint, so it can report whether a release actually did
+   * anything rather than always claiming success.
+   */
+  async exists(key: string, tenantId: string): Promise<boolean> {
+    const raw = await this.redis.get(this.buildKey(key, tenantId));
+    return raw !== null;
   }
 
   private buildKey(key: string, tenantId: string): string {

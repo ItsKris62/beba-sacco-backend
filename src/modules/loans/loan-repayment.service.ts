@@ -108,6 +108,13 @@ export class LoanRepaymentService {
 
     let result: RepaymentAllocationSummary;
     try {
+      // TODO(incident 2026-07-20): no explicit timeout/maxWait — inherits
+      // Prisma's 5000ms default, same as the loan-apply transaction that
+      // caused that incident. applyInstallmentAllocation() (called below)
+      // loops over this loan's pending/partial LoanRepayment rows (bounded by
+      // the product's tenure, but still N sequential queries). Not fixed here
+      // — out of scope for this incident's PR — flagged per the postmortem's
+      // action item to audit other $transaction call sites.
       result = await txClient.$transaction(
         async (tx): Promise<RepaymentAllocationSummary> => {
           const duplicate = await tx.transaction.findFirst({

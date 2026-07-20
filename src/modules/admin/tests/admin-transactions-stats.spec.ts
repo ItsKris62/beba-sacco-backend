@@ -54,6 +54,7 @@ describe('Admin transaction stats', () => {
       cache as never,
       emailQueue as never,
       eventEmitter as never,
+      { release: jest.fn(), exists: jest.fn(), checkAndReserve: jest.fn(), complete: jest.fn() } as never,
     );
 
     const stats = await service.getTransactionStats('tenant-1', {
@@ -90,6 +91,7 @@ describe('Admin transaction stats', () => {
       cache as never,
       emailQueue as never,
       eventEmitter as never,
+      { release: jest.fn(), exists: jest.fn(), checkAndReserve: jest.fn(), complete: jest.fn() } as never,
     );
     const controller = new AdminController(service);
     const spy = jest.spyOn(service, 'getTransactionStats').mockResolvedValueOnce({

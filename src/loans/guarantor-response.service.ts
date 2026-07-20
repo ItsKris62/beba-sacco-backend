@@ -128,6 +128,11 @@ export class GuarantorResponseService {
       if (idemKey) await this.idempotency.complete(idemKey, tenantId, result, 72 * 60 * 60);
       return result;
     } catch (error) {
+      // TODO(incident 2026-07-20): already releases unconditionally (good —
+      // no leak here), but the release call itself isn't wrapped in its own
+      // try/catch, so a Redis failure during cleanup would throw from here
+      // and mask the original `error`. See loan-application.service.ts's
+      // memberApply() catch block for the safe pattern.
       if (idemKey) await this.idempotency.release(idemKey, tenantId);
       throw error;
     }

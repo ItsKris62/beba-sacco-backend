@@ -170,120 +170,136 @@ export class FinancialService {
         )
       : 1;
 
-    await this.prisma.$transaction(async (tx) => {
-      // Post interest accrual transaction — the Account debit and its GL leg
-      // (LedgerService.postInterestAccrualEntry) happen in this same transaction,
-      // so a GL-code resolution failure rolls back the balance debit too. Never
-      // silently drain a balance with no GL trace.
-      if (dailyInterest.gt(0)) {
-        // Deterministic — never uuid() here. A retried accrual job must land on the
-        // exact same reference so LedgerService's replay check (and the pre-check
-        // below) can catch it, instead of double-charging the member.
-        const interestReference = `ACCRUAL-${loan.tenantId}-${loan.id}-${accrualDateStr}`;
+    // TODO(incident 2026-07-20): no explicit timeout/maxWait here — inherits
+    // Prisma's 5000ms default, same as the loan-apply transaction that caused
+    // that incident. applyOverdueInstallmentsAndArrears() (called below) loops
+    // over a loan's overdue installments, so a loan with a long unprocessed
+    // backlog (e.g. after downtime) could push this close to the ceiling under
+    // DB latency pressure. Not fixed here — out of scope for this incident's
+    // PR — but flagged per the postmortem's action item to audit other
+    // $transaction call sites.
+    await this.prisma.$transaction(
+      async (tx) => {
+        // Post interest accrual transaction — the Account debit and its GL leg
+        // (LedgerService.postInterestAccrualEntry) happen in this same transaction,
+        // so a GL-code resolution failure rolls back the balance debit too. Never
+        // silently drain a balance with no GL trace.
+        if (dailyInterest.gt(0)) {
+          // Deterministic — never uuid() here. A retried accrual job must land on the
+          // exact same reference so LedgerService's replay check (and the pre-check
+          // below) can catch it, instead of double-charging the member.
+          const interestReference = `ACCRUAL-${loan.tenantId}-${loan.id}-${accrualDateStr}`;
 
-        const existingInterest = await tx.transaction.findFirst({
-          where: { tenantId: loan.tenantId, reference: interestReference },
-        });
-        if (!existingInterest) {
-          const { balanceBefore, balanceAfter } = await this.debitAccountWithCas(
-            tx,
-            fosaAccount.id,
-            dailyInterest,
-          );
+          const existingInterest = await tx.transaction.findFirst({
+            where: { tenantId: loan.tenantId, reference: interestReference },
+          });
+          if (!existingInterest) {
+            const { balanceBefore, balanceAfter } = await this.debitAccountWithCas(
+              tx,
+              fosaAccount.id,
+              dailyInterest,
+            );
 
-          const interestTxn = await tx.transaction.create({
-            data: {
+            const interestTxn = await tx.transaction.create({
+              data: {
+                tenantId: loan.tenantId,
+                accountId: fosaAccount.id,
+                loanId: loan.id,
+                type: TransactionType.INTEREST_ACCRUAL,
+                status: TransactionStatus.COMPLETED,
+                amount: dailyInterest.toDecimalPlaces(4).toString(),
+                balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+                balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+                reference: interestReference,
+                description: `Daily interest accrual – ${accrualDateStr}`,
+                processedBy: 'SYSTEM',
+              },
+            });
+
+            await this.ledger.postInterestAccrualEntry({
+              tx,
               tenantId: loan.tenantId,
-              accountId: fosaAccount.id,
-              loanId: loan.id,
-              type: TransactionType.INTEREST_ACCRUAL,
-              status: TransactionStatus.COMPLETED,
-              amount: dailyInterest.toDecimalPlaces(4).toString(),
-              balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-              balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
               reference: interestReference,
+              amount: dailyInterest,
+              accountType: AccountType.FOSA,
+              transactionId: interestTxn.id,
               description: `Daily interest accrual – ${accrualDateStr}`,
-              processedBy: 'SYSTEM',
-            },
-          });
-
-          await this.ledger.postInterestAccrualEntry({
-            tx,
-            tenantId: loan.tenantId,
-            reference: interestReference,
-            amount: dailyInterest,
-            accountType: AccountType.FOSA,
-            transactionId: interestTxn.id,
-            description: `Daily interest accrual – ${accrualDateStr}`,
-          });
+            });
+          }
         }
-      }
 
-      // Post penalty transaction — same atomicity/idempotency/GL-safety shape as
-      // the interest leg above.
-      if (dailyPenalty.gt(0)) {
-        const penaltyReference = `PENALTY-${loan.tenantId}-${loan.id}-${accrualDateStr}`;
-        const existingPenalty = await tx.transaction.findFirst({
-          where: { tenantId: loan.tenantId, reference: penaltyReference },
-        });
-        if (!existingPenalty) {
-          const { balanceBefore, balanceAfter } = await this.debitAccountWithCas(
-            tx,
-            fosaAccount.id,
-            dailyPenalty,
-          );
+        // Post penalty transaction — same atomicity/idempotency/GL-safety shape as
+        // the interest leg above.
+        if (dailyPenalty.gt(0)) {
+          const penaltyReference = `PENALTY-${loan.tenantId}-${loan.id}-${accrualDateStr}`;
+          const existingPenalty = await tx.transaction.findFirst({
+            where: { tenantId: loan.tenantId, reference: penaltyReference },
+          });
+          if (!existingPenalty) {
+            const { balanceBefore, balanceAfter } = await this.debitAccountWithCas(
+              tx,
+              fosaAccount.id,
+              dailyPenalty,
+            );
 
-          const penaltyTxn = await tx.transaction.create({
-            data: {
+            const penaltyTxn = await tx.transaction.create({
+              data: {
+                tenantId: loan.tenantId,
+                accountId: fosaAccount.id,
+                loanId: loan.id,
+                type: TransactionType.PENALTY,
+                status: TransactionStatus.COMPLETED,
+                amount: dailyPenalty.toDecimalPlaces(4).toString(),
+                balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
+                balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
+                reference: penaltyReference,
+                description: `Overdue penalty – ${accrualDateStr}`,
+                processedBy: 'SYSTEM',
+              },
+            });
+
+            await this.ledger.postPenaltyDeductionEntry({
+              tx,
               tenantId: loan.tenantId,
-              accountId: fosaAccount.id,
-              loanId: loan.id,
-              type: TransactionType.PENALTY,
-              status: TransactionStatus.COMPLETED,
-              amount: dailyPenalty.toDecimalPlaces(4).toString(),
-              balanceBefore: balanceBefore.toDecimalPlaces(4).toString(),
-              balanceAfter: balanceAfter.toDecimalPlaces(4).toString(),
               reference: penaltyReference,
+              amount: dailyPenalty,
+              accountType: AccountType.FOSA,
+              transactionId: penaltyTxn.id,
               description: `Overdue penalty – ${accrualDateStr}`,
-              processedBy: 'SYSTEM',
-            },
-          });
-
-          await this.ledger.postPenaltyDeductionEntry({
-            tx,
-            tenantId: loan.tenantId,
-            reference: penaltyReference,
-            amount: dailyPenalty,
-            accountType: AccountType.FOSA,
-            transactionId: penaltyTxn.id,
-            description: `Overdue penalty – ${accrualDateStr}`,
-          });
+            });
+          }
         }
-      }
 
-      // Consolidated overdue-installment penalty accrual + arrears/staging rollup
-      // (formerly split across this job and the separately-scheduled
-      // LoanPenaltyProcessor, which raced to overwrite Loan.arrearsAmount on the
-      // same midnight cron — see Phase 2 audit fix). This is now the single
-      // source of truth for arrearsDays/arrearsAmount/staging, computed from the
-      // LoanRepayment installment schedule rather than Loan.dueDate (the loan's
-      // final maturity, which never reflects a missed installment mid-tenure).
-      const arrears = await this.applyOverdueInstallmentsAndArrears(tx, loan, fosaAccount.id, accrualDate);
+        // Consolidated overdue-installment penalty accrual + arrears/staging rollup
+        // (formerly split across this job and the separately-scheduled
+        // LoanPenaltyProcessor, which raced to overwrite Loan.arrearsAmount on the
+        // same midnight cron — see Phase 2 audit fix). This is now the single
+        // source of truth for arrearsDays/arrearsAmount/staging, computed from the
+        // LoanRepayment installment schedule rather than Loan.dueDate (the loan's
+        // final maturity, which never reflects a missed installment mid-tenure).
+        const arrears = await this.applyOverdueInstallmentsAndArrears(
+          tx,
+          loan,
+          fosaAccount.id,
+          accrualDate,
+        );
 
-      // Update loan arrears + staging + running accruedInterest total
-      await tx.loan.update({
-        where: { id: loan.id },
-        data: {
-          arrearsDays: arrears.arrearsDays,
-          arrearsAmount: arrears.arrearsAmount.toString(),
-          staging: arrears.staging,
-          lastAccrualDate: accrualDate,
-          accruedInterest: { increment: dailyInterest.toDecimalPlaces(4).toNumber() },
-          // Transition to DEFAULTED if NPL
-          ...(arrears.staging === LoanStaging.NPL && { status: LoanStatus.DEFAULTED }),
-        },
-      });
-    }, { isolationLevel: 'Serializable' as const });
+        // Update loan arrears + staging + running accruedInterest total
+        await tx.loan.update({
+          where: { id: loan.id },
+          data: {
+            arrearsDays: arrears.arrearsDays,
+            arrearsAmount: arrears.arrearsAmount.toString(),
+            staging: arrears.staging,
+            lastAccrualDate: accrualDate,
+            accruedInterest: { increment: dailyInterest.toDecimalPlaces(4).toNumber() },
+            // Transition to DEFAULTED if NPL
+            ...(arrears.staging === LoanStaging.NPL && { status: LoanStatus.DEFAULTED }),
+          },
+        });
+      },
+      { isolationLevel: 'Serializable' as const },
+    );
 
     this.emitAuditLogNonBlocking(
       {
@@ -813,7 +829,14 @@ export class FinancialService {
     truncated: boolean;
   }> {
     const rows = await this.prisma.$queryRaw<
-      { id: string; reference: string; type: string; accountId: string; amount: Decimal; createdAt: Date }[]
+      {
+        id: string;
+        reference: string;
+        type: string;
+        accountId: string;
+        amount: Decimal;
+        createdAt: Date;
+      }[]
     >`
       SELECT t.id, t.reference, t.type, t."accountId", t.amount, t."createdAt"
       FROM "Transaction" t

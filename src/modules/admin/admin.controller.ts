@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Patch,
+  Delete,
   Param,
   Body,
   Query,
@@ -47,6 +48,34 @@ import { ApiErrorExamples } from '../../common/swagger/error-response-examples';
 @Controller('admin')
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
+
+  // ─── ONE-TIME INCIDENT CLEANUP (2026-07-20) ────────────────────
+  // TODO: Remove this endpoint after the 2026-07-20 incident cleanup is complete.
+
+  @Delete('idempotency/:key')
+  @Roles(UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: '[Incident cleanup only] Force-clear a stuck idempotency key',
+    description:
+      'One-time remediation tool for the 2026-07-20 loan-apply transaction-timeout incident, ' +
+      "where a member's idempotency key could be left PROCESSING for its full TTL after a " +
+      'transient failure. `key` must be the exact composed key the originating service used ' +
+      '(e.g. `loan:apply:{userId}:{memberId}:{loanProductId}:{clientIdempotencyKey}`), not just ' +
+      'the client-supplied header value. Remove this endpoint once cleanup is complete.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Key release attempted (deleted=false if it was already gone)',
+  })
+  clearIdempotencyKey(
+    @Param('key') key: string,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.adminService.clearStuckIdempotencyKey(tenant.id, key, actor.id, req.ip);
+  }
 
   // ─── DASHBOARD ────────────────────────────────────────────────
 

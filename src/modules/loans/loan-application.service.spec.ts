@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { AccountStatus, AccountType, LoanStatus, GuarantorStatus, UserRole, InterestType } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { LoanApplicationService } from './loan-application.service';
@@ -26,14 +26,18 @@ describe('LoanApplicationService', () => {
   let prisma: any;
 
   const createMockPrisma = (): any => ({
-    member: { findFirst: jest.fn(), count: jest.fn() },
-    loan: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
+    // findMany defaults to [] — validateGuarantorsEligibilityBatchInTransaction()
+    // (incident 2026-07-18 fix) reads guarantor members via findMany, not a
+    // per-guarantor findFirst loop; tests that nominate guarantors configure it.
+    member: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]), count: jest.fn() },
+    loan: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
     loanProduct: { findFirst: jest.fn() },
     account: { findMany: jest.fn(), findFirst: jest.fn() },
     tenant: { findFirst: jest.fn().mockResolvedValue({ settings: {} }) },
     loanGuarantor: {
       findFirst: jest.fn(),
-      findMany: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      groupBy: jest.fn().mockResolvedValue([]),
       create: jest.fn(),
       upsert: jest.fn(),
       update: jest.fn(),
@@ -42,7 +46,7 @@ describe('LoanApplicationService', () => {
     tenantCounter: { upsert: jest.fn() },
     auditLog: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
     $queryRaw: jest.fn().mockResolvedValue([]),
-    $transaction: jest.fn((cb: (tx: any) => unknown) => cb(createMockPrisma())),
+    $transaction: jest.fn((cb: (tx: any) => unknown, _opts?: unknown) => cb(createMockPrisma())),
   });
 
   const mockAudit = { create: jest.fn().mockResolvedValue(undefined) };
@@ -297,19 +301,22 @@ describe('LoanApplicationService', () => {
 
     it('throws before creating guarantor rows for a blacklisted nominated guarantor', async () => {
       const tx = createMockPrisma();
-      tx.member.findFirst
-        .mockResolvedValueOnce({
-          id: 'm1',
-          memberNumber: 'M1',
-          kycStatus: 'APPROVED',
-          isBlacklisted: false,
-        })
-        .mockResolvedValueOnce({
+      tx.member.findFirst.mockResolvedValueOnce({
+        id: 'm1',
+        memberNumber: 'M1',
+        kycStatus: 'APPROVED',
+        isBlacklisted: false,
+      });
+      // Batched guarantor fetch (validateGuarantorsEligibilityBatchInTransaction) — one findMany call for all nominated guarantors.
+      tx.member.findMany.mockResolvedValue([
+        {
           id: 'g1',
           kycStatus: 'APPROVED',
           isBlacklisted: true,
           user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
-        });
+          accounts: [],
+        },
+      ]);
       tx.loan.findFirst.mockResolvedValue(null);
       tx.loanProduct.findFirst.mockResolvedValue({
         id: 'p1',
@@ -352,19 +359,22 @@ describe('LoanApplicationService', () => {
 
     it('should reject guarantor if circular guarantee is detected', async () => {
       const tx = createMockPrisma();
-      tx.member.findFirst
-        .mockResolvedValueOnce({
-          id: 'applicant-a',
-          memberNumber: 'M1',
-          kycStatus: 'APPROVED',
-          isBlacklisted: false,
-        })
-        .mockResolvedValueOnce({
+      tx.member.findFirst.mockResolvedValueOnce({
+        id: 'applicant-a',
+        memberNumber: 'M1',
+        kycStatus: 'APPROVED',
+        isBlacklisted: false,
+      });
+      // Batched guarantor fetch — one findMany call for all nominated guarantors.
+      tx.member.findMany.mockResolvedValue([
+        {
           id: 'guarantor-b',
           kycStatus: 'APPROVED',
           isBlacklisted: false,
           user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
-        });
+          accounts: [{ id: 'acc-g1', balance: '50000', lockedBalance: '0', frozenSavings: '0' }],
+        },
+      ]);
       tx.loan.findFirst.mockResolvedValue(null);
       tx.loanProduct.findFirst.mockResolvedValue({
         id: 'p1',
@@ -382,7 +392,8 @@ describe('LoanApplicationService', () => {
         maxGuarantors: 3,
       });
       tx.account.findMany.mockResolvedValue([{ accountType: 'FOSA', balance: '50000', lockedBalance: '0' }]);
-      tx.loanGuarantor.findFirst.mockResolvedValue({ id: 'existing-reverse-guarantee' });
+      // Batched circular-guarantee check — one findMany call covering all nominated guarantors.
+      tx.loanGuarantor.findMany.mockResolvedValue([{ loan: { memberId: 'guarantor-b' } }]);
       prisma.$transaction.mockImplementation((cb: (transactionClient: any) => unknown) => cb(tx));
 
       await expect(
@@ -402,16 +413,198 @@ describe('LoanApplicationService', () => {
         ),
       ).rejects.toThrow(BadRequestException);
 
-      expect(tx.loanGuarantor.findFirst).toHaveBeenCalledWith(
+      expect(tx.loanGuarantor.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             memberId: 'applicant-a',
-            loan: expect.objectContaining({ memberId: 'guarantor-b' }),
+            loan: expect.objectContaining({ memberId: { in: ['guarantor-b'] } }),
           }),
         }),
       );
       expect(tx.loan.create).not.toHaveBeenCalled();
       expect(tx.loanGuarantor.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── INCIDENT 2026-07-18 REGRESSION TESTS ────────────────────────────────
+  //
+  // Production loan-apply failure: _doMemberApply()'s interactive transaction
+  // (~15-18 sequential round-trips, no explicit timeout) exceeded Prisma's
+  // unconfigured 5000ms default under Neon compute-quota pressure, and the
+  // resulting error fell outside memberApply()'s idempotency-key release
+  // condition — stranding the member's retry for the key's 24h TTL.
+
+  describe('incident 2026-07-18: idempotency key release on transaction failure', () => {
+    const mockReq = { ip: '127.0.0.1', headers: { 'user-agent': 'test', 'x-request-id': 'req-1' } } as any;
+    const dto = { loanProductId: 'p1', principalAmount: 10000, tenureMonths: 6, purpose: 'Emergency' };
+
+    it('releases the idempotency key on an unexpected error and does not mark it complete', async () => {
+      prisma.$transaction.mockImplementationOnce(() => {
+        throw new Error('boom');
+      });
+
+      await expect(
+        service.memberApply(dto, 't1', 'm1', 'u1', mockReq, 'idem-unexpected-error'),
+      ).rejects.toThrow(InternalServerErrorException);
+
+      expect(mockIdempotency.release).toHaveBeenCalledWith('loan:apply:u1:m1:p1:idem-unexpected-error', 't1');
+      expect(mockIdempotency.complete).not.toHaveBeenCalled();
+    });
+
+    it('releases the idempotency key when the Prisma interactive transaction times out', async () => {
+      prisma.$transaction.mockImplementationOnce(() => {
+        throw new Error(
+          'Transaction API error: Transaction already closed: A query cannot be executed on an ' +
+            'expired transaction. The timeout for this transaction was 5000 ms, however 5160 ms ' +
+            'passed since the start of the transaction.',
+        );
+      });
+
+      await expect(
+        service.memberApply(dto, 't1', 'm1', 'u1', mockReq, 'idem-tx-timeout'),
+      ).rejects.toThrow(InternalServerErrorException);
+
+      expect(mockIdempotency.release).toHaveBeenCalledWith('loan:apply:u1:m1:p1:idem-tx-timeout', 't1');
+      expect(mockIdempotency.complete).not.toHaveBeenCalled();
+    });
+
+    it('still releases the idempotency key for business exceptions like ConflictException (pre-existing behavior, unchanged)', async () => {
+      prisma.$transaction.mockImplementationOnce(() => {
+        throw new ConflictException('Loan application is already being processed. Please wait.');
+      });
+
+      await expect(
+        service.memberApply(dto, 't1', 'm1', 'u1', mockReq, 'idem-conflict'),
+      ).rejects.toThrow(ConflictException);
+
+      expect(mockIdempotency.release).toHaveBeenCalledWith('loan:apply:u1:m1:p1:idem-conflict', 't1');
+    });
+
+    it('does not let a Redis failure during release mask the original error', async () => {
+      prisma.$transaction.mockImplementationOnce(() => {
+        throw new Error('boom');
+      });
+      mockIdempotency.release.mockRejectedValueOnce(new Error('redis unreachable'));
+
+      await expect(
+        service.memberApply(dto, 't1', 'm1', 'u1', mockReq, 'idem-release-fails'),
+      ).rejects.toThrow(InternalServerErrorException);
+    });
+  });
+
+  describe('incident 2026-07-18: batched guarantor eligibility validation is O(1) in guarantor count', () => {
+    const mockReq = { ip: '127.0.0.1', headers: { 'user-agent': 'test', 'x-request-id': 'req-1' } } as any;
+
+    it('validates 3 guarantors with exactly one query per check, not once per guarantor', async () => {
+      const tx = createMockPrisma();
+      tx.member.findFirst.mockResolvedValue({
+        id: 'm1',
+        memberNumber: 'M1',
+        kycStatus: 'APPROVED',
+        isBlacklisted: false,
+      });
+      tx.loan.findFirst.mockResolvedValue(null); // existingOpenLoan + borrower defaulted-loan checks
+      tx.loanProduct.findFirst.mockResolvedValue({
+        id: 'p1',
+        name: 'Development',
+        minAmount: '1000',
+        maxAmount: '500000',
+        maxTenureMonths: 12,
+        interestRate: '0.12',
+        interestType: InterestType.FLAT,
+        processingFeeRate: '0.01',
+        gracePeriodMonths: 0,
+        requiredAccountType: 'FOSA',
+        guarantorCoverageRatio: '1',
+        minGuarantors: 0,
+        maxGuarantors: 5,
+      });
+      tx.account.findMany.mockResolvedValue([
+        { accountType: 'FOSA', balance: '500000', lockedBalance: '0', frozenSavings: '0' },
+      ]);
+
+      const guarantorIds = ['g1', 'g2', 'g3'];
+      tx.member.findMany.mockResolvedValue(
+        guarantorIds.map((id) => ({
+          id,
+          kycStatus: 'APPROVED',
+          isBlacklisted: false,
+          user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
+          accounts: [{ id: `acc-${id}`, balance: '100000', lockedBalance: '0', frozenSavings: '0' }],
+        })),
+      );
+      tx.loanGuarantor.findMany.mockResolvedValue([]); // no circular guarantees
+      tx.loan.findMany.mockResolvedValue([]); // no defaulted guarantors
+      tx.loanGuarantor.groupBy.mockResolvedValue([]); // no existing active guarantees for any of them
+
+      tx.tenantCounter.upsert.mockResolvedValue({ loanSeq: 1 });
+      tx.loan.create.mockResolvedValue({
+        id: 'loan-1',
+        loanNumber: 'LN-2026-000001',
+        member: { memberNumber: 'M1', user: { firstName: 'Jane', lastName: 'Doe' } },
+        loanProduct: { name: 'Development', interestType: InterestType.FLAT },
+      });
+      tx.loanGuarantor.create.mockImplementation((args: any) =>
+        Promise.resolve({ id: `lg-${args.data.memberId}`, ...args.data }),
+      );
+
+      prisma.$transaction.mockImplementation((cb: (transactionClient: any) => unknown) => cb(tx));
+
+      const result = await service.memberApply(
+        {
+          loanProductId: 'p1',
+          principalAmount: 10000,
+          tenureMonths: 6,
+          purpose: 'Business',
+          guarantors: guarantorIds.map((id) => ({ memberId: id, guaranteedAmount: 3334 })),
+        },
+        't1',
+        'm1',
+        'u1',
+        mockReq,
+        'idem-batched-guarantors',
+      );
+
+      expect(result).toEqual(expect.objectContaining({ id: 'loan-1' }));
+      expect(tx.member.findMany).toHaveBeenCalledTimes(1);
+      expect(tx.loanGuarantor.findMany).toHaveBeenCalledTimes(1);
+      expect(tx.loan.findMany).toHaveBeenCalledTimes(1);
+      expect(tx.loanGuarantor.groupBy).toHaveBeenCalledTimes(1);
+      expect(tx.tenant.findFirst).toHaveBeenCalledTimes(1);
+      // 3 guarantor rows still get created individually — that's row creation,
+      // not the eligibility-read fan-out this fix targets.
+      expect(tx.loanGuarantor.create).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('incident 2026-07-18: transaction timeout override', () => {
+    const mockReq = { ip: '127.0.0.1', headers: { 'user-agent': 'test', 'x-request-id': 'req-1' } } as any;
+
+    it('passes an explicit { maxWait, timeout } to the $transaction call', async () => {
+      const tx = createMockPrisma();
+      tx.member.findFirst.mockResolvedValue({
+        id: 'm1',
+        memberNumber: 'M1',
+        kycStatus: 'APPROVED',
+        isBlacklisted: true, // fail fast — we only care what $transaction was called with
+      });
+      prisma.$transaction.mockImplementation((cb: (transactionClient: any) => unknown) => cb(tx));
+
+      await expect(
+        service.memberApply(
+          { loanProductId: 'p1', principalAmount: 10000, tenureMonths: 6, purpose: 'Emergency' },
+          't1',
+          'm1',
+          'u1',
+          mockReq,
+          'idem-timeout-opts',
+        ),
+      ).rejects.toThrow(ForbiddenException);
+
+      expect(prisma.$transaction).toHaveBeenCalledWith(
+        expect.any(Function),
+        { maxWait: 10_000, timeout: 30_000 },
+      );
     });
   });
 

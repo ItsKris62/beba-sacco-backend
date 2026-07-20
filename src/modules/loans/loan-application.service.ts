@@ -473,15 +473,33 @@ export class LoanApplicationService {
       return result;
     } catch (err) {
       const isOneOpenLoanViolation = this.isOneOpenLoanConstraintViolation(err);
-      if (
-        idempotencyKey &&
-        (err instanceof BadRequestException ||
-          err instanceof ConflictException ||
-          isOneOpenLoanViolation)
-      ) {
+
+      // Incident 2026-07-18: release used to be conditional on
+      // BadRequestException/ConflictException/the one-open-loan violation
+      // only, so a transient failure (e.g. the Prisma interactive-transaction
+      // timeout from _doMemberApply's $transaction) left the key stuck
+      // PROCESSING for its full 24h TTL — the member's own retry then hit
+      // "already being processed" instead of actually retrying. Releasing
+      // unconditionally is safe here specifically because the DB-level
+      // "loan_one_open_per_member" partial unique index (migration
+      // 20260707193000) is the real duplicate-application guard, independent
+      // of idempotency-key state: even if a request had actually succeeded
+      // server-side despite the client observing an error, a retry after
+      // release hits that constraint (isOneOpenLoanViolation above) instead
+      // of creating a second loan.
+      if (idempotencyKey) {
         const idemKey = `loan:apply:${userId}:${memberId}:${dto.loanProductId}:${idempotencyKey}`;
-        await this.idempotency.release(idemKey, tenantId);
+        try {
+          await this.idempotency.release(idemKey, tenantId);
+        } catch (releaseErr) {
+          // A Redis failure while cleaning up must never mask the original error.
+          this.logger.error(
+            `Failed to release idempotency key after loan apply failure [key=${idemKey}, member=${memberId}]`,
+            releaseErr instanceof Error ? releaseErr.stack : String(releaseErr),
+          );
+        }
       }
+
       if (isOneOpenLoanViolation) {
         throw this.oneOpenLoanConflict();
       }
@@ -531,259 +549,282 @@ export class LoanApplicationService {
     const year = new Date().getFullYear();
 
     try {
-      const txResult = await this.prisma.$transaction(async (tx) => {
-        const member = await tx.member.findFirst({
-          where: { id: memberId, tenantId, isActive: true },
-          select: { id: true, memberNumber: true, kycStatus: true, isBlacklisted: true },
-        });
-        if (!member) {
-          throw new NotFoundException('Member not found or inactive');
-        }
-        if (member.kycStatus !== 'APPROVED') {
-          throw new BadRequestException('KYC verification required before applying for a loan');
-        }
-        if (member.isBlacklisted) {
-          throw new ForbiddenException('Member is blacklisted and cannot apply for loans');
-        }
-        await tx.$queryRaw`
+      const txResult = await this.prisma.$transaction(
+        async (tx) => {
+          const member = await tx.member.findFirst({
+            where: { id: memberId, tenantId, isActive: true },
+            select: { id: true, memberNumber: true, kycStatus: true, isBlacklisted: true },
+          });
+          if (!member) {
+            throw new NotFoundException('Member not found or inactive');
+          }
+          if (member.kycStatus !== 'APPROVED') {
+            throw new BadRequestException('KYC verification required before applying for a loan');
+          }
+          if (member.isBlacklisted) {
+            throw new ForbiddenException('Member is blacklisted and cannot apply for loans');
+          }
+          await tx.$queryRaw`
           SELECT id FROM "Member"
           WHERE id = ${memberId} AND "tenantId" = ${tenantId}
           FOR UPDATE
         `;
 
-        const existingOpenLoan = await tx.loan.findFirst({
-          where: {
-            memberId,
-            tenantId,
-            status: {
-              in: [
-                LoanStatus.DRAFT,
-                LoanStatus.PENDING_GUARANTORS,
-                LoanStatus.PENDING_REVIEW,
-                LoanStatus.PENDING_APPROVAL,
-                LoanStatus.APPROVED,
-                LoanStatus.DISBURSED,
-                LoanStatus.ACTIVE,
-                LoanStatus.DEFAULTED,
-              ],
+          const existingOpenLoan = await tx.loan.findFirst({
+            where: {
+              memberId,
+              tenantId,
+              status: {
+                in: [
+                  LoanStatus.DRAFT,
+                  LoanStatus.PENDING_GUARANTORS,
+                  LoanStatus.PENDING_REVIEW,
+                  LoanStatus.PENDING_APPROVAL,
+                  LoanStatus.APPROVED,
+                  LoanStatus.DISBURSED,
+                  LoanStatus.ACTIVE,
+                  LoanStatus.DEFAULTED,
+                ],
+              },
             },
-          },
-          select: { id: true, loanNumber: true, status: true },
-        });
-        if (existingOpenLoan) {
-          throw new BadRequestException(
-            `ONE_OPEN_LOAN_ONLY: You already have loan ${existingOpenLoan.loanNumber} in ${existingOpenLoan.status.replace(/_/g, ' ')} status. You can apply for another loan after it is fully paid.`,
-          );
-        }
-
-        const product = await tx.loanProduct.findFirst({
-          where: { id: dto.loanProductId, tenantId, isActive: true },
-        });
-        if (!product) {
-          throw new NotFoundException('Loan product not found or inactive');
-        }
-
-        if (dto.guarantorIds?.length) {
-          const coverageRatio = new Decimal(product.guarantorCoverageRatio?.toString() ?? '1.0');
-          const requiredCoverage = principal.times(coverageRatio).toDecimalPlaces(4);
-          const equalShare = requiredCoverage
-            .div(dto.guarantorIds.length)
-            .toDecimalPlaces(4, Decimal.ROUND_DOWN);
-          guarantors = dto.guarantorIds.map((guarantorId, index) => {
-            const guaranteedAmount =
-              index === dto.guarantorIds!.length - 1
-                ? requiredCoverage
-                    .minus(equalShare.times(dto.guarantorIds!.length - 1))
-                    .toDecimalPlaces(4)
-                : equalShare;
-            return { memberId: guarantorId, guaranteedAmount: guaranteedAmount.toNumber() };
+            select: { id: true, loanNumber: true, status: true },
           });
-        }
-
-        const minAmt = new Decimal(product.minAmount.toString());
-        const maxAmt = new Decimal(product.maxAmount.toString());
-        if (principal.lessThan(minAmt) || principal.greaterThan(maxAmt)) {
-          throw new BadRequestException(
-            `Principal must be between KES ${minAmt.toNumber()} and KES ${maxAmt.toNumber()}`,
-          );
-        }
-        if (dto.tenureMonths > product.maxTenureMonths) {
-          throw new BadRequestException(`Maximum tenure is ${product.maxTenureMonths} months`);
-        }
-
-        const defaultedLoan = await tx.loan.findFirst({
-          where: { memberId, tenantId, status: LoanStatus.DEFAULTED },
-          select: { id: true },
-        });
-        if (defaultedLoan) {
-          throw new BadRequestException('Member has an active defaulted loan');
-        }
-
-        const accounts = await tx.account.findMany({
-          where: { memberId, tenantId, isActive: true },
-          select: { accountType: true, balance: true, lockedBalance: true, frozenSavings: true },
-        });
-
-        const fosaBalance = this.sumAvailableSavings(accounts, AccountType.FOSA);
-        const bosaBalance = this.sumAvailableSavings(accounts, AccountType.BOSA);
-        if (fosaBalance.plus(bosaBalance).equals(0)) {
-          throw new BadRequestException('No active FOSA or BOSA account found');
-        }
-
-        const rules = this.productRules.assertLoanApplicationRules({
-          product,
-          principal,
-          guarantorCount: guarantors.length,
-          fosaBalance,
-          bosaBalance,
-        });
-
-        const requiresGuarantors = rules.minGuarantors > 0 || guarantors.length > 0;
-        const guarantorAccountType = this.guarantorValidation.resolveAccountType(product);
-        const coverageResult =
-          requiresGuarantors || guarantors.length > 0
-            ? await this.guarantorValidation.validateGuarantorCoverage(
-                tx,
-                tenantId,
-                principal,
-                guarantors,
-                product,
-              )
-            : {
-                totalGuaranteed: new Decimal(0),
-                requiredCoverage: new Decimal(0),
-                coverageRatio: new Decimal(product.guarantorCoverageRatio?.toString() ?? '1.0'),
-              };
-
-        for (const item of guarantors) {
-          const guarantorEligibility = await this.validateGuarantorEligibilityInTransaction(
-            tx,
-            item.memberId,
-            'new-loan-application',
-            tenantId,
-            new Decimal(item.guaranteedAmount),
-            memberId,
-            guarantorAccountType,
-          );
-          if (!guarantorEligibility.eligible) {
+          if (existingOpenLoan) {
             throw new BadRequestException(
-              `GUARANTOR_NOT_ELIGIBLE: guarantor ${item.memberId} not eligible: ${guarantorEligibility.reason}`,
+              `ONE_OPEN_LOAN_ONLY: You already have loan ${existingOpenLoan.loanNumber} in ${existingOpenLoan.status.replace(/_/g, ' ')} status. You can apply for another loan after it is fully paid.`,
             );
           }
-        }
 
-        const annualRate = new Decimal(product.interestRate.toString());
-        const processingFeeRate = new Decimal(product.processingFeeRate.toString());
-        const processingFee = principal.times(processingFeeRate).toDecimalPlaces(4);
-        const monthlyInstalment = this.calculateInstalment(
-          principal,
-          annualRate,
-          dto.tenureMonths,
-          product.interestType,
-        );
+          const product = await tx.loanProduct.findFirst({
+            where: { id: dto.loanProductId, tenantId, isActive: true },
+          });
+          if (!product) {
+            throw new NotFoundException('Loan product not found or inactive');
+          }
 
-        const counter = await tx.tenantCounter.upsert({
-          where: { tenantId },
-          create: { tenantId, loanSeq: 1 },
-          update: { loanSeq: { increment: 1 } },
-        });
-        const loanNumber = `LN-${year}-${String(counter.loanSeq).padStart(6, '0')}`;
-
-        const createdLoan = await tx.loan.create({
-          data: {
-            tenantId,
-            memberId,
-            loanProductId: dto.loanProductId,
-            loanNumber,
-            status: requiresGuarantors ? LoanStatus.PENDING_GUARANTORS : LoanStatus.DRAFT,
-            purpose: dto.purpose,
-            principalAmount: principal.toDecimalPlaces(4).toString(),
-            interestRate: annualRate.toDecimalPlaces(4).toString(),
-            processingFee: processingFee.toString(),
-            tenureMonths: dto.tenureMonths,
-            gracePeriodMonths: product.gracePeriodMonths,
-            monthlyInstalment: monthlyInstalment.toDecimalPlaces(4).toString(),
-            outstandingBalance: principal.toDecimalPlaces(4).toString(),
-            notes: dto.notes,
-          },
-          include: {
-            member: {
-              select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } },
-            },
-            loanProduct: { select: { name: true, interestType: true } },
-          },
-        });
-
-        const pendingGuarantors: Array<{
-          id: string;
-          memberId: string;
-          guaranteedAmount: Decimal;
-        }> = [];
-
-        if (requiresGuarantors) {
-          for (const item of guarantors) {
-            const createdGuarantor = await tx.loanGuarantor.create({
-              data: {
-                tenantId,
-                loanId: createdLoan.id,
-                memberId: item.memberId,
-                guaranteedAmount: new Decimal(item.guaranteedAmount).toDecimalPlaces(4).toString(),
-                status: GuarantorStatus.PENDING,
-                expiresAt: new Date(Date.now() + 72 * 60 * 60 * 1000),
-              },
-            });
-            pendingGuarantors.push({
-              id: createdGuarantor.id,
-              memberId: item.memberId,
-              guaranteedAmount: new Decimal(item.guaranteedAmount),
+          if (dto.guarantorIds?.length) {
+            const coverageRatio = new Decimal(product.guarantorCoverageRatio?.toString() ?? '1.0');
+            const requiredCoverage = principal.times(coverageRatio).toDecimalPlaces(4);
+            const equalShare = requiredCoverage
+              .div(dto.guarantorIds.length)
+              .toDecimalPlaces(4, Decimal.ROUND_DOWN);
+            guarantors = dto.guarantorIds.map((guarantorId, index) => {
+              const guaranteedAmount =
+                index === dto.guarantorIds!.length - 1
+                  ? requiredCoverage
+                      .minus(equalShare.times(dto.guarantorIds!.length - 1))
+                      .toDecimalPlaces(4)
+                  : equalShare;
+              return { memberId: guarantorId, guaranteedAmount: guaranteedAmount.toNumber() };
             });
           }
-        }
 
-        await this.createAuditLogInTransaction(tx, {
-          tenantId,
-          actorId: userId,
-          action: 'LOAN.APPLY',
-          entityType: 'Loan',
-          entityId: createdLoan.id,
-          metadata: {
-            loanNumber: createdLoan.loanNumber,
-            memberId,
-            principalAmount: principal.toNumber(),
-            tenureMonths: dto.tenureMonths,
-            monthlyInstalment: monthlyInstalment.toNumber(),
-            loanProductId: dto.loanProductId,
-            productName: product.name,
-            requiredAccountType: product.requiredAccountType ?? 'COMBINED',
-            savingsMultiplier: rules.savingsMultiplier.toNumber(),
-            eligibleSavings: rules.eligibleSavings.toNumber(),
-            minGuarantors: rules.minGuarantors,
+          const minAmt = new Decimal(product.minAmount.toString());
+          const maxAmt = new Decimal(product.maxAmount.toString());
+          if (principal.lessThan(minAmt) || principal.greaterThan(maxAmt)) {
+            throw new BadRequestException(
+              `Principal must be between KES ${minAmt.toNumber()} and KES ${maxAmt.toNumber()}`,
+            );
+          }
+          if (dto.tenureMonths > product.maxTenureMonths) {
+            throw new BadRequestException(`Maximum tenure is ${product.maxTenureMonths} months`);
+          }
+
+          const defaultedLoan = await tx.loan.findFirst({
+            where: { memberId, tenantId, status: LoanStatus.DEFAULTED },
+            select: { id: true },
+          });
+          if (defaultedLoan) {
+            throw new BadRequestException('Member has an active defaulted loan');
+          }
+
+          const accounts = await tx.account.findMany({
+            where: { memberId, tenantId, isActive: true },
+            select: { accountType: true, balance: true, lockedBalance: true, frozenSavings: true },
+          });
+
+          const fosaBalance = this.sumAvailableSavings(accounts, AccountType.FOSA);
+          const bosaBalance = this.sumAvailableSavings(accounts, AccountType.BOSA);
+          if (fosaBalance.plus(bosaBalance).equals(0)) {
+            throw new BadRequestException('No active FOSA or BOSA account found');
+          }
+
+          const rules = this.productRules.assertLoanApplicationRules({
+            product,
+            principal,
             guarantorCount: guarantors.length,
-            guarantorCoverageRatio: coverageResult.coverageRatio.toNumber(),
-            totalGuaranteed: coverageResult.totalGuaranteed.toNumber(),
-            requiredCoverage: coverageResult.requiredCoverage.toNumber(),
-            correlationId,
-          },
-          ipAddress: req.ip ?? null,
-          userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
-          requestId: `${correlationId}:loan-apply`,
-        });
+            fosaBalance,
+            bosaBalance,
+          });
 
-        return {
-          loan: createdLoan,
-          principalAmount: principal.toNumber(),
-          guarantorNotifications: pendingGuarantors.map((guarantor) => ({
-            guarantorId: guarantor.id,
-            memberId: guarantor.memberId,
-            guaranteedAmount: guarantor.guaranteedAmount.toNumber(),
-            loanNumber: createdLoan.loanNumber,
-            borrowerName:
-              [createdLoan.member.user.firstName, createdLoan.member.user.lastName]
-                .filter(Boolean)
-                .join(' ') || createdLoan.member.memberNumber,
-          })),
-        };
-      });
+          const requiresGuarantors = rules.minGuarantors > 0 || guarantors.length > 0;
+          const guarantorAccountType = this.guarantorValidation.resolveAccountType(product);
+          const coverageResult =
+            requiresGuarantors || guarantors.length > 0
+              ? await this.guarantorValidation.validateGuarantorCoverage(
+                  tx,
+                  tenantId,
+                  principal,
+                  guarantors,
+                  product,
+                )
+              : {
+                  totalGuaranteed: new Decimal(0),
+                  requiredCoverage: new Decimal(0),
+                  coverageRatio: new Decimal(product.guarantorCoverageRatio?.toString() ?? '1.0'),
+                };
+
+          if (guarantors.length > 0) {
+            const eligibilityResults = await this.validateGuarantorsEligibilityBatchInTransaction(
+              tx,
+              guarantors.map((item) => ({
+                memberId: item.memberId,
+                guaranteedAmount: new Decimal(item.guaranteedAmount),
+              })),
+              tenantId,
+              memberId,
+              guarantorAccountType,
+            );
+            const ineligible = eligibilityResults.find((result) => !result.eligible);
+            if (ineligible) {
+              throw new BadRequestException(
+                `GUARANTOR_NOT_ELIGIBLE: guarantor ${ineligible.memberId} not eligible: ${ineligible.reason}`,
+              );
+            }
+          }
+
+          const annualRate = new Decimal(product.interestRate.toString());
+          const processingFeeRate = new Decimal(product.processingFeeRate.toString());
+          const processingFee = principal.times(processingFeeRate).toDecimalPlaces(4);
+          const monthlyInstalment = this.calculateInstalment(
+            principal,
+            annualRate,
+            dto.tenureMonths,
+            product.interestType,
+          );
+
+          const counter = await tx.tenantCounter.upsert({
+            where: { tenantId },
+            create: { tenantId, loanSeq: 1 },
+            update: { loanSeq: { increment: 1 } },
+          });
+          const loanNumber = `LN-${year}-${String(counter.loanSeq).padStart(6, '0')}`;
+
+          const createdLoan = await tx.loan.create({
+            data: {
+              tenantId,
+              memberId,
+              loanProductId: dto.loanProductId,
+              loanNumber,
+              status: requiresGuarantors ? LoanStatus.PENDING_GUARANTORS : LoanStatus.DRAFT,
+              purpose: dto.purpose,
+              principalAmount: principal.toDecimalPlaces(4).toString(),
+              interestRate: annualRate.toDecimalPlaces(4).toString(),
+              processingFee: processingFee.toString(),
+              tenureMonths: dto.tenureMonths,
+              gracePeriodMonths: product.gracePeriodMonths,
+              monthlyInstalment: monthlyInstalment.toDecimalPlaces(4).toString(),
+              outstandingBalance: principal.toDecimalPlaces(4).toString(),
+              notes: dto.notes,
+            },
+            include: {
+              member: {
+                select: {
+                  memberNumber: true,
+                  user: { select: { firstName: true, lastName: true } },
+                },
+              },
+              loanProduct: { select: { name: true, interestType: true } },
+            },
+          });
+
+          const pendingGuarantors: Array<{
+            id: string;
+            memberId: string;
+            guaranteedAmount: Decimal;
+          }> = [];
+
+          if (requiresGuarantors) {
+            for (const item of guarantors) {
+              const createdGuarantor = await tx.loanGuarantor.create({
+                data: {
+                  tenantId,
+                  loanId: createdLoan.id,
+                  memberId: item.memberId,
+                  guaranteedAmount: new Decimal(item.guaranteedAmount)
+                    .toDecimalPlaces(4)
+                    .toString(),
+                  status: GuarantorStatus.PENDING,
+                  expiresAt: new Date(Date.now() + 72 * 60 * 60 * 1000),
+                },
+              });
+              pendingGuarantors.push({
+                id: createdGuarantor.id,
+                memberId: item.memberId,
+                guaranteedAmount: new Decimal(item.guaranteedAmount),
+              });
+            }
+          }
+
+          await this.createAuditLogInTransaction(tx, {
+            tenantId,
+            actorId: userId,
+            action: 'LOAN.APPLY',
+            entityType: 'Loan',
+            entityId: createdLoan.id,
+            metadata: {
+              loanNumber: createdLoan.loanNumber,
+              memberId,
+              principalAmount: principal.toNumber(),
+              tenureMonths: dto.tenureMonths,
+              monthlyInstalment: monthlyInstalment.toNumber(),
+              loanProductId: dto.loanProductId,
+              productName: product.name,
+              requiredAccountType: product.requiredAccountType ?? 'COMBINED',
+              savingsMultiplier: rules.savingsMultiplier.toNumber(),
+              eligibleSavings: rules.eligibleSavings.toNumber(),
+              minGuarantors: rules.minGuarantors,
+              guarantorCount: guarantors.length,
+              guarantorCoverageRatio: coverageResult.coverageRatio.toNumber(),
+              totalGuaranteed: coverageResult.totalGuaranteed.toNumber(),
+              requiredCoverage: coverageResult.requiredCoverage.toNumber(),
+              correlationId,
+            },
+            ipAddress: req.ip ?? null,
+            userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+            requestId: `${correlationId}:loan-apply`,
+          });
+
+          return {
+            loan: createdLoan,
+            principalAmount: principal.toNumber(),
+            guarantorNotifications: pendingGuarantors.map((guarantor) => ({
+              guarantorId: guarantor.id,
+              memberId: guarantor.memberId,
+              guaranteedAmount: guarantor.guaranteedAmount.toNumber(),
+              loanNumber: createdLoan.loanNumber,
+              borrowerName:
+                [createdLoan.member.user.firstName, createdLoan.member.user.lastName]
+                  .filter(Boolean)
+                  .join(' ') || createdLoan.member.memberNumber,
+            })),
+          };
+        },
+        {
+          // Incident 2026-07-18: this transaction ran ~15-18 sequential DB
+          // round-trips (member/product/account lookups + guarantor validation)
+          // and, under Neon compute-quota pressure, exceeded Prisma's unconfigured
+          // default (5000ms) at 5160ms — the transaction was force-closed mid-flight
+          // and the next query threw on a dead handle. maxWait bounds how long we'll
+          // queue for a pool connection; timeout is the wall-clock budget for the
+          // transaction body itself. 30s gives real headroom above the observed
+          // failure even with a few guarantors and some latency variance, without
+          // masking a truly hung query forever. Scoped to this call only — the
+          // global PrismaService default is unchanged.
+          maxWait: 10_000,
+          timeout: 30_000,
+        },
+      );
 
       await this.publishEvent({
         type: 'LoanApplied',
@@ -915,52 +956,53 @@ export class LoanApplicationService {
       }, new Decimal(0));
   }
 
-  private async validateGuarantorEligibilityInTransaction(
+  /**
+   * Batched replacement for the former validateGuarantorEligibilityInTransaction()
+   * (called once per guarantor in a loop — 6 sequential queries each). That
+   * fan-out was a major contributor to incident 2026-07-18: a 3-guarantor
+   * application ran ~18 sequential round-trips here alone, inside a single
+   * interactive transaction, eating most of its time budget.
+   *
+   * DB round-trips: exactly 5, regardless of guarantor count.
+   *
+   * Preserves the exact eligibility rules, error messages, and evaluation
+   * order of the method it replaces — only the query shape changed.
+   */
+  private async validateGuarantorsEligibilityBatchInTransaction(
     tx: Prisma.TransactionClient,
-    guarantorMemberId: string,
-    loanId: string,
+    guarantors: Array<{ memberId: string; guaranteedAmount: Decimal }>,
     tenantId: string,
-    proposedAmount: Decimal,
     borrowerMemberId: string,
     accountType: AccountType = AccountType.FOSA,
-  ): Promise<{ eligible: boolean; reason?: string }> {
-    if (guarantorMemberId === borrowerMemberId) {
-      return { eligible: false, reason: 'Member cannot guarantee their own loan' };
-    }
+  ): Promise<Array<{ memberId: string; eligible: boolean; reason?: string }>> {
+    const guarantorIds = guarantors.map((g) => g.memberId);
 
-    const guarantor = await tx.member.findFirst({
-      where: { id: guarantorMemberId, tenantId, isActive: true },
+    // 1. All guarantor members + their user + their accounts of accountType.
+    const members = await tx.member.findMany({
+      where: { id: { in: guarantorIds }, tenantId, isActive: true },
       select: {
         id: true,
         kycStatus: true,
         isBlacklisted: true,
         user: { select: { role: true, accountStatus: true } },
+        accounts: {
+          where: { accountType, isActive: true },
+          select: { id: true, balance: true, lockedBalance: true, frozenSavings: true },
+        },
       },
     });
-    if (!guarantor) {
-      return { eligible: false, reason: 'Guarantor not found or inactive' };
-    }
-    if (
-      guarantor.user.role !== UserRole.MEMBER ||
-      guarantor.user.accountStatus !== AccountStatus.ACTIVE
-    ) {
-      return { eligible: false, reason: 'Guarantor must be an active approved member' };
-    }
-    if (guarantor.kycStatus !== 'APPROVED') {
-      return { eligible: false, reason: 'Guarantor KYC is not approved' };
-    }
-    if (guarantor.isBlacklisted) {
-      return { eligible: false, reason: 'Guarantor is blacklisted' };
-    }
+    const memberById = new Map(members.map((m) => [m.id, m]));
 
-    const circularGuarantee = await tx.loanGuarantor.findFirst({
+    // 2. Circular-guarantee check for ALL guarantors at once: is the borrower
+    //    already guaranteeing an active/pending loan for any of them?
+    const circularGuarantees = await tx.loanGuarantor.findMany({
       where: {
         tenantId,
         memberId: borrowerMemberId,
         status: { in: [GuarantorStatus.PENDING, GuarantorStatus.ACCEPTED] },
         loan: {
           tenantId,
-          memberId: guarantorMemberId,
+          memberId: { in: guarantorIds },
           status: {
             in: [
               LoanStatus.PENDING_GUARANTORS,
@@ -973,70 +1015,133 @@ export class LoanApplicationService {
           },
         },
       },
-      select: { id: true },
+      select: { loan: { select: { memberId: true } } },
     });
-    if (circularGuarantee) {
-      return {
-        eligible: false,
-        reason:
-          'Circular guarantee detected. This member is already guaranteeing a loan for the applicant.',
-      };
-    }
+    const circularGuarantorIds = new Set(circularGuarantees.map((g) => g.loan.memberId));
 
-    const fosaAccount = await tx.account.findFirst({
-      where: { memberId: guarantorMemberId, tenantId, accountType, isActive: true },
-      select: { id: true, balance: true, lockedBalance: true, frozenSavings: true },
+    // 3. Defaulted-loan check for ALL guarantors at once.
+    const defaultedLoans = await tx.loan.findMany({
+      where: { memberId: { in: guarantorIds }, tenantId, status: LoanStatus.DEFAULTED },
+      select: { memberId: true },
     });
-    if (!fosaAccount) {
-      return { eligible: false, reason: `Guarantor has no active ${accountType} account` };
-    }
+    const defaultedGuarantorIds = new Set(defaultedLoans.map((l) => l.memberId));
 
-    const availableBalance = new Decimal(fosaAccount.balance.toString()).minus(
-      new Decimal(fosaAccount.lockedBalance?.toString() ?? '0').plus(
-        new Decimal(fosaAccount.frozenSavings?.toString() ?? '0'),
-      ),
+    // 4. Active-guarantee counts for ALL guarantors at once. Unlike the
+    //    per-guarantor original, this has no `loanId: { not: loanId }`
+    //    exclusion — the sole call site passes a not-yet-created loan, so
+    //    that exclusion was always a no-op here.
+    const activeGuaranteeCounts = await tx.loanGuarantor.groupBy({
+      by: ['memberId'],
+      where: {
+        memberId: { in: guarantorIds },
+        tenantId,
+        status: GuarantorStatus.ACCEPTED,
+        loan: {
+          tenantId,
+          status: { in: [LoanStatus.ACTIVE, LoanStatus.APPROVED, LoanStatus.DISBURSED] },
+        },
+      },
+      _count: { _all: true },
+    });
+    const activeGuaranteesByMember = new Map(
+      activeGuaranteeCounts.map((row) => [row.memberId, row._count._all]),
     );
-    if (availableBalance.lessThan(proposedAmount)) {
-      return {
-        eligible: false,
-        reason: `Insufficient ${accountType} available balance: available KES ${availableBalance.toFixed(2)}, committing KES ${proposedAmount.toFixed(2)}`,
-      };
-    }
 
-    const defaulted = await tx.loan.findFirst({
-      where: { memberId: guarantorMemberId, tenantId, status: LoanStatus.DEFAULTED },
-      select: { id: true },
-    });
-    if (defaulted) {
-      return { eligible: false, reason: 'Guarantor has a defaulted loan' };
-    }
-
+    // 5. Tenant settings — shared across all guarantors, fetched once instead
+    //    of once per guarantor.
     const tenant = await tx.tenant.findFirst({
       where: { id: tenantId },
       select: { settings: true },
     });
     const maxGuarantees = this.resolveMaxConcurrentGuarantees(tenant?.settings);
 
-    const activeGuarantees = await tx.loanGuarantor.count({
-      where: {
-        memberId: guarantorMemberId,
-        tenantId,
-        status: GuarantorStatus.ACCEPTED,
-        loanId: { not: loanId },
-        loan: {
-          tenantId,
-          status: { in: [LoanStatus.ACTIVE, LoanStatus.APPROVED, LoanStatus.DISBURSED] },
-        },
-      },
-    });
-    if (activeGuarantees >= maxGuarantees) {
-      return {
-        eligible: false,
-        reason: `Guarantor has reached the maximum concurrent guarantee limit (${maxGuarantees})`,
-      };
-    }
+    return guarantors.map(({ memberId: guarantorMemberId, guaranteedAmount }) => {
+      if (guarantorMemberId === borrowerMemberId) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: 'Member cannot guarantee their own loan',
+        };
+      }
 
-    return { eligible: true };
+      const guarantor = memberById.get(guarantorMemberId);
+      if (!guarantor) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: 'Guarantor not found or inactive',
+        };
+      }
+      if (
+        guarantor.user.role !== UserRole.MEMBER ||
+        guarantor.user.accountStatus !== AccountStatus.ACTIVE
+      ) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: 'Guarantor must be an active approved member',
+        };
+      }
+      if (guarantor.kycStatus !== 'APPROVED') {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: 'Guarantor KYC is not approved',
+        };
+      }
+      if (guarantor.isBlacklisted) {
+        return { memberId: guarantorMemberId, eligible: false, reason: 'Guarantor is blacklisted' };
+      }
+      if (circularGuarantorIds.has(guarantorMemberId)) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason:
+            'Circular guarantee detected. This member is already guaranteeing a loan for the applicant.',
+        };
+      }
+
+      const fosaAccount = guarantor.accounts[0];
+      if (!fosaAccount) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: `Guarantor has no active ${accountType} account`,
+        };
+      }
+
+      const availableBalance = new Decimal(fosaAccount.balance.toString()).minus(
+        new Decimal(fosaAccount.lockedBalance?.toString() ?? '0').plus(
+          new Decimal(fosaAccount.frozenSavings?.toString() ?? '0'),
+        ),
+      );
+      if (availableBalance.lessThan(guaranteedAmount)) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: `Insufficient ${accountType} available balance: available KES ${availableBalance.toFixed(2)}, committing KES ${guaranteedAmount.toFixed(2)}`,
+        };
+      }
+
+      if (defaultedGuarantorIds.has(guarantorMemberId)) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: 'Guarantor has a defaulted loan',
+        };
+      }
+
+      const activeGuarantees = activeGuaranteesByMember.get(guarantorMemberId) ?? 0;
+      if (activeGuarantees >= maxGuarantees) {
+        return {
+          memberId: guarantorMemberId,
+          eligible: false,
+          reason: `Guarantor has reached the maximum concurrent guarantee limit (${maxGuarantees})`,
+        };
+      }
+
+      return { memberId: guarantorMemberId, eligible: true };
+    });
   }
 
   private resolveMaxConcurrentGuarantees(settings: Prisma.JsonValue | null | undefined): number {

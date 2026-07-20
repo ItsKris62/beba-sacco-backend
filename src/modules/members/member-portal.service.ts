@@ -1,11 +1,22 @@
 import {
-  Injectable, Logger, NotFoundException, BadRequestException, ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import { createHash } from 'crypto';
-import { AccountType, LoanStatus, InterestType, JournalEntryType, TransactionStatus, TransactionType } from '@prisma/client';
+import {
+  AccountType,
+  LoanStatus,
+  InterestType,
+  JournalEntryType,
+  TransactionStatus,
+  TransactionType,
+} from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -321,14 +332,16 @@ export class MemberPortalService {
     });
     if (!fosaAccount) throw new NotFoundException('No active FOSA account found for deposit');
 
-    await this.audit.create({
-      tenantId,
-      userId,
-      action: 'MPESA.STK_INITIATED',
-      resource: 'MpesaTransaction',
-      metadata: { amount, accountNumber: fosaAccount.accountNumber },
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    await this.audit
+      .create({
+        tenantId,
+        userId,
+        action: 'MPESA.STK_INITIATED',
+        resource: 'MpesaTransaction',
+        metadata: { amount, accountNumber: fosaAccount.accountNumber },
+        ipAddress,
+      })
+      .catch((e: unknown) => this.logger.error('Audit write failed', e));
 
     const depositDto: MemberDepositDto = {
       phoneNumber: phone,
@@ -375,7 +388,10 @@ export class MemberPortalService {
 
     const idem = await this.idempotency.checkAndReserve(idemKey, tenantId, 24 * 60 * 60);
     if (idem.status === 'COMPLETED') {
-      const cached = idem.result as { payloadHash: string; response: { message: string; transactionId: string } };
+      const cached = idem.result as {
+        payloadHash: string;
+        response: { message: string; transactionId: string };
+      };
       if (cached.payloadHash !== payloadHash) {
         throw new BadRequestException(
           'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD: this key was already used for a different amount/phone',
@@ -388,10 +404,23 @@ export class MemberPortalService {
     }
 
     try {
-      const response = await this.executeWithdrawMpesa(member.id, userId, phone, amount, tenantId, ipAddress, idempotencyKey.trim());
+      const response = await this.executeWithdrawMpesa(
+        member.id,
+        userId,
+        phone,
+        amount,
+        tenantId,
+        ipAddress,
+        idempotencyKey.trim(),
+      );
       await this.idempotency.complete(idemKey, tenantId, { payloadHash, response }, 24 * 60 * 60);
       return response;
     } catch (error) {
+      // TODO(incident 2026-07-20): already releases unconditionally (good —
+      // no leak here), but the release call itself isn't wrapped in its own
+      // try/catch, so a Redis failure during cleanup would throw from here
+      // and mask the original `error`. See loan-application.service.ts's
+      // memberApply() catch block for the safe pattern.
       await this.idempotency.release(idemKey, tenantId);
       throw error;
     }
@@ -411,60 +440,71 @@ export class MemberPortalService {
     const requestedAmount = new Decimal(amount);
     const totalDeduction = requestedAmount.plus(withdrawalFee);
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const fosaAccount = await tx.account.findFirst({
-        where: { memberId, tenantId, accountType: 'FOSA', isActive: true },
-        select: { id: true, balance: true, lockedBalance: true, frozenSavings: true, accountNumber: true },
-      });
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const fosaAccount = await tx.account.findFirst({
+          where: { memberId, tenantId, accountType: 'FOSA', isActive: true },
+          select: {
+            id: true,
+            balance: true,
+            lockedBalance: true,
+            frozenSavings: true,
+            accountNumber: true,
+          },
+        });
 
-      if (!fosaAccount) {
-        throw new NotFoundException('No active FOSA account found for withdrawal');
-      }
+        if (!fosaAccount) {
+          throw new NotFoundException('No active FOSA account found for withdrawal');
+        }
 
-      // lockedBalance/frozenSavings (guarantor holds) are now enforced centrally by
-      // LedgerService.applyBalanceChange() for every DEBIT — see Phase 1 fix — so the
-      // hand-rolled availableBalance check that used to live here has been removed.
-      // postEntry() below throws BadRequestException if this withdrawal would dip into
-      // committed/frozen funds or the minimum-balance floor.
+        // lockedBalance/frozenSavings (guarantor holds) are now enforced centrally by
+        // LedgerService.applyBalanceChange() for every DEBIT — see Phase 1 fix — so the
+        // hand-rolled availableBalance check that used to live here has been removed.
+        // postEntry() below throws BadRequestException if this withdrawal would dip into
+        // committed/frozen funds or the minimum-balance floor.
 
-      // Deterministic reference scoped to the caller-supplied idempotencyKey — never
-      // Date.now() here. A wall-clock-based reference is not replay-safe: a client
-      // retry milliseconds later would get a different reference and post (and debit)
-      // a second time.
-      const reference = `MPESA_WD-${tenantId}-${memberId}-${idempotencyKey}`;
+        // Deterministic reference scoped to the caller-supplied idempotencyKey — never
+        // Date.now() here. A wall-clock-based reference is not replay-safe: a client
+        // retry milliseconds later would get a different reference and post (and debit)
+        // a second time.
+        const reference = `MPESA_WD-${tenantId}-${memberId}-${idempotencyKey}`;
 
-      // Routed through LedgerService.postEntry() (debit the account's deposit-liability
-      // GL code, credit CASH) instead of a manual Account.update() + Transaction.create()
-      // — see Phase 1 audit: this used to bypass the GL entirely.
-      const { transaction } = await this.ledger.postEntry({
-        tenantId,
-        reference,
-        journalType: JournalEntryType.WITHDRAWAL,
-        accountId: fosaAccount.id,
-        amount: totalDeduction,
-        direction: 'DEBIT',
-        actorId: userId,
-        description: `M-Pesa withdrawal to ${maskPhone(phone)}`,
-        tx,
-      });
+        // Routed through LedgerService.postEntry() (debit the account's deposit-liability
+        // GL code, credit CASH) instead of a manual Account.update() + Transaction.create()
+        // — see Phase 1 audit: this used to bypass the GL entirely.
+        const { transaction } = await this.ledger.postEntry({
+          tenantId,
+          reference,
+          journalType: JournalEntryType.WITHDRAWAL,
+          accountId: fosaAccount.id,
+          amount: totalDeduction,
+          direction: 'DEBIT',
+          actorId: userId,
+          description: `M-Pesa withdrawal to ${maskPhone(phone)}`,
+          tx,
+        });
 
-      await this.audit.create({
-        tenantId,
-        actorId: userId,
-        action: 'MPESA.WITHDRAW.INITIATED',
-        entityType: 'Transaction',
-        entityId: transaction.id,
-        newValue: { amount, phone: maskPhone(phone), status: 'PROCESSING' },
-        metadata: { accountId: fosaAccount.id },
-        ipAddress,
-      }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+        await this.audit
+          .create({
+            tenantId,
+            actorId: userId,
+            action: 'MPESA.WITHDRAW.INITIATED',
+            entityType: 'Transaction',
+            entityId: transaction.id,
+            newValue: { amount, phone: maskPhone(phone), status: 'PROCESSING' },
+            metadata: { accountId: fosaAccount.id },
+            ipAddress,
+          })
+          .catch((e: unknown) => this.logger.error('Audit write failed', e));
 
-      return {
-        message: 'Withdrawal initiated successfully',
-        transactionId: transaction.id,
-        accountId: fosaAccount.id,
-      };
-    }, { isolationLevel: 'Serializable' });
+        return {
+          message: 'Withdrawal initiated successfully',
+          transactionId: transaction.id,
+          accountId: fosaAccount.id,
+        };
+      },
+      { isolationLevel: 'Serializable' },
+    );
 
     // Enqueue only after the database transaction commits to avoid ghost B2C payouts.
     await this.disbursementQueue.add(
@@ -484,7 +524,7 @@ export class MemberPortalService {
         backoff: { type: 'exponential', delay: 5000 },
         removeOnComplete: true,
         removeOnFail: { age: 86400, count: 50 },
-      }
+      },
     );
 
     return {
@@ -559,7 +599,10 @@ export class MemberPortalService {
   }
 
   private getProfileImageExtension(fileName: string): keyof typeof PROFILE_IMAGE_CONTENT_TYPES {
-    const match = fileName.trim().toLowerCase().match(/\.([a-z0-9]+)$/);
+    const match = fileName
+      .trim()
+      .toLowerCase()
+      .match(/\.([a-z0-9]+)$/);
     const ext = match?.[1];
     if (!ext || !(ext in PROFILE_IMAGE_CONTENT_TYPES)) {
       throw new BadRequestException('Profile image must be a JPG, PNG, or WebP file');
@@ -567,13 +610,7 @@ export class MemberPortalService {
     return ext as keyof typeof PROFILE_IMAGE_CONTENT_TYPES;
   }
 
-  async getMyLoans(
-    userId: string,
-    tenantId: string,
-    page: number,
-    limit: number,
-    status?: string,
-  ) {
+  async getMyLoans(userId: string, tenantId: string, page: number, limit: number, status?: string) {
     const member = await this.resolveMember(userId, tenantId);
 
     const safePage = Math.max(1, page);
@@ -714,11 +751,10 @@ export class MemberPortalService {
       month: r.dayNumber,
       dueDate: r.dueDate.toISOString().split('T')[0],
       expectedAmount: new Decimal(r.amountPaid.toString()).toNumber(),
-      status: (
-        r.status === 'PAID' ? 'PAID'
-        : r.dueDate < now ? 'OVERDUE'
-        : 'UPCOMING'
-      ) as 'PAID' | 'OVERDUE' | 'UPCOMING',
+      status: (r.status === 'PAID' ? 'PAID' : r.dueDate < now ? 'OVERDUE' : 'UPCOMING') as
+        | 'PAID'
+        | 'OVERDUE'
+        | 'UPCOMING',
     }));
 
     return {
@@ -764,7 +800,11 @@ export class MemberPortalService {
     userId: string,
     checkoutRequestId: string,
     tenantId: string,
-  ): Promise<{ status: 'PENDING' | 'SUCCESS' | 'FAILED'; amount?: string; completedAt?: Date | null }> {
+  ): Promise<{
+    status: 'PENDING' | 'SUCCESS' | 'FAILED';
+    amount?: string;
+    completedAt?: Date | null;
+  }> {
     const member = await this.resolveMember(userId, tenantId);
 
     const fosaAccount = await this.prisma.account.findFirst({
@@ -844,14 +884,10 @@ export class MemberPortalService {
     const destAccount = accounts.find((a) => a.accountType === dto.toAccountType);
 
     if (!sourceAccount) {
-      throw new NotFoundException(
-        `No active ${dto.fromAccountType} account found for this member`,
-      );
+      throw new NotFoundException(`No active ${dto.fromAccountType} account found for this member`);
     }
     if (!destAccount) {
-      throw new NotFoundException(
-        `No active ${dto.toAccountType} account found for this member`,
-      );
+      throw new NotFoundException(`No active ${dto.toAccountType} account found for this member`);
     }
 
     // Delegate to AccountsService.transfer() which uses LedgerService.postInternalTransfer()
@@ -861,7 +897,8 @@ export class MemberPortalService {
         destinationAccountId: destAccount.id,
         amount: dto.amount,
         idempotencyKey: dto.idempotencyKey,
-        description: dto.narration ?? `Internal transfer ${dto.fromAccountType} → ${dto.toAccountType}`,
+        description:
+          dto.narration ?? `Internal transfer ${dto.fromAccountType} → ${dto.toAccountType}`,
       },
       tenantId,
       userId,
@@ -893,5 +930,3 @@ export class MemberPortalService {
     return member;
   }
 }
-
-

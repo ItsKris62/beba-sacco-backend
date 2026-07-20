@@ -21,6 +21,7 @@ import { AuditService } from '../audit/audit.service';
 import { DOMAIN_EVENTS, DomainEventName } from '../../common/constants/events';
 import { RedisService } from '../../common/services/redis.service';
 import { CacheService } from '../../common/services/cache.service';
+import { IdempotencyService } from '../../common/services/idempotency.service';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { UpdateKycDto } from './dto/update-kyc.dto';
 import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
@@ -60,7 +61,41 @@ export class AdminService {
     private readonly cache: CacheService,
     @InjectQueue(QUEUE_NAMES.EMAIL) private readonly emailQueue: Queue,
     private readonly eventEmitter: EventEmitter2,
+    private readonly idempotency: IdempotencyService,
   ) {}
+
+  // ─── ONE-TIME INCIDENT CLEANUP (2026-07-20) ────────────────────
+  // TODO: Remove this method (and its controller endpoint) after the
+  // 2026-07-20 incident cleanup is complete.
+
+  /**
+   * Force-clears a stuck idempotency key (e.g. one left PROCESSING by the
+   * loan-apply transaction-timeout incident). `key` must be the exact
+   * composed key the originating service used (e.g.
+   * `loan:apply:{userId}:{memberId}:{loanProductId}:{clientIdempotencyKey}`),
+   * not just the client-supplied header value.
+   */
+  async clearStuckIdempotencyKey(
+    tenantId: string,
+    key: string,
+    actorId: string,
+    ipAddress?: string,
+  ): Promise<{ deleted: boolean; key: string }> {
+    const existed = await this.idempotency.exists(key, tenantId);
+    await this.idempotency.release(key, tenantId);
+
+    await this.audit.create({
+      tenantId,
+      actorId,
+      action: 'ADMIN.IDEMPOTENCY_KEY.CLEARED',
+      entityType: 'IdempotencyKey',
+      entityId: key,
+      metadata: { existed },
+      ipAddress,
+    });
+
+    return { deleted: existed, key };
+  }
 
   private emitDomainEvent(eventName: DomainEventName, payload: Record<string, unknown>): void {
     try {

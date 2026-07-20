@@ -147,11 +147,30 @@ function createSuccessfulLoanApplyPrisma(): LoanApplicationPrismaMock {
     member: {
       findFirst: jest
         .fn()
-        .mockResolvedValueOnce({ id: applicantMemberId, memberNumber: 'M-001', kycStatus: KycStatus.APPROVED })
-        .mockResolvedValue({ id: guarantorOneId, kycStatus: KycStatus.APPROVED, user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE } }),
+        .mockResolvedValue({ id: applicantMemberId, memberNumber: 'M-001', kycStatus: KycStatus.APPROVED }),
+      // Batched guarantor eligibility fetch (incident 2026-07-20 fix) — one
+      // findMany call for both nominated guarantors, replacing the old
+      // per-guarantor findFirst loop.
+      findMany: jest.fn().mockResolvedValue([
+        {
+          id: guarantorOneId,
+          kycStatus: KycStatus.APPROVED,
+          isBlacklisted: false,
+          user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
+          accounts: [{ id: 'g1-account', balance: new Decimal(100000), lockedBalance: new Decimal(0), frozenSavings: new Decimal(0) }],
+        },
+        {
+          id: guarantorTwoId,
+          kycStatus: KycStatus.APPROVED,
+          isBlacklisted: false,
+          user: { role: UserRole.MEMBER, accountStatus: AccountStatus.ACTIVE },
+          accounts: [{ id: 'g2-account', balance: new Decimal(100000), lockedBalance: new Decimal(0), frozenSavings: new Decimal(0) }],
+        },
+      ]),
     },
     loan: {
       findFirst: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]), // no defaulted guarantors
       create: jest.fn().mockResolvedValue({
         id: loanId,
         tenantId,
@@ -189,6 +208,8 @@ function createSuccessfulLoanApplyPrisma(): LoanApplicationPrismaMock {
     loanGuarantor: {
       count: jest.fn().mockResolvedValue(0),
       findFirst: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]), // no circular guarantees
+      groupBy: jest.fn().mockResolvedValue([]), // no existing active guarantees for either guarantor
       create: jest
         .fn()
         .mockResolvedValueOnce({ id: 'lg-1', memberId: guarantorOneId })

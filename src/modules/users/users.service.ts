@@ -399,6 +399,14 @@ export class UsersService {
     }
 
     // Idempotency check
+    // TODO(incident 2026-07-20): unlike loan-application.service.ts's
+    // memberApply(), the work below isn't wrapped in a try/catch at all — if
+    // prisma.user.update() or the audit write throws, the reserved key stays
+    // PROCESSING for its full 3600s TTL with no release path whatsoever. Same
+    // failure class as the loan-apply incident, worse (no release at all
+    // rather than a narrow release condition). Not fixed here — out of scope
+    // for this incident's PR, unrelated module — flagged per the postmortem's
+    // action item to audit other idempotency-key acquisitions.
     if (dto.idempotencyKey) {
       const idem = await this.idempotency.checkAndReserve(dto.idempotencyKey, tenantId, 3600);
       if (idem.status === 'COMPLETED') {

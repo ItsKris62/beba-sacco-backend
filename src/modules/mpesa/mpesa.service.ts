@@ -1,4 +1,10 @@
-import { Injectable, Logger, BadRequestException, NotFoundException, Optional } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -71,7 +77,12 @@ export class MpesaService {
     triggeredBy: string,
     triggerSource: MpesaTriggerSource = MpesaTriggerSource.MEMBER,
     idempotencyKey?: string,
-  ): Promise<{ checkoutRequestId: string; merchantRequestId: string; customerMessage: string; mpesaTxId: string }> {
+  ): Promise<{
+    checkoutRequestId: string;
+    merchantRequestId: string;
+    customerMessage: string;
+    mpesaTxId: string;
+  }> {
     if (!idempotencyKey?.trim()) {
       throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
     }
@@ -156,7 +167,6 @@ export class MpesaService {
       });
       this.metrics?.recordMpesaStkPush(tenantId);
 
-
       this.logger.log(
         `STK Push initiated | tenant=${tenantId} member=${memberId} ` +
           `phone=${maskPhone(dto.phoneNumber)} amount=${amount} ` +
@@ -211,6 +221,11 @@ export class MpesaService {
       if (rateLimitSlotConsumed && error instanceof MpesaException && error.retryable) {
         await this.safeReleaseRateLimitSlot(rlKey, tenantId, memberId);
       }
+      // TODO(incident 2026-07-20): already releases unconditionally (good —
+      // no leak here), but the release call itself isn't wrapped in its own
+      // try/catch, so a Redis failure during cleanup would throw from here
+      // and mask the original `error`. See loan-application.service.ts's
+      // memberApply() catch block for the safe pattern.
       await this.idempotency.release(idemKey, tenantId);
       throw error;
     }
@@ -222,13 +237,13 @@ export class MpesaService {
    * Resolves loan phone + amount from the DB, then enqueues a B2C disbursement job.
    * Phone and amount are embedded in the job payload so the processor is a pure
    * executor with no DB lookups — avoids stale-data race conditions under retries.
-   * 
+   *
    * ARCHITECTURAL DECISION: Direct B2C M-Pesa disbursement is DISABLED.
-   * Reasoning: 
-   * 1. Reconciliation Control: We must enforce disbursement to the member's internal FOSA wallet 
+   * Reasoning:
+   * 1. Reconciliation Control: We must enforce disbursement to the member's internal FOSA wallet
    *    first to allow future offsets for BOSA contributions or outstanding fines.
-   * 2. API Reliability: Safaricom B2C timeouts cause reconciliation nightmares. Internal DB 
-   *    transactions to the FOSA wallet are 100% reliable. The member must explicitly initiate a 
+   * 2. API Reliability: Safaricom B2C timeouts cause reconciliation nightmares. Internal DB
+   *    transactions to the FOSA wallet are 100% reliable. The member must explicitly initiate a
    *    FOSA withdrawal to M-Pesa to pull the funds out. Do not attempt to "fix" this.
    */
   async queueLoanDisbursement(
@@ -324,7 +339,11 @@ export class MpesaService {
       amount,
       partyA: b2cShortcode,
       partyB: phone,
-      remarks: `${referenceType === 'FOSA_WITHDRAWAL' ? 'Withdrawal' : 'Disbursement'} ${accountReference}`.slice(0, 100),
+      remarks:
+        `${referenceType === 'FOSA_WITHDRAWAL' ? 'Withdrawal' : 'Disbursement'} ${accountReference}`.slice(
+          0,
+          100,
+        ),
       occasionRef: accountReference,
       resultUrl,
       queueTimeoutUrl,
@@ -421,7 +440,9 @@ export class MpesaService {
       });
 
       if (!transaction) {
-        throw new Error(`STK callback has no MpesaTransaction for CheckoutRequestID=${checkoutRequestId}`);
+        throw new Error(
+          `STK callback has no MpesaTransaction for CheckoutRequestID=${checkoutRequestId}`,
+        );
       }
 
       await this.prisma.mpesaTransaction.update({
@@ -444,7 +465,9 @@ export class MpesaService {
       });
 
       if (!transaction) {
-        throw new Error(`B2C callback has no MpesaTransaction for ConversationID=${ConversationID}`);
+        throw new Error(
+          `B2C callback has no MpesaTransaction for ConversationID=${ConversationID}`,
+        );
       }
 
       await this.prisma.mpesaTransaction.update({
@@ -640,7 +663,3 @@ export class MpesaService {
     return secondsUntilMidnightEAT();
   }
 }
-
-
-
-
