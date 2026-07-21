@@ -49,7 +49,7 @@ export class LoansController {
   // ─── LOAN PRODUCTS ───────────────────────────────────────────
 
   @Post('products')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Create a new loan product' })
   createProduct(
@@ -100,7 +100,7 @@ export class LoansController {
   }
 
   @Patch('products/:id')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @ApiOperation({ summary: 'Update a loan product' })
   @ApiResponse({ status: 200, description: 'Loan product updated' })
   updateProduct(
@@ -114,7 +114,7 @@ export class LoansController {
   }
 
   @Delete('products/:id')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Deactivate a loan product',

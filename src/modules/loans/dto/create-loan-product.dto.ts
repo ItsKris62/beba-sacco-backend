@@ -71,14 +71,14 @@ export class CreateLoanProductDto {
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(3)
+  @Max(10)
   minGuarantors?: number;
 
   @ApiPropertyOptional({ example: 3, description: 'Maximum guarantors a borrower may nominate' })
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(3)
+  @Max(10)
   maxGuarantors?: number;
 
   @ApiPropertyOptional({
