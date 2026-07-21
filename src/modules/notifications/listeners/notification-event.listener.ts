@@ -339,7 +339,7 @@ export class NotificationEventListener {
       template.entityId ?? target.memberId ?? target.userId,
       this.asString(payload.status) ?? this.asString(payload.kycStatus) ?? '',
       this.asString(payload.transactionRef) ?? '',
-    ].join(':');
+    ].join('|');
 
     return {
       tenantId: payload.tenantId,

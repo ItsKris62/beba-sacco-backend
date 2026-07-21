@@ -354,6 +354,33 @@ export class MemberPortalController {
     return this.loanApp.memberApply(dto, tenant.id, memberId, user.id, req, idempotencyKey);
   }
 
+  // ─── LOAN LIST ────────────────────────────────────────────────────────────
+
+  @Get('loans')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'List my loan applications (member self-service)',
+    description:
+      'Returns all loan applications belonging to the authenticated member, across every status ' +
+      '(DRAFT through FULLY_PAID/DEFAULTED), so the member portal can render current/pending/past loans.',
+  })
+  @ApiQuery({ name: 'status', required: false, enum: LoanStatus })
+  @ApiQuery({ name: 'cursor', required: false, type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Deprecated; use cursor' })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'Loan applications for the authenticated member' })
+  async listMyLoans(
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+    @Query('status') status?: LoanStatus,
+    @Query('cursor') cursor?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    const memberId = await this.resolveMemberId(user.id, tenant.id);
+    return this.loans.findAll(tenant.id, { memberId, status, cursor, page, limit });
+  }
+
   // ─── LOAN DETAIL ──────────────────────────────────────────────────────────
 
   @Get('loans/:id')

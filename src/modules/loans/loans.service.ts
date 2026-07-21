@@ -347,7 +347,32 @@ export class LoansService {
         member: {
           select: { memberNumber: true, user: { select: { firstName: true, lastName: true } } },
         },
-        loanProduct: { select: { name: true } },
+        loanProduct: {
+          select: {
+            name: true,
+            interestType: true,
+            minGuarantors: true,
+            maxGuarantors: true,
+            guarantorCoverageRatio: true,
+          },
+        },
+        guarantors: {
+          select: {
+            id: true,
+            memberId: true,
+            status: true,
+            guaranteedAmount: true,
+            invitedAt: true,
+            respondedAt: true,
+            notes: true,
+            member: {
+              select: {
+                memberNumber: true,
+                user: { select: { firstName: true, lastName: true, phone: true, phoneNumber: true } },
+              },
+            },
+          },
+        },
       },
       ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
       take: limit + 1,
