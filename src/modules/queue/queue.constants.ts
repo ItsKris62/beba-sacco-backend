@@ -148,7 +148,7 @@ export interface GuarantorExpiryJobPayload {
 }
 
 export interface RepaymentReminderScanJobPayload {
-  tenantId?: string;
+  tenantId: string;
   runDateIso: string;
 }
 

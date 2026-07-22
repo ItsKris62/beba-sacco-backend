@@ -2,7 +2,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { NotificationChannel, NotificationStatus, Prisma } from '@prisma/client';
+import { NotificationChannel, NotificationStatus, TenantStatus } from '@prisma/client';
 import { Job, Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -36,18 +36,34 @@ export class RepaymentReminderProcessor extends WorkerHost {
   @Cron('0 8 * * *', { timeZone: EAT_TIME_ZONE })
   async enqueueDailyScan(): Promise<void> {
     const runDateIso = this.dayKey(new Date());
-    await this.reminderQueue.add(
-      REPAYMENT_REMINDER_SCAN_JOB,
-      { runDateIso },
-      {
-        jobId: `${REPAYMENT_REMINDER_SCAN_JOB}.${runDateIso}`,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-      },
-    );
-    await this.auditQueueAction('SYSTEM', 'REPAYMENT_REMINDER.QUEUED', undefined, {
-      runDateIso,
+    const tenants = await this.prisma.tenant.findMany({
+      where: { status: TenantStatus.ACTIVE },
+      select: { id: true },
     });
+
+    let enqueued = 0;
+    for (const tenant of tenants) {
+      try {
+        await this.reminderQueue.add(
+          REPAYMENT_REMINDER_SCAN_JOB,
+          { tenantId: tenant.id, runDateIso },
+          {
+            jobId: `${REPAYMENT_REMINDER_SCAN_JOB}.${tenant.id}.${runDateIso}`,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+          },
+        );
+        enqueued++;
+      } catch (err) {
+        // One tenant's enqueue failure (e.g. a transient Redis blip) must never
+        // stop the remaining tenants from being scheduled.
+        this.logger.error(`Failed to enqueue repayment reminder scan for tenant=${tenant.id}`, err);
+      }
+    }
+
+    this.logger.log(
+      `Repayment reminder fan-out complete: enqueued ${enqueued}/${tenants.length} tenant job(s) for ${runDateIso}.`,
+    );
   }
 
   async process(job: Job<RepaymentReminderScanJobPayload>): Promise<void> {
@@ -57,7 +73,7 @@ export class RepaymentReminderProcessor extends WorkerHost {
     }
   }
 
-  private async enqueueForOffset(runDate: Date, offsetDays: number, tenantId?: string): Promise<void> {
+  private async enqueueForOffset(runDate: Date, offsetDays: number, tenantId: string): Promise<void> {
     const target = this.addDays(runDate, offsetDays);
     const start = new Date(target);
     const end = new Date(target);
@@ -187,17 +203,6 @@ export class RepaymentReminderProcessor extends WorkerHost {
       month: '2-digit',
       day: '2-digit',
     }).format(date);
-  }
-
-  private async auditQueueAction(
-    tenantId: string,
-    action: string,
-    entityId: string | undefined,
-    metadata: Record<string, unknown>,
-  ): Promise<void> {
-    await this.prisma.auditLog.create({
-      data: { tenantId, actorId: 'SYSTEM', action, entityType: 'Queue', entityId, metadata: metadata as Prisma.InputJsonValue },
-    }).catch((error: unknown) => this.logger.warn(`Audit queue action failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
 
