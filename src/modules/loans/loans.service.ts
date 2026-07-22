@@ -158,6 +158,7 @@ export class LoansService {
         requiresPayslip: dto.requiresPayslip ?? false,
         minActiveMonths: dto.minActiveMonths ?? 0,
         gracePeriodMonths: dto.gracePeriodMonths ?? 0,
+        gracePeriodDays: dto.gracePeriodDays ?? 14,
         isActive: dto.isActive ?? true,
       },
     });
@@ -271,6 +272,7 @@ export class LoansService {
         ...(dto.requiresPayslip !== undefined && { requiresPayslip: dto.requiresPayslip }),
         ...(dto.minActiveMonths !== undefined && { minActiveMonths: dto.minActiveMonths }),
         ...(dto.gracePeriodMonths !== undefined && { gracePeriodMonths: dto.gracePeriodMonths }),
+        ...(dto.gracePeriodDays !== undefined && { gracePeriodDays: dto.gracePeriodDays }),
         ...(dto.isActive !== undefined && { isActive: dto.isActive }),
       },
     });

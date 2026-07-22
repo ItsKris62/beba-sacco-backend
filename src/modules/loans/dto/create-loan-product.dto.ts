@@ -118,6 +118,18 @@ export class CreateLoanProductDto {
   @Max(12, { message: 'Grace period cannot exceed 12 months' })
   gracePeriodMonths?: number;
 
+  @ApiPropertyOptional({
+    example: 14,
+    description:
+      'Arrears days a loan may accrue before guarantor recovery can be initiated. Default 14.',
+    default: 14,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(90)
+  gracePeriodDays?: number;
+
   @ApiPropertyOptional({ example: true, description: 'Whether members can select this product' })
   @IsOptional()
   @IsBoolean()
