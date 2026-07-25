@@ -49,7 +49,7 @@ export class LoansController {
   // ─── LOAN PRODUCTS ───────────────────────────────────────────
 
   @Post('products')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Create a new loan product' })
   createProduct(
@@ -65,6 +65,7 @@ export class LoansController {
   @Roles(
     UserRole.TENANT_ADMIN,
     UserRole.MANAGER,
+    UserRole.LOAN_OFFICER,
     UserRole.TELLER,
     UserRole.AUDITOR,
     UserRole.MEMBER,
@@ -93,14 +94,20 @@ export class LoansController {
   }
 
   @Get('products/:id')
-  @Roles(UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.TELLER, UserRole.AUDITOR)
+  @Roles(
+    UserRole.TENANT_ADMIN,
+    UserRole.MANAGER,
+    UserRole.LOAN_OFFICER,
+    UserRole.TELLER,
+    UserRole.AUDITOR,
+  )
   @ApiOperation({ summary: 'Get loan product by ID' })
   findOneProduct(@Param('id', ParseUUIDPipe) id: string, @CurrentTenant() tenant: Tenant) {
     return this.loans.findOneProduct(id, tenant.id);
   }
 
   @Patch('products/:id')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
   @ApiOperation({ summary: 'Update a loan product' })
   @ApiResponse({ status: 200, description: 'Loan product updated' })
   updateProduct(
@@ -114,7 +121,7 @@ export class LoansController {
   }
 
   @Delete('products/:id')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.MANAGER, UserRole.LOAN_OFFICER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Deactivate a loan product',

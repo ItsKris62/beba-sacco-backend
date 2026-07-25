@@ -25,6 +25,11 @@ const prisma = new PrismaClient();
 
 const TENANT_SLUG = 'beba-demo-sacco';
 export const DEMO_PASSWORD = 'BebaDemo@2026!';
+const JIPANGE_LOAN_PRESET = {
+  maxAmount: 50_000,
+  interestRate: 0.06,
+  interestType: 'REDUCING_BALANCE',
+} as const;
 
 const ARGON2_OPTS = { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 } as const;
 
@@ -189,11 +194,11 @@ async function main() {
       name: 'Jipange Loan',
       description: 'Short-term, fast-turnaround loan for emergencies and quick cash needs.',
       minAmount: 1000,
-      maxAmount: 200_000,
+      maxAmount: JIPANGE_LOAN_PRESET.maxAmount,
       savingsMultiplier: 2.0,
       minActiveMonths: 1,
-      interestRate: 0.15,
-      interestType: 'REDUCING_BALANCE',
+      interestRate: JIPANGE_LOAN_PRESET.interestRate,
+      interestType: JIPANGE_LOAN_PRESET.interestType,
       maxTenureMonths: 12,
       processingFeeRate: 0.015,
       gracePeriodMonths: 0,
