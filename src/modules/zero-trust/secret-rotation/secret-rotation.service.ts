@@ -176,6 +176,13 @@ export class SecretRotationService {
         expiresAt: new Date(now.getTime() + 65 * 86400000),
       },
       {
+        name: 'MPESA_B2C_CONSUMER_SECRET',
+        type: 'DARAJA_KEY',
+        ttlDays: 365,
+        lastRotatedAt: new Date(now.getTime() - 300 * 86400000),
+        expiresAt: new Date(now.getTime() + 65 * 86400000),
+      },
+      {
         name: 'JWT_SECRET',
         type: 'JWT_SECRET',
         ttlDays: 180,

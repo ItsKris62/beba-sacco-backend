@@ -63,6 +63,13 @@ export interface MpesaConfigValidation {
   errors: string[];
 }
 
+/**
+ * Safaricom issues C2B (collections) and B2C (disbursements) as separate
+ * Daraja apps in production, each with its own consumer key/secret — see
+ * MPESA_CONSUMER_KEY/SECRET (C2B) vs MPESA_B2C_CONSUMER_KEY/SECRET (B2C).
+ */
+export type DarajaProduct = 'c2b' | 'b2c';
+
 export interface OAuthConnectivityResult {
   success: boolean;
   latencyMs: number;
@@ -119,6 +126,8 @@ export class DarajaClientService implements OnModuleInit {
       ['app.mpesa.passkey', 'MPESA_PASSKEY'],
       ['app.mpesa.shortcode', 'MPESA_SHORTCODE'],
       ['app.mpesa.callbackUrl', 'MPESA_CALLBACK_URL'],
+      ['app.mpesa.b2cConsumerKey', 'MPESA_B2C_CONSUMER_KEY'],
+      ['app.mpesa.b2cConsumerSecret', 'MPESA_B2C_CONSUMER_SECRET'],
     ];
 
     for (const [key, name] of required) {
@@ -152,11 +161,11 @@ export class DarajaClientService implements OnModuleInit {
    * key/secret are accepted by Safaricom. Use only for health checks or
    * one-off diagnostics — do not call on every request.
    */
-  async testOAuthConnectivity(): Promise<OAuthConnectivityResult> {
+  async testOAuthConnectivity(product: DarajaProduct = 'c2b'): Promise<OAuthConnectivityResult> {
     const start = Date.now();
     try {
-      await this.invalidateTokenCache();
-      await this.getAccessToken();
+      await this.invalidateTokenCache(product);
+      await this.getAccessToken(product);
       return { success: true, latencyMs: Date.now() - start };
     } catch (err) {
       return {
@@ -170,20 +179,22 @@ export class DarajaClientService implements OnModuleInit {
   // ─── OAuth Token ──────────────────────────────────────────────────────────
 
   /**
-   * Returns a valid Daraja OAuth2 bearer token.
+   * Returns a valid Daraja OAuth2 bearer token for the given product.
+   * C2B (collections) and B2C (disbursements) are separate Daraja apps in
+   * production with their own consumer key/secret, so each gets its own
+   * cached token.
    * Token is cached in Redis with a 55-minute TTL to avoid hammering the OAuth
    * endpoint on every request. The token fetch retries up to 3× with exponential
    * backoff (1 s → 2 s) to survive momentary Safaricom hiccups.
    */
-  async getAccessToken(): Promise<string> {
-    const key = this.getConfigValue('app.mpesa.consumerKey');
-    const secret = this.getConfigValue('app.mpesa.consumerSecret');
+  async getAccessToken(product: DarajaProduct = 'c2b'): Promise<string> {
+    const { key, secret, envVarNames } = this.getCredentials(product);
 
     if (!key || !secret) {
-      throw new MpesaConfigException('MPESA_CONSUMER_KEY / MPESA_CONSUMER_SECRET');
+      throw new MpesaConfigException(envVarNames);
     }
 
-    const cacheKey = this.oauthCacheKey(key);
+    const cacheKey = this.oauthCacheKey(product, key);
     const cached = await this.redis.get(cacheKey);
     if (cached) return cached;
 
@@ -196,6 +207,7 @@ export class DarajaClientService implements OnModuleInit {
           url,
           { method: 'GET', headers: { Authorization: `Basic ${auth}` } },
           'OAuth token',
+          product,
         ),
       OAUTH_RETRY_ATTEMPTS,
       OAUTH_RETRY_BASE_MS,
@@ -203,14 +215,32 @@ export class DarajaClientService implements OnModuleInit {
     );
 
     await this.redis.set(cacheKey, res.access_token, OAUTH_TTL_SEC);
-    this.logger.log('Daraja OAuth token refreshed and cached for 55 min');
+    this.logger.log(`Daraja ${product.toUpperCase()} OAuth token refreshed and cached for 55 min`);
     return res.access_token;
   }
 
-  /** Force-clear the token cache (call after 401 from Daraja). */
-  async invalidateTokenCache(): Promise<void> {
-    const key = this.getConfigValue('app.mpesa.consumerKey');
-    await this.redis.del(this.oauthCacheKey(key));
+  /** Force-clear the token cache for a product (call after 401 from Daraja). */
+  async invalidateTokenCache(product: DarajaProduct = 'c2b'): Promise<void> {
+    const { key } = this.getCredentials(product);
+    await this.redis.del(this.oauthCacheKey(product, key));
+  }
+
+  /** Resolves the consumer key/secret pair for the given Daraja product. */
+  private getCredentials(
+    product: DarajaProduct,
+  ): { key: string; secret: string; envVarNames: string } {
+    if (product === 'b2c') {
+      return {
+        key: this.getConfigValue('app.mpesa.b2cConsumerKey'),
+        secret: this.getConfigValue('app.mpesa.b2cConsumerSecret'),
+        envVarNames: 'MPESA_B2C_CONSUMER_KEY / MPESA_B2C_CONSUMER_SECRET',
+      };
+    }
+    return {
+      key: this.getConfigValue('app.mpesa.consumerKey'),
+      secret: this.getConfigValue('app.mpesa.consumerSecret'),
+      envVarNames: 'MPESA_CONSUMER_KEY / MPESA_CONSUMER_SECRET',
+    };
   }
 
   // ─── STK Push (Lipa Na M-Pesa Online) ────────────────────────────────────
@@ -231,7 +261,7 @@ export class DarajaClientService implements OnModuleInit {
     if (!passkey) throw new MpesaConfigException('MPESA_PASSKEY');
     if (!params.callbackUrl) throw new MpesaConfigException('MPESA_CALLBACK_URL');
 
-    const token = await this.getAccessToken();
+    const token = await this.getAccessToken('c2b');
     const timestamp = this.buildTimestamp();
     const password = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
 
@@ -260,6 +290,7 @@ export class DarajaClientService implements OnModuleInit {
         body: JSON.stringify(body),
       },
       'STK Push',
+      'c2b',
     );
   }
 
@@ -275,7 +306,7 @@ export class DarajaClientService implements OnModuleInit {
    * Production/Sandbox public certificate before this call is made.
    */
   async initiateB2C(params: B2cParams): Promise<B2cResult> {
-    const token = await this.getAccessToken();
+    const token = await this.getAccessToken('b2c');
 
     const body = {
       InitiatorName: params.initiatorName,
@@ -301,6 +332,7 @@ export class DarajaClientService implements OnModuleInit {
         body: JSON.stringify(body),
       },
       'B2C',
+      'b2c',
     );
   }
 
@@ -378,6 +410,7 @@ export class DarajaClientService implements OnModuleInit {
     url: string,
     init: RequestInit,
     label: string,
+    product: DarajaProduct = 'c2b',
   ): Promise<T> {
     let res: Response;
     try {
@@ -389,7 +422,7 @@ export class DarajaClientService implements OnModuleInit {
     }
 
     if (res.status === 401) {
-      await this.invalidateTokenCache();
+      await this.invalidateTokenCache(product);
       throw new MpesaOAuthException(
         `Daraja ${label} returned 401 — token expired or credentials rejected`,
         true,
@@ -406,10 +439,11 @@ export class DarajaClientService implements OnModuleInit {
       const text = await res.text().catch(() => '');
       this.logger.error(`Daraja ${label} HTTP ${res.status}`, text.slice(0, 200));
       // 4xx from the OAuth endpoint means Safaricom rejected the credentials —
-      // the fix is to update MPESA_CONSUMER_KEY/SECRET in the environment, not to retry.
+      // the fix is to update the matching env vars, not to retry.
       if (label === 'OAuth token') {
+        const { envVarNames } = this.getCredentials(product);
         throw new MpesaOAuthException(
-          `Daraja OAuth returned HTTP ${res.status} — verify MPESA_CONSUMER_KEY and MPESA_CONSUMER_SECRET match your ${this.getConfigValue('app.mpesa.environment', 'sandbox')} app in the Safaricom Developer Portal`,
+          `Daraja OAuth returned HTTP ${res.status} — verify ${envVarNames} match your ${product.toUpperCase()} app (${this.getConfigValue('app.mpesa.environment', 'sandbox')}) in the Safaricom Developer Portal`,
           false,
         );
       }
@@ -435,9 +469,9 @@ export class DarajaClientService implements OnModuleInit {
     return (this.config.get<string>(key, fallback) ?? fallback).trim();
   }
 
-  private oauthCacheKey(consumerKey: string): string {
+  private oauthCacheKey(product: DarajaProduct, consumerKey: string): string {
     const env = this.getConfigValue('app.mpesa.environment', 'sandbox');
     const keyHash = createHash('sha256').update(consumerKey).digest('hex').slice(0, 12);
-    return `mpesa:oauth:token:${env}:${keyHash}`;
+    return `mpesa:oauth:token:${env}:${product}:${keyHash}`;
   }
 }

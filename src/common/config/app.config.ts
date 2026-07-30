@@ -73,10 +73,19 @@ export default registerAs('app', () => ({
   },
 
   // M-Pesa (Safaricom Daraja)
+  // C2B (collections/deposits) and B2C (disbursements/withdrawals) are
+  // separate Daraja apps in production, each with its own consumer key/secret.
   mpesa: {
     consumerKey: process.env.MPESA_CONSUMER_KEY,
     consumerSecret: process.env.MPESA_CONSUMER_SECRET,
+    b2cConsumerKey: process.env.MPESA_B2C_CONSUMER_KEY,
+    b2cConsumerSecret: process.env.MPESA_B2C_CONSUMER_SECRET,
     passkey: process.env.MPESA_PASSKEY,
+    // Stored for parity with the B2C app's Daraja portal credentials page.
+    // Not consumed by any Daraja call — the B2C Payment Request API
+    // authenticates via initiatorName + securityCredential, not a passkey
+    // (passkey is only used to build the STK Push password).
+    b2cPasskey: process.env.MPESA_B2C_PASSKEY,
     shortcode: process.env.MPESA_SHORTCODE || '174379',
     b2cShortcode: process.env.MPESA_B2C_SHORTCODE || process.env.MPESA_SHORTCODE || '600000',
     initiatorName: process.env.MPESA_INITIATOR_NAME || 'testapi',

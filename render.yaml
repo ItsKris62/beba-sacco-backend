@@ -87,11 +87,17 @@ services:
         sync: false
       - key: MPESA_CONSUMER_SECRET
         sync: false
+      - key: MPESA_B2C_CONSUMER_KEY
+        sync: false
+      - key: MPESA_B2C_CONSUMER_SECRET
+        sync: false
       - key: MPESA_PASSKEY
         sync: false
       - key: MPESA_SHORTCODE
         sync: false
       - key: MPESA_B2C_SHORTCODE
+        sync: false
+      - key: MPESA_B2C_PASSKEY
         sync: false
       - key: MPESA_INITIATOR_NAME
         sync: false
@@ -220,11 +226,17 @@ services:
         sync: false
       - key: MPESA_CONSUMER_SECRET
         sync: false
+      - key: MPESA_B2C_CONSUMER_KEY
+        sync: false
+      - key: MPESA_B2C_CONSUMER_SECRET
+        sync: false
       - key: MPESA_PASSKEY
         sync: false
       - key: MPESA_SHORTCODE
         sync: false
       - key: MPESA_B2C_SHORTCODE
+        sync: false
+      - key: MPESA_B2C_PASSKEY
         sync: false
       - key: MPESA_INITIATOR_NAME
         sync: false

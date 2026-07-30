@@ -103,12 +103,24 @@ export const validationSchema = Joi.object({
   SENTRY_ENVIRONMENT: Joi.string().optional(),
 
   // ── M-Pesa (Safaricom Daraja) ──────────────────────────────────────────────
+  // C2B (collections) app credentials
   MPESA_CONSUMER_KEY: Joi.string().when('NODE_ENV', {
     is: 'production',
     then: Joi.required(),
     otherwise: Joi.optional(),
   }),
   MPESA_CONSUMER_SECRET: Joi.string().when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  // B2C (disbursements) app credentials — separate Daraja app from C2B in production
+  MPESA_B2C_CONSUMER_KEY: Joi.string().when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  MPESA_B2C_CONSUMER_SECRET: Joi.string().when('NODE_ENV', {
     is: 'production',
     then: Joi.required(),
     otherwise: Joi.optional(),
@@ -120,6 +132,9 @@ export const validationSchema = Joi.object({
     otherwise: Joi.optional(),
   }),
   MPESA_B2C_SHORTCODE: Joi.string().optional(),
+  // Stored for parity with the B2C app's Daraja credentials page. Not required —
+  // the B2C Payment Request API doesn't take a passkey (see app.config.ts).
+  MPESA_B2C_PASSKEY: Joi.string().optional(),
   MPESA_INITIATOR_NAME: Joi.string().default('testapi'),
   MPESA_SECURITY_CREDENTIAL: Joi.string().when('NODE_ENV', {
     is: 'production',
