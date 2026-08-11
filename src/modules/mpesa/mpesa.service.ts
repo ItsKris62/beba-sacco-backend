@@ -22,7 +22,11 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
-import { MwaloniClientService, MwaloniResponse } from './mwaloni-client.service';
+import {
+  MwaloniAuthDiagnostic,
+  MwaloniClientService,
+  MwaloniResponse,
+} from './mwaloni-client.service';
 import { MpesaException, MpesaConfigException } from './exceptions/mpesa.exceptions';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
 import { isStkCallback, isC2bCallback, isB2cCallback } from './dto/mpesa-callback.dto';
@@ -49,6 +53,10 @@ export interface B2cWalletBalanceSnapshot {
   message: string | null;
   checkedAt: string;
   providerData: Prisma.JsonValue;
+}
+
+export interface MwaloniB2cAuthDiagnostic extends MwaloniAuthDiagnostic {
+  tenantId: string;
 }
 
 // ─── Redis key helpers ────────────────────────────────────────────────────────
@@ -355,6 +363,108 @@ export class MpesaService {
       );
 
     return snapshot;
+  }
+
+  async diagnoseMwaloniB2cAuthentication(
+    actorUserId: string,
+    tenantId: string,
+  ): Promise<MwaloniB2cAuthDiagnostic> {
+    const diagnostic = this.mwaloni
+      ? await this.mwaloni.diagnoseAuthentication()
+      : ({
+          credentialSource: 'ENVIRONMENT_VARIABLES',
+          effectiveEnvironment: this.config.get<string>('app.mwaloni.env', 'sandbox'),
+          effectiveBaseUrlHost: null,
+          connectionId: null,
+          serviceId: this.config.get<string>('app.mwaloni.serviceId')?.trim() || null,
+          enabled: false,
+          fields: {
+            serviceId: {
+              present: false,
+              length: 0,
+              trimmedLength: 0,
+              hasLeadingWhitespace: false,
+              hasTrailingWhitespace: false,
+            },
+            username: {
+              present: false,
+              length: 0,
+              trimmedLength: 0,
+              hasLeadingWhitespace: false,
+              hasTrailingWhitespace: false,
+            },
+            password: {
+              present: false,
+              length: 0,
+              trimmedLength: 0,
+              hasLeadingWhitespace: false,
+              hasTrailingWhitespace: false,
+            },
+            apiKey: {
+              present: false,
+              length: 0,
+              trimmedLength: 0,
+              hasLeadingWhitespace: false,
+              hasTrailingWhitespace: false,
+            },
+          },
+          requestShape: {
+            endpoint: 'authenticate',
+            method: 'POST',
+            contentType: 'application/json',
+            apiKeyHeader: 'x-api-key',
+            authorizationHeaderSent: false,
+            bodyFields: ['username', 'password'],
+            usesTokenCache: false,
+          },
+          authResult: {
+            attempted: false,
+            success: false,
+            status: 'CLIENT_UNAVAILABLE',
+            message: 'Mwaloni diagnostic client is not available',
+            tokenReturned: false,
+            tokenType: null,
+            expiresIn: null,
+            httpStatus: null,
+            errorCode: 'MWALONI_CLIENT_UNAVAILABLE',
+            retryable: false,
+          },
+        } as MwaloniAuthDiagnostic);
+
+    const result: MwaloniB2cAuthDiagnostic = {
+      tenantId,
+      ...diagnostic,
+    };
+
+    await this.audit.create({
+      tenantId,
+      actorId: actorUserId,
+      action: 'MPESA.B2C_WALLET.AUTH_DIAGNOSTIC',
+      entityType: 'MwaloniWallet',
+      entityId: diagnostic.connectionId ?? 'global',
+      newValue: {
+        tenantId,
+        connectionId: diagnostic.connectionId,
+        credentialSource: diagnostic.credentialSource,
+        effectiveEnvironment: diagnostic.effectiveEnvironment,
+        effectiveBaseUrlHost: diagnostic.effectiveBaseUrlHost,
+        serviceId: diagnostic.serviceId,
+        enabled: diagnostic.enabled,
+        fields: diagnostic.fields,
+        authResult: diagnostic.authResult,
+      },
+      metadata: {
+        provider: 'MWALONI',
+        diagnostic: 'B2C_AUTH',
+        authAttempted: diagnostic.authResult.attempted,
+        authSuccess: diagnostic.authResult.success,
+        providerStatus: diagnostic.authResult.status,
+        credentialSource: diagnostic.credentialSource,
+        effectiveEnvironment: diagnostic.effectiveEnvironment,
+      },
+    });
+
+    return result;
   }
 
   // ─── Direct B2C (called by the disbursement processor) ─────────────────

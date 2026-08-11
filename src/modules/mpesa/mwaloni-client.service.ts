@@ -23,6 +23,51 @@ export interface MwaloniResponse {
   [key: string]: unknown;
 }
 
+export interface MwaloniDiagnosticField {
+  present: boolean;
+  length: number;
+  trimmedLength: number;
+  hasLeadingWhitespace: boolean;
+  hasTrailingWhitespace: boolean;
+  sha256?: string;
+}
+
+export interface MwaloniAuthDiagnostic {
+  credentialSource: 'ENVIRONMENT_VARIABLES';
+  effectiveEnvironment: string;
+  effectiveBaseUrlHost: string | null;
+  connectionId: null;
+  serviceId: string | null;
+  enabled: boolean;
+  fields: {
+    serviceId: MwaloniDiagnosticField;
+    username: MwaloniDiagnosticField;
+    password: MwaloniDiagnosticField;
+    apiKey: MwaloniDiagnosticField;
+  };
+  requestShape: {
+    endpoint: 'authenticate';
+    method: 'POST';
+    contentType: 'application/json';
+    apiKeyHeader: 'x-api-key';
+    authorizationHeaderSent: false;
+    bodyFields: ['username', 'password'];
+    usesTokenCache: false;
+  };
+  authResult: {
+    attempted: boolean;
+    success: boolean;
+    status: string | null;
+    message: string | null;
+    tokenReturned: boolean;
+    tokenType: string | null;
+    expiresIn: number | null;
+    httpStatus: number | null;
+    errorCode: string | null;
+    retryable: boolean;
+  };
+}
+
 export interface MwaloniMobileParams {
   orderNumber: string;
   phoneNumber: string;
@@ -89,6 +134,122 @@ export class MwaloniClientService implements OnModuleInit {
     );
   }
 
+  async diagnoseAuthentication(): Promise<MwaloniAuthDiagnostic> {
+    const raw = this.rawRuntimeConfig();
+    const fields = {
+      serviceId: this.describeField(raw.serviceId),
+      username: this.describeField(raw.username, true),
+      password: this.describeField(raw.password),
+      apiKey: this.describeField(raw.apiKey, true),
+    };
+    const missing = this.getMissingConfig();
+    const baseUrl = this.baseUrl();
+    const baseDiagnostic = (): Omit<MwaloniAuthDiagnostic, 'authResult'> => ({
+      credentialSource: 'ENVIRONMENT_VARIABLES',
+      effectiveEnvironment: raw.env ?? 'sandbox',
+      effectiveBaseUrlHost: this.safeUrlHost(baseUrl),
+      connectionId: null,
+      serviceId: raw.serviceId?.trim() || null,
+      enabled: this.isEnabled(),
+      fields,
+      requestShape: {
+        endpoint: 'authenticate',
+        method: 'POST',
+        contentType: 'application/json',
+        apiKeyHeader: 'x-api-key',
+        authorizationHeaderSent: false,
+        bodyFields: ['username', 'password'],
+        usesTokenCache: false,
+      },
+    });
+
+    if (missing.length > 0) {
+      return {
+        ...baseDiagnostic(),
+        authResult: {
+          attempted: false,
+          success: false,
+          status: 'CONFIG_MISSING',
+          message: `Missing required configuration: ${missing.join(', ')}`,
+          tokenReturned: false,
+          tokenType: null,
+          expiresIn: null,
+          httpStatus: null,
+          errorCode: 'MPESA_CONFIG_MISSING',
+          retryable: false,
+        },
+      };
+    }
+
+    const username = this.getRequiredConfig('username', 'MWALONI_USERNAME');
+    const password = this.getRequiredConfig('password', 'MWALONI_PASSWORD');
+    const apiKey = this.getRequiredConfig('apiKey', 'MWALONI_API_KEY');
+    const url = `${baseUrl}authenticate`;
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify({ username, password }),
+      });
+      const body = (await res.json().catch(() => ({}))) as MwaloniResponse;
+      const tokenReturned = typeof body.data?.token === 'string' && body.data.token.length > 0;
+      const success = res.ok && body.status === '00' && tokenReturned;
+      const message = this.sanitizeProviderMessage(body.message, [username, password, apiKey]);
+
+      return {
+        ...baseDiagnostic(),
+        authResult: {
+          attempted: true,
+          success,
+          status: body.status ?? null,
+          message,
+          tokenReturned,
+          tokenType: typeof body.data?.tokenType === 'string' ? body.data.tokenType : null,
+          expiresIn: typeof body.data?.expiresIn === 'number' ? body.data.expiresIn : null,
+          httpStatus: res.status,
+          errorCode: success
+            ? null
+            : res.status === 401
+              ? 'MPESA_OAUTH_FAILED'
+              : 'MWALONI_AUTH_REJECTED',
+          retryable: res.status === 401 || res.status >= 500,
+        },
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ...baseDiagnostic(),
+        authResult: {
+          attempted: true,
+          success: false,
+          status: null,
+          message,
+          tokenReturned: false,
+          tokenType: null,
+          expiresIn: null,
+          httpStatus: null,
+          errorCode: 'MPESA_NETWORK_ERROR',
+          retryable: true,
+        },
+      };
+    }
+  }
+
+  private sanitizeProviderMessage(message: unknown, secrets: string[]): string | null {
+    if (typeof message !== 'string') return null;
+
+    let sanitized = message.slice(0, 240);
+    for (const secret of secrets) {
+      if (!secret) continue;
+      sanitized = sanitized.split(secret).join('[REDACTED]');
+    }
+    return sanitized;
+  }
+
   private async authenticate(): Promise<string> {
     this.assertConfigured();
 
@@ -114,7 +275,10 @@ export class MwaloniClientService implements OnModuleInit {
 
     const ttl = Math.max(
       60,
-      Math.min(Number(response.data.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS) - 300, DEFAULT_TOKEN_TTL_SECONDS),
+      Math.min(
+        Number(response.data.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS) - 300,
+        DEFAULT_TOKEN_TTL_SECONDS,
+      ),
     );
     await this.redis.set(cacheKey, response.data.token, ttl);
     this.logger.log('Mwaloni token refreshed and cached');
@@ -159,8 +323,13 @@ export class MwaloniClientService implements OnModuleInit {
         }
 
         if (res.status === 401) {
-          await this.redis.del(this.tokenCacheKey(this.getRequiredConfig('username', 'MWALONI_USERNAME')));
-          throw new MpesaOAuthException('Mwaloni returned 401 - token expired or credentials rejected', true);
+          await this.redis.del(
+            this.tokenCacheKey(this.getRequiredConfig('username', 'MWALONI_USERNAME')),
+          );
+          throw new MpesaOAuthException(
+            'Mwaloni returned 401 - token expired or credentials rejected',
+            true,
+          );
         }
 
         if (res.status >= 500) {
@@ -169,7 +338,10 @@ export class MwaloniClientService implements OnModuleInit {
 
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          throw new MpesaApiException(String(res.status), `Mwaloni ${label} HTTP ${res.status}: ${text.slice(0, 120)}`);
+          throw new MpesaApiException(
+            String(res.status),
+            `Mwaloni ${label} HTTP ${res.status}: ${text.slice(0, 120)}`,
+          );
         }
 
         return (await res.json()) as T;
@@ -218,6 +390,48 @@ export class MwaloniClientService implements OnModuleInit {
         ? this.config.get<string>('app.mwaloni.urlProduction', 'https://wallet.mwaloni.com/api/')
         : this.config.get<string>('app.mwaloni.urlSandbox', 'https://wallet-stg.mwaloni.com/api/');
     return configured.endsWith('/') ? configured : `${configured}/`;
+  }
+
+  private rawRuntimeConfig(): {
+    env: string | undefined;
+    serviceId: string | undefined;
+    username: string | undefined;
+    password: string | undefined;
+    apiKey: string | undefined;
+  } {
+    return {
+      env: this.config.get<string>('app.mwaloni.env', 'sandbox'),
+      serviceId: this.config.get<string>('app.mwaloni.serviceId'),
+      username: this.config.get<string>('app.mwaloni.username'),
+      password: this.config.get<string>('app.mwaloni.password'),
+      apiKey: this.config.get<string>('app.mwaloni.apiKey'),
+    };
+  }
+
+  private describeField(
+    value: string | undefined,
+    includeFingerprint = false,
+  ): MwaloniDiagnosticField {
+    const raw = value ?? '';
+    const trimmed = raw.trim();
+    return {
+      present: trimmed.length > 0,
+      length: raw.length,
+      trimmedLength: trimmed.length,
+      hasLeadingWhitespace: raw.length !== raw.trimStart().length,
+      hasTrailingWhitespace: raw.length !== raw.trimEnd().length,
+      ...(includeFingerprint && trimmed
+        ? { sha256: createHash('sha256').update(trimmed, 'utf8').digest('hex') }
+        : {}),
+    };
+  }
+
+  private safeUrlHost(url: string): string | null {
+    try {
+      return new URL(url).host;
+    } catch {
+      return null;
+    }
   }
 
   private assertConfigured(): void {

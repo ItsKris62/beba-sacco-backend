@@ -106,6 +106,24 @@ function makeService(incrResult = 1): MpesaService {
   );
 }
 
+function makeServiceWithMwaloni(mwaloni: unknown): MpesaService {
+  return new MpesaService(
+    mockConfig,
+    mockPrisma,
+    makeRedis(1),
+    mockIdempotency,
+    mockDaraja,
+    mockAudit,
+    mockLoanRepaymentService,
+    mockCallbackQueue as never,
+    mockDisbursementQueue as never,
+    mockB2cTimeoutQueue as never,
+    mockDlqQueue as never,
+    undefined,
+    mwaloni as never,
+  );
+}
+
 const BASE_DTO = {
   phoneNumber: '254712345678',
   amount: 1000,
@@ -641,5 +659,184 @@ describe('MpesaService.executeB2cDisbursement', () => {
       }),
     );
     expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+  });
+});
+
+describe('MpesaService.diagnoseMwaloniB2cAuthentication', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockAudit.create as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it('awaits durable audit evidence and returns only sanitized diagnostic metadata', async () => {
+    const diagnostic = {
+      connectionId: null,
+      credentialSource: 'ENVIRONMENT_VARIABLES' as const,
+      effectiveEnvironment: 'production',
+      effectiveBaseUrlHost: 'wallet.mwaloni.com',
+      serviceId: 'SRV-00001',
+      enabled: true,
+      fields: {
+        serviceId: {
+          present: true,
+          length: 9,
+          trimmedLength: 9,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+        },
+        username: {
+          present: true,
+          length: 12,
+          trimmedLength: 12,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+          sha256: 'username-sha256',
+        },
+        password: {
+          present: true,
+          length: 16,
+          trimmedLength: 16,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+        },
+        apiKey: {
+          present: true,
+          length: 64,
+          trimmedLength: 64,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+          sha256: 'apikey-sha256',
+        },
+      },
+      requestShape: {
+        endpoint: 'authenticate',
+        method: 'POST',
+        contentType: 'application/json',
+        apiKeyHeader: 'x-api-key',
+        authorizationHeaderSent: false,
+        bodyFields: ['username', 'password'],
+        usesTokenCache: false,
+      },
+      authResult: {
+        attempted: true,
+        success: false,
+        status: '01',
+        message: 'Invalid credentials',
+        tokenReturned: false,
+        tokenType: null,
+        expiresIn: null,
+        httpStatus: 200,
+        errorCode: 'MWALONI_AUTH_REJECTED',
+        retryable: false,
+      },
+    };
+    const mwaloni = {
+      diagnoseAuthentication: jest.fn().mockResolvedValue(diagnostic),
+    };
+    const service = makeServiceWithMwaloni(mwaloni);
+
+    const result = await service.diagnoseMwaloniB2cAuthentication('super-1', 'tenant-1');
+
+    expect(result).toEqual({ tenantId: 'tenant-1', ...diagnostic });
+    expect(mockAudit.create).toHaveBeenCalledTimes(1);
+    expect(mockAudit.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: 'tenant-1',
+        actorId: 'super-1',
+        action: 'MPESA.B2C_WALLET.AUTH_DIAGNOSTIC',
+        entityType: 'MwaloniWallet',
+        entityId: 'global',
+        newValue: expect.objectContaining({
+          tenantId: 'tenant-1',
+          effectiveBaseUrlHost: 'wallet.mwaloni.com',
+          authResult: expect.objectContaining({
+            status: '01',
+            tokenReturned: false,
+          }),
+        }),
+        metadata: expect.objectContaining({
+          provider: 'MWALONI',
+          diagnostic: 'B2C_AUTH',
+          authAttempted: true,
+          authSuccess: false,
+          providerStatus: '01',
+        }),
+      }),
+    );
+    expect(JSON.stringify((mockAudit.create as jest.Mock).mock.calls[0][0])).not.toContain(
+      'secret-provider-token',
+    );
+  });
+
+  it('does not return a successful diagnostic response if audit persistence fails', async () => {
+    const mwaloni = {
+      diagnoseAuthentication: jest.fn().mockResolvedValue({
+        connectionId: null,
+        credentialSource: 'ENVIRONMENT_VARIABLES',
+        effectiveEnvironment: 'production',
+        effectiveBaseUrlHost: 'wallet.mwaloni.com',
+        serviceId: 'SRV-00001',
+        enabled: true,
+        fields: {
+          serviceId: {
+            present: true,
+            length: 9,
+            trimmedLength: 9,
+            hasLeadingWhitespace: false,
+            hasTrailingWhitespace: false,
+          },
+          username: {
+            present: true,
+            length: 12,
+            trimmedLength: 12,
+            hasLeadingWhitespace: false,
+            hasTrailingWhitespace: false,
+            sha256: 'username-sha256',
+          },
+          password: {
+            present: true,
+            length: 16,
+            trimmedLength: 16,
+            hasLeadingWhitespace: false,
+            hasTrailingWhitespace: false,
+          },
+          apiKey: {
+            present: true,
+            length: 64,
+            trimmedLength: 64,
+            hasLeadingWhitespace: false,
+            hasTrailingWhitespace: false,
+            sha256: 'apikey-sha256',
+          },
+        },
+        requestShape: {
+          endpoint: 'authenticate',
+          method: 'POST',
+          contentType: 'application/json',
+          apiKeyHeader: 'x-api-key',
+          authorizationHeaderSent: false,
+          bodyFields: ['username', 'password'],
+          usesTokenCache: false,
+        },
+        authResult: {
+          attempted: true,
+          success: true,
+          status: '00',
+          message: 'Success',
+          tokenReturned: true,
+          tokenType: 'Bearer',
+          expiresIn: 3600,
+          httpStatus: 200,
+          errorCode: null,
+          retryable: false,
+        },
+      }),
+    };
+    (mockAudit.create as jest.Mock).mockRejectedValueOnce(new Error('audit unavailable'));
+    const service = makeServiceWithMwaloni(mwaloni);
+
+    await expect(service.diagnoseMwaloniB2cAuthentication('super-1', 'tenant-1')).rejects.toThrow(
+      'audit unavailable',
+    );
   });
 });

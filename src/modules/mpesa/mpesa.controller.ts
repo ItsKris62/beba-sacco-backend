@@ -103,6 +103,66 @@ class B2cWalletBalanceResponse {
   providerData!: unknown;
 }
 
+class MwaloniDiagnosticFieldResponse {
+  @ApiProperty({ example: true })
+  present!: boolean;
+
+  @ApiProperty({ example: 9 })
+  length!: number;
+
+  @ApiProperty({ example: 9 })
+  trimmedLength!: number;
+
+  @ApiProperty({ example: false })
+  hasLeadingWhitespace!: boolean;
+
+  @ApiProperty({ example: false })
+  hasTrailingWhitespace!: boolean;
+
+  @ApiProperty({
+    example: '64a1f08fdcc7f2c4f8c8f6a7d4c15d7415c2d6d8a3f5a7d2d8e9a3a1f4b5c6d7',
+    required: false,
+  })
+  sha256?: string;
+}
+
+class MwaloniB2cAuthDiagnosticResponse {
+  @ApiProperty({ example: 'tenant-uuid' })
+  tenantId!: string;
+
+  @ApiProperty({ example: null, nullable: true })
+  connectionId!: null;
+
+  @ApiProperty({ example: 'ENVIRONMENT_VARIABLES' })
+  credentialSource!: 'ENVIRONMENT_VARIABLES';
+
+  @ApiProperty({ example: 'production' })
+  effectiveEnvironment!: string;
+
+  @ApiProperty({ example: 'wallet.mwaloni.com', nullable: true })
+  effectiveBaseUrlHost!: string | null;
+
+  @ApiProperty({ example: 'SRV-00001', nullable: true })
+  serviceId!: string | null;
+
+  @ApiProperty({ example: true })
+  enabled!: boolean;
+
+  @ApiProperty({ type: Object })
+  fields!: {
+    serviceId: MwaloniDiagnosticFieldResponse;
+    username: MwaloniDiagnosticFieldResponse;
+    password: MwaloniDiagnosticFieldResponse;
+    apiKey: MwaloniDiagnosticFieldResponse;
+  };
+
+  @ApiProperty({ type: Object })
+  requestShape!: unknown;
+
+  @ApiProperty({ type: Object })
+  authResult!: unknown;
+}
+
 const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +341,27 @@ export class MpesaController {
     @CurrentUser() actor: AuthenticatedUser,
   ): Promise<B2cWalletBalanceResponse> {
     return this.mpesaService.getB2cWalletBalance(actor.id, tenant.id);
+  }
+
+  @Get('admin/b2c-wallet/diagnostics/auth')
+  @Roles(UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Diagnose Mwaloni B2C wallet authentication',
+    description:
+      'Super-admin-only read-only diagnostic. Returns safe runtime metadata and a sanitized live authentication result. ' +
+      'Does not fetch wallet balance, submit payouts, or expose secrets.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Sanitized Mwaloni B2C authentication diagnostic',
+    type: MwaloniB2cAuthDiagnosticResponse,
+  })
+  @ApiResponse({ status: 403, description: 'SUPER_ADMIN role required' })
+  async diagnoseMwaloniB2cAuthentication(
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<MwaloniB2cAuthDiagnosticResponse> {
+    return this.mpesaService.diagnoseMwaloniB2cAuthentication(actor.id, tenant.id);
   }
 
   // Admin: replay a DLQ job

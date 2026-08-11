@@ -29,6 +29,7 @@ const mockMpesaService = {
   requeueFromDlq: jest.fn(),
   initiateDeposit: jest.fn(),
   getB2cWalletBalance: jest.fn(),
+  diagnoseMwaloniB2cAuthentication: jest.fn(),
 } as unknown as MpesaService;
 
 const mockTenantResolver = {
@@ -252,6 +253,91 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
 
   it('marks the global B2C wallet balance endpoint as SUPER_ADMIN only', () => {
     expect(Reflect.getMetadata(ROLES_KEY, controller.getB2cWalletBalance)).toEqual([
+      UserRole.SUPER_ADMIN,
+    ]);
+  });
+
+  it('runs the Mwaloni auth diagnostic through the super-admin endpoint', async () => {
+    const diagnostic = {
+      tenantId: 'tenant-1',
+      connectionId: null,
+      credentialSource: 'ENVIRONMENT_VARIABLES',
+      effectiveEnvironment: 'production',
+      effectiveBaseUrlHost: 'wallet.mwaloni.com',
+      serviceId: 'SRV-00001',
+      enabled: true,
+      fields: {
+        serviceId: {
+          present: true,
+          length: 9,
+          trimmedLength: 9,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+        },
+        username: {
+          present: true,
+          length: 7,
+          trimmedLength: 7,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+          sha256: 'username-fingerprint',
+        },
+        password: {
+          present: true,
+          length: 10,
+          trimmedLength: 10,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+        },
+        apiKey: {
+          present: true,
+          length: 64,
+          trimmedLength: 64,
+          hasLeadingWhitespace: false,
+          hasTrailingWhitespace: false,
+          sha256: 'api-key-fingerprint',
+        },
+      },
+      requestShape: {
+        endpoint: 'authenticate',
+        method: 'POST',
+        contentType: 'application/json',
+        apiKeyHeader: 'x-api-key',
+        authorizationHeaderSent: false,
+        bodyFields: ['username', 'password'],
+        usesTokenCache: false,
+      },
+      authResult: {
+        attempted: true,
+        success: false,
+        status: '01',
+        message: 'Invalid credentials',
+        tokenReturned: false,
+        tokenType: null,
+        expiresIn: null,
+        httpStatus: 200,
+        errorCode: 'MWALONI_AUTH_REJECTED',
+        retryable: false,
+      },
+    };
+    (mockMpesaService.diagnoseMwaloniB2cAuthentication as jest.Mock).mockResolvedValueOnce(
+      diagnostic,
+    );
+
+    await expect(
+      controller.diagnoseMwaloniB2cAuthentication(
+        { id: 'tenant-1' } as never,
+        { id: 'super-1', role: UserRole.SUPER_ADMIN } as never,
+      ),
+    ).resolves.toEqual(diagnostic);
+    expect(mockMpesaService.diagnoseMwaloniB2cAuthentication).toHaveBeenCalledWith(
+      'super-1',
+      'tenant-1',
+    );
+  });
+
+  it('marks the Mwaloni auth diagnostic endpoint as SUPER_ADMIN only', () => {
+    expect(Reflect.getMetadata(ROLES_KEY, controller.diagnoseMwaloniB2cAuthentication)).toEqual([
       UserRole.SUPER_ADMIN,
     ]);
   });
