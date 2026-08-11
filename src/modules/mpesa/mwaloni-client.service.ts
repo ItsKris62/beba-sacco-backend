@@ -4,11 +4,11 @@ import { createHash } from 'crypto';
 import { RedisService } from '../../common/services/redis.service';
 import {
   MpesaApiException,
-  MpesaConfigException,
   MpesaException,
   MpesaNetworkException,
-  MpesaOAuthException,
   MpesaServiceUnavailableException,
+  MwaloniAuthException,
+  MwaloniConfigException,
 } from './exceptions/mpesa.exceptions';
 
 export interface MwaloniResponse {
@@ -175,7 +175,7 @@ export class MwaloniClientService implements OnModuleInit {
           tokenType: null,
           expiresIn: null,
           httpStatus: null,
-          errorCode: 'MPESA_CONFIG_MISSING',
+          errorCode: 'MWALONI_CONFIG_MISSING',
           retryable: false,
         },
       };
@@ -211,11 +211,7 @@ export class MwaloniClientService implements OnModuleInit {
           tokenType: typeof body.data?.tokenType === 'string' ? body.data.tokenType : null,
           expiresIn: typeof body.data?.expiresIn === 'number' ? body.data.expiresIn : null,
           httpStatus: res.status,
-          errorCode: success
-            ? null
-            : res.status === 401
-              ? 'MPESA_OAUTH_FAILED'
-              : 'MWALONI_AUTH_REJECTED',
+          errorCode: success ? null : 'MWALONI_AUTH_FAILED',
           retryable: res.status === 401 || res.status >= 500,
         },
       };
@@ -267,7 +263,7 @@ export class MwaloniClientService implements OnModuleInit {
     );
 
     if (response.status !== '00' || !response.data?.token) {
-      throw new MpesaOAuthException(
+      throw new MwaloniAuthException(
         `Mwaloni authentication failed: ${response.message ?? 'missing token'}`,
         false,
       );
@@ -326,7 +322,7 @@ export class MwaloniClientService implements OnModuleInit {
           await this.redis.del(
             this.tokenCacheKey(this.getRequiredConfig('username', 'MWALONI_USERNAME')),
           );
-          throw new MpesaOAuthException(
+          throw new MwaloniAuthException(
             'Mwaloni returned 401 - token expired or credentials rejected',
             true,
           );
@@ -437,7 +433,7 @@ export class MwaloniClientService implements OnModuleInit {
   private assertConfigured(): void {
     const missing = this.getMissingConfig();
     if (missing.length > 0) {
-      throw new MpesaConfigException(missing.join(' / '));
+      throw new MwaloniConfigException(missing.join(' / '));
     }
   }
 
@@ -454,7 +450,7 @@ export class MwaloniClientService implements OnModuleInit {
 
   private getRequiredConfig(key: string, envName: string): string {
     const value = this.config.get<string>(`app.mwaloni.${key}`)?.trim();
-    if (!value) throw new MpesaConfigException(envName);
+    if (!value) throw new MwaloniConfigException(envName);
     return value;
   }
 

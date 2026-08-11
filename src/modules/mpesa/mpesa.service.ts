@@ -4,7 +4,6 @@ import {
   BadRequestException,
   NotFoundException,
   Optional,
-  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -27,7 +26,7 @@ import {
   MwaloniClientService,
   MwaloniResponse,
 } from './mwaloni-client.service';
-import { MpesaException, MpesaConfigException } from './exceptions/mpesa.exceptions';
+import { B2cProviderUnavailableException, MpesaException } from './exceptions/mpesa.exceptions';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
 import { isStkCallback, isC2bCallback, isB2cCallback } from './dto/mpesa-callback.dto';
 import { maskPhone, buildMpesaRef, parseDarajaTimestamp } from './utils/mpesa.utils';
@@ -329,7 +328,7 @@ export class MpesaService {
     tenantId: string,
   ): Promise<B2cWalletBalanceSnapshot> {
     if (!this.mwaloni?.isEnabled()) {
-      throw new ServiceUnavailableException('Mwaloni B2C wallet is not enabled');
+      throw new B2cProviderUnavailableException('Mwaloni B2C wallet is not enabled');
     }
 
     const response = await this.mwaloni.fetchBalance();
@@ -470,7 +469,8 @@ export class MpesaService {
   // ─── Direct B2C (called by the disbursement processor) ─────────────────
 
   /**
-   * Performs the actual Daraja B2C call using pre-resolved phone + amount.
+   * Performs the actual B2C payout using the mandatory Mwaloni payment wallet.
+   * C2B/STK remain Daraja; B2C never falls back to Daraja.
    * Called only by MpesaDisbursementProcessor — never from HTTP handlers.
    */
   async executeB2cDisbursement(
@@ -535,159 +535,23 @@ export class MpesaService {
       }
     }
 
-    if (this.mwaloni?.isEnabled()) {
-      return this.executeMwaloniMobilePayout({
-        referenceId,
-        referenceType,
-        tenantId,
-        memberId,
-        accountReference,
-        phone,
-        amount,
-        triggeredBy,
-        sourceTransactionId,
-      });
-    }
-
-    const b2cShortcode = this.config.get<string>('app.mpesa.b2cShortcode', '600000');
-    const initiatorName = this.config.get<string>('app.mpesa.initiatorName', 'testapi');
-    const securityCredential = this.config.get<string>('app.mpesa.securityCredential', '');
-    const resultUrl = this.config.get<string>('app.mpesa.b2cResultUrl', '');
-    const queueTimeoutUrl = this.config.get<string>('app.mpesa.b2cQueueTimeoutUrl', '');
-
-    if (!securityCredential) {
-      throw new MpesaConfigException('MPESA_SECURITY_CREDENTIAL');
-    }
-
-    const reconciliationDueAt = new Date(Date.now() + 30 * 60 * 1000);
-    const pendingReference = sourceTransactionId
-      ? buildMpesaRef.b2c(sourceTransactionId)
-      : buildMpesaRef.b2c(`${referenceType}-${referenceId}`);
-
-    const pendingMpesaTx = sourceTransactionId
-      ? await this.prisma.mpesaTransaction.create({
-          data: {
-            tenantId,
-            memberId,
-            referenceType,
-            referenceId,
-            transactionId: sourceTransactionId,
-            type: MpesaTxType.B2C,
-            triggerSource:
-              triggeredBy === 'SYSTEM' ? MpesaTriggerSource.SYSTEM : MpesaTriggerSource.OFFICER,
-            phoneNumber: phone,
-            amount: new Decimal(amount).toDecimalPlaces(4).toString(),
-            accountReference,
-            description: `${referenceType === 'FOSA_WITHDRAWAL' ? 'FOSA Withdrawal' : 'Loan disbursement'}`,
-            reference: pendingReference,
-            status: TransactionStatus.PENDING,
-            reconciliationDueAt,
-            callbackPayload: {
-              provider: 'DARAJA',
-              dispatchState: 'REQUESTING_PROVIDER',
-              referenceType,
-              referenceId,
-              sourceTransactionId,
-              requestedAt: new Date().toISOString(),
-            } satisfies Prisma.InputJsonObject,
-          },
-        })
-      : null;
-
-    const darajaResp = await this.daraja.initiateB2C({
-      initiatorName,
-      securityCredential,
-      commandId: 'BusinessPayment',
-      amount,
-      partyA: b2cShortcode,
-      partyB: phone,
-      remarks:
-        `${referenceType === 'FOSA_WITHDRAWAL' ? 'Withdrawal' : 'Disbursement'} ${accountReference}`.slice(
-          0,
-          100,
-        ),
-      occasionRef: accountReference,
-      resultUrl,
-      queueTimeoutUrl,
-    });
-
-    const reference = buildMpesaRef.b2c(darajaResp.ConversationID);
-
-    if (pendingMpesaTx) {
-      const mpesaTx = await this.prisma.mpesaTransaction.update({
-        where: { id: pendingMpesaTx.id },
-        data: {
-          conversationId: darajaResp.ConversationID,
-          originatorConversationId: darajaResp.OriginatorConversationID,
-          reference,
-          callbackPayload: {
-            provider: 'DARAJA',
-            dispatchState: 'PROVIDER_ACCEPTED',
-            response: this.toJsonObject(darajaResp),
-            acceptedAt: new Date().toISOString(),
-          } satisfies Prisma.InputJsonObject,
-        },
-      });
-
-      this.logger.log(
-        `B2C initiated | tenant=${tenantId} refType=${referenceType} refId=${referenceId} ` +
-          `phone=${maskPhone(phone)} conversation=${darajaResp.ConversationID} amount=${amount}`,
+    if (!this.mwaloni?.isEnabled()) {
+      throw new B2cProviderUnavailableException(
+        'Mwaloni B2C payment wallet is not enabled or available',
       );
-
-      await this.scheduleB2cTimeoutCheck({
-        referenceId,
-        referenceType,
-        tenantId,
-        conversationId: darajaResp.ConversationID,
-      });
-
-      return {
-        conversationId: darajaResp.ConversationID,
-        mpesaTxId: mpesaTx.id,
-      };
     }
 
-    const mpesaTx = await this.prisma.mpesaTransaction.create({
-      data: {
-        tenantId,
-        memberId,
-        referenceType,
-        referenceId,
-        // Links back to the ledger Transaction that already moved the money (e.g. a
-        // FOSA withdrawal debit) so a failed/timed-out B2C call can be reversed via
-        // LedgerService.reverseTransaction() — see MpesaCallbackProcessor.handleB2cCallback().
-        ...(sourceTransactionId && { transactionId: sourceTransactionId }),
-        type: MpesaTxType.B2C,
-        triggerSource:
-          triggeredBy === 'SYSTEM' ? MpesaTriggerSource.SYSTEM : MpesaTriggerSource.OFFICER,
-        conversationId: darajaResp.ConversationID,
-        originatorConversationId: darajaResp.OriginatorConversationID,
-        phoneNumber: phone,
-        amount: new Decimal(amount).toDecimalPlaces(4).toString(),
-        accountReference,
-        description: `${referenceType === 'FOSA_WITHDRAWAL' ? 'FOSA Withdrawal' : 'Loan disbursement'}`,
-        reference,
-        status: TransactionStatus.PENDING,
-        reconciliationDueAt,
-      },
-    });
-
-    this.logger.log(
-      `B2C initiated | tenant=${tenantId} refType=${referenceType} refId=${referenceId} ` +
-        `phone=${maskPhone(phone)} conversation=${darajaResp.ConversationID} amount=${amount}`,
-    );
-
-    await this.scheduleB2cTimeoutCheck({
+    return this.executeMwaloniMobilePayout({
       referenceId,
       referenceType,
       tenantId,
-      conversationId: darajaResp.ConversationID,
+      memberId,
+      accountReference,
+      phone,
+      amount,
+      triggeredBy,
+      sourceTransactionId,
     });
-
-    return {
-      conversationId: darajaResp.ConversationID,
-      mpesaTxId: mpesaTx.id,
-    };
   }
 
   // ─── Callback enqueueing ────────────────────────────────────────────────
@@ -704,7 +568,7 @@ export class MpesaService {
     sourceTransactionId?: string;
   }): Promise<{ conversationId: string; mpesaTxId: string }> {
     if (!this.mwaloni) {
-      throw new MpesaConfigException('MWALONI_CLIENT');
+      throw new B2cProviderUnavailableException('Mwaloni B2C client is not available');
     }
 
     const orderNumber = this.buildMwaloniOrderNumber(params);

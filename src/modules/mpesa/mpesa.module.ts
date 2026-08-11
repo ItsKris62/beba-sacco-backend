@@ -38,7 +38,8 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   : [];
 
 /**
- * MpesaModule wires all Daraja / M-Pesa concerns:
+ * MpesaModule wires M-Pesa-adjacent provider concerns. B2C payouts and global
+ * B2C wallet balance checks use Mwaloni only; C2B/STK use Safaricom Daraja.
  *
  *  Controllers:
  *   - MpesaController        POST /mpesa/members/deposit
@@ -103,4 +104,3 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   ],
 })
 export class MpesaModule {}
-

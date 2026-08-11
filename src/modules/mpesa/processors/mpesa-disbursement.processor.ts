@@ -9,17 +9,16 @@ import { MpesaPayoutOutboxService } from '../mpesa-payout-outbox.service';
 /**
  * Processes B2C loan disbursement jobs.
  *
- * This processor is responsible for making the Daraja B2C API call.
- * The actual ledger update happens later when Safaricom posts the B2C result
- * to the callback URL (handled by MpesaCallbackProcessor).
+ * This processor is responsible for dispatching the mandatory Mwaloni wallet
+ * B2C payout. C2B/STK remain Daraja-only, but B2C must not fall back to Daraja.
  *
  * Retry strategy: 3 attempts with exponential backoff (10s, 20s, 40s).
  * This is intentionally slower than callback processing because B2C calls
- * are high-value and we want to avoid hammering Daraja on transient errors.
+ * are high-value and we want to avoid hammering the B2C provider on transient errors.
  *
  * DLQ: after 3 failures the job is moved to MPESA_DISBURSEMENT_DLQ where
  * it sits for manual review. The SACCO officer must requeue or manually
- * disburse via the Safaricom portal.
+ * reconcile through the configured B2C provider process.
  *
  * Idempotency: the jobId is `b2c-disburse-{loanId}` so re-approving the
  * same loan produces the same job and is deduplicated by BullMQ. Inside

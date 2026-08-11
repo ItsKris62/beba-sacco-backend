@@ -316,7 +316,7 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
         tokenType: null,
         expiresIn: null,
         httpStatus: 200,
-        errorCode: 'MWALONI_AUTH_REJECTED',
+        errorCode: 'MWALONI_AUTH_FAILED',
         retryable: false,
       },
     };

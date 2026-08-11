@@ -173,8 +173,9 @@ export const validationSchema = Joi.object({
   }),
   MPESA_STK_RATE_LIMIT_PER_DAY: Joi.number().integer().min(1).default(3),
 
-  // Mwaloni wallet B2C provider. Required only when explicitly enabled, so C2B/STK
-  // deployments can continue to boot without Mwaloni credentials.
+  // Mwaloni is the mandatory B2C payout and B2C wallet-balance provider. The enabled
+  // flag gates availability/config validation; it never routes B2C payouts to Daraja.
+  // Daraja credentials below remain responsible for C2B/STK flows.
   MWALONI_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
   MWALONI_ENV: Joi.string().valid('sandbox', 'production').default('sandbox'),
   MWALONI_DEBUG: Joi.boolean().truthy('true').falsy('false').default(false),

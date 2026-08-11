@@ -9,6 +9,10 @@ import { AuditService } from '../audit/audit.service';
 import { MpesaTxType, MpesaTriggerSource, TransactionStatus } from '@prisma/client';
 import { DepositPurpose } from './dto/deposit-request.dto';
 import { LoanRepaymentService } from '../loans/loan-repayment.service';
+import {
+  B2cProviderUnavailableException,
+  MwaloniAuthException,
+} from './exceptions/mpesa.exceptions';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -200,6 +204,28 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
 
     const stkCall = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
     expect(stkCall.amount).toBe(1000);
+  });
+
+  it('keeps STK deposits on Daraja and does not use Mwaloni', async () => {
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(true),
+      sendMobile: jest.fn(),
+      fetchBalance: jest.fn(),
+    };
+    const service = makeServiceWithMwaloni(mwaloni);
+
+    await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
+
+    expect(mockDaraja.initiateSTKPush).toHaveBeenCalledTimes(1);
+    expect(mwaloni.sendMobile).not.toHaveBeenCalled();
+    expect(mwaloni.fetchBalance).not.toHaveBeenCalled();
   });
 
   // ── [M-1] Atomic rate-limit counter ─────────────────────────────────────
@@ -660,6 +686,167 @@ describe('MpesaService.executeB2cDisbursement', () => {
     );
     expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
   });
+
+  it('fails closed without invoking Daraja when Mwaloni is disabled', async () => {
+    const prisma = {
+      account: {
+        findUnique: jest.fn().mockResolvedValue({
+          memberId: 'member-1',
+          accountNumber: 'FOSA-001',
+        }),
+      },
+      mpesaTransaction: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn(),
+      },
+    } as unknown as PrismaService;
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(false),
+      sendMobile: jest.fn(),
+    };
+    const service = new MpesaService(
+      mockConfig,
+      prisma,
+      makeRedis(1),
+      mockIdempotency,
+      mockDaraja,
+      mockAudit,
+      mockLoanRepaymentService,
+      mockCallbackQueue as never,
+      mockDisbursementQueue as never,
+      mockB2cTimeoutQueue as never,
+      mockDlqQueue as never,
+      undefined,
+      mwaloni as never,
+      {} as never,
+    );
+
+    await expect(
+      service.executeB2cDisbursement(
+        'account-1',
+        'FOSA_WITHDRAWAL',
+        'tenant-1',
+        '254712345678',
+        500,
+        'user-1',
+      ),
+    ).rejects.toThrow(B2cProviderUnavailableException);
+
+    expect(mwaloni.sendMobile).not.toHaveBeenCalled();
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+    expect(prisma.mpesaTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to Daraja when Mwaloni payout authentication fails', async () => {
+    const prisma = {
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(prisma)),
+      account: {
+        findUnique: jest.fn().mockResolvedValue({
+          memberId: 'member-1',
+          accountNumber: 'FOSA-001',
+        }),
+      },
+      mpesaTransaction: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({
+          id: 'mpesa-tx-1',
+          tenantId: 'tenant-1',
+          memberId: 'member-1',
+          referenceId: 'account-1',
+          transactionId: 'ledger-tx-1',
+          phoneNumber: '254712345678',
+          amount: { toString: () => '500' },
+          conversationId: 'MWD-ledger-tx-1',
+          status: TransactionStatus.PENDING,
+        }),
+      },
+    } as unknown as PrismaService;
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(true),
+      sendMobile: jest.fn().mockRejectedValue(new MwaloniAuthException('Invalid credentials')),
+    };
+    const service = new MpesaService(
+      mockConfig,
+      prisma,
+      makeRedis(1),
+      mockIdempotency,
+      mockDaraja,
+      mockAudit,
+      mockLoanRepaymentService,
+      mockCallbackQueue as never,
+      mockDisbursementQueue as never,
+      mockB2cTimeoutQueue as never,
+      mockDlqQueue as never,
+      undefined,
+      mwaloni as never,
+      {} as never,
+    );
+
+    await expect(
+      service.executeB2cDisbursement(
+        'account-1',
+        'FOSA_WITHDRAWAL',
+        'tenant-1',
+        '254712345678',
+        500,
+        'user-1',
+        'ledger-tx-1',
+      ),
+    ).rejects.toMatchObject({ code: 'MWALONI_AUTH_FAILED' });
+
+    expect(mwaloni.sendMobile).toHaveBeenCalledTimes(1);
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+  });
+});
+
+describe('MpesaService.getB2cWalletBalance', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockAudit.create as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it('always fetches the global B2C wallet balance from Mwaloni', async () => {
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(true),
+      fetchBalance: jest.fn().mockResolvedValue({
+        status: '00',
+        message: 'Success',
+        availableBalance: 125000,
+        actualBalance: 125500,
+        currency: 'KES',
+      }),
+    };
+    const service = makeServiceWithMwaloni(mwaloni);
+
+    const result = await service.getB2cWalletBalance('super-1', 'tenant-1');
+
+    expect(result).toMatchObject({
+      provider: 'MWALONI',
+      currency: 'KES',
+      balance: 125000,
+      availableBalance: 125000,
+      actualBalance: 125500,
+      providerStatus: '00',
+    });
+    expect(mwaloni.fetchBalance).toHaveBeenCalledTimes(1);
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+    expect(mockDaraja.initiateSTKPush).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the Mwaloni B2C wallet provider is disabled', async () => {
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(false),
+      fetchBalance: jest.fn(),
+    };
+    const service = makeServiceWithMwaloni(mwaloni);
+
+    await expect(service.getB2cWalletBalance('super-1', 'tenant-1')).rejects.toThrow(
+      B2cProviderUnavailableException,
+    );
+
+    expect(mwaloni.fetchBalance).not.toHaveBeenCalled();
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+  });
 });
 
 describe('MpesaService.diagnoseMwaloniB2cAuthentication', () => {
@@ -726,7 +913,7 @@ describe('MpesaService.diagnoseMwaloniB2cAuthentication', () => {
         tokenType: null,
         expiresIn: null,
         httpStatus: 200,
-        errorCode: 'MWALONI_AUTH_REJECTED',
+        errorCode: 'MWALONI_AUTH_FAILED',
         retryable: false,
       },
     };

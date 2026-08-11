@@ -1,5 +1,5 @@
 /**
- * Base class for all Daraja / M-Pesa exceptions.
+ * Base class for payment-provider exceptions surfaced by the M-Pesa module.
  *
  * `retryable` signals whether the caller or a BullMQ processor should
  * attempt the operation again (transient vs permanent failure).
@@ -25,6 +25,13 @@ export class MpesaOAuthException extends MpesaException {
   }
 }
 
+/** Mwaloni wallet authentication failed. B2C uses Mwaloni only; never fall back to Daraja B2C. */
+export class MwaloniAuthException extends MpesaException {
+  constructor(message: string, retryable = false) {
+    super('MWALONI_AUTH_FAILED', message, retryable);
+  }
+}
+
 /** TCP / DNS / TLS failure reaching Daraja. Always retryable. */
 export class MpesaNetworkException extends MpesaException {
   constructor(message: string) {
@@ -36,6 +43,20 @@ export class MpesaNetworkException extends MpesaException {
 export class MpesaConfigException extends MpesaException {
   constructor(missingVar: string) {
     super('MPESA_CONFIG_MISSING', `${missingVar} is not configured`, false);
+  }
+}
+
+/** Required Mwaloni wallet config absent or malformed. B2C fails closed. */
+export class MwaloniConfigException extends MpesaException {
+  constructor(missingVar: string) {
+    super('MWALONI_CONFIG_MISSING', `${missingVar} is not configured`, false);
+  }
+}
+
+/** Mandatory B2C provider is disabled/unavailable; do not route payouts elsewhere. */
+export class B2cProviderUnavailableException extends MpesaException {
+  constructor(detail = 'Mwaloni B2C payment wallet is unavailable') {
+    super('B2C_PROVIDER_UNAVAILABLE', detail, false);
   }
 }
 

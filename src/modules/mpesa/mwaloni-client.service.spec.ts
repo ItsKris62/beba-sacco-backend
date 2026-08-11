@@ -101,7 +101,7 @@ describe('MwaloniClientService.diagnoseAuthentication', () => {
       attempted: false,
       success: false,
       status: 'CONFIG_MISSING',
-      errorCode: 'MPESA_CONFIG_MISSING',
+      errorCode: 'MWALONI_CONFIG_MISSING',
       retryable: false,
     });
     expect(result.authResult.message).toContain('MWALONI_PASSWORD');
@@ -134,7 +134,7 @@ describe('MwaloniClientService.diagnoseAuthentication', () => {
       message: 'Invalid credentials',
       tokenReturned: false,
       httpStatus: 200,
-      errorCode: 'MWALONI_AUTH_REJECTED',
+      errorCode: 'MWALONI_AUTH_FAILED',
       retryable: false,
     });
   });

@@ -73,15 +73,16 @@ export default registerAs('app', () => ({
   },
 
   // M-Pesa (Safaricom Daraja)
-  // C2B (collections/deposits) and B2C (disbursements/withdrawals) are
-  // separate Daraja apps in production, each with its own consumer key/secret.
+  // Daraja is used for C2B/STK collection flows. Historical Daraja B2C config is
+  // retained for callback compatibility/config parity, but payout execution uses
+  // the mandatory Mwaloni wallet provider below and never falls back to Daraja.
   mpesa: {
     consumerKey: process.env.MPESA_CONSUMER_KEY,
     consumerSecret: process.env.MPESA_CONSUMER_SECRET,
     b2cConsumerKey: process.env.MPESA_B2C_CONSUMER_KEY,
     b2cConsumerSecret: process.env.MPESA_B2C_CONSUMER_SECRET,
     passkey: process.env.MPESA_PASSKEY,
-    // Stored for parity with the B2C app's Daraja portal credentials page.
+    // Stored for parity with the historical B2C app's Daraja portal credentials page.
     // Not consumed by any Daraja call — the B2C Payment Request API
     // authenticates via initiatorName + securityCredential, not a passkey
     // (passkey is only used to build the STK Push password).
@@ -106,11 +107,15 @@ export default registerAs('app', () => ({
     // initiation — see MpesaB2cTimeoutProcessor) before WithdrawalReconciliationProcessor
     // auto-refunds it. Kept generous by default so a genuinely-late Daraja callback has
     // time to land before we act — see withdrawal-recon.processor.ts.
-    withdrawalReconGraceMinutes: parseInt(process.env.MPESA_WITHDRAWAL_RECON_GRACE_MINUTES || '30', 10),
+    withdrawalReconGraceMinutes: parseInt(
+      process.env.MPESA_WITHDRAWAL_RECON_GRACE_MINUTES || '30',
+      10,
+    ),
   },
 
-  // Mwaloni wallet B2C provider for FOSA withdrawals to M-Pesa enabled lines.
-  // This is intentionally separate from Daraja C2B/STK settings so deposits remain untouched.
+  // Mwaloni is the mandatory B2C provider for FOSA withdrawals and global B2C wallet
+  // balance checks. MWALONI_ENABLED controls availability/config validation only; it
+  // must not switch B2C traffic to Daraja. Daraja remains C2B/STK-only.
   mwaloni: {
     enabled: process.env.MWALONI_ENABLED === 'true',
     env: process.env.MWALONI_ENV || 'sandbox',
@@ -139,7 +144,9 @@ export default registerAs('app', () => ({
   sendGrid: {
     apiKey: process.env.SENDGRID_API_KEY,
     fromEmail:
-      process.env.SENDGRID_FROM_EMAIL || process.env.PLUNK_FROM_EMAIL || 'noreply@kolwa.mwaloni.com',
+      process.env.SENDGRID_FROM_EMAIL ||
+      process.env.PLUNK_FROM_EMAIL ||
+      'noreply@kolwa.mwaloni.com',
     fromName: process.env.SENDGRID_FROM_NAME || process.env.PLUNK_FROM_NAME || 'Beba SACCO',
   },
 

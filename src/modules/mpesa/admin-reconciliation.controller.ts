@@ -1,4 +1,14 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+  Req,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiHeader,
@@ -71,7 +81,7 @@ export class AdminReconciliationController {
     summary: 'Execute manual recovery for a stuck or double-credited M-Pesa withdrawal',
     description:
       'MANUAL_B2C_PAYOUT re-debits the FOSA account (only if it was previously auto-refunded) ' +
-      'and sends the member their money via a fresh Daraja B2C call, protected by the same ' +
+      'and sends the member their money via a fresh Mwaloni B2C wallet payout, protected by the same ' +
       '30-minute timeout + reconciliation sweep as any other B2C payout. REVERSE_AUTO_REFUND ' +
       'undoes an incorrect auto-refund by re-debiting the FOSA account. Both require investigation ' +
       'notes and are recorded as MPESA.WITHDRAWAL.MANUALLY_RECOVERED in the audit trail.',
