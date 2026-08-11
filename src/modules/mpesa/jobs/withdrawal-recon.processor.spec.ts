@@ -1,4 +1,4 @@
-import { TransactionStatus } from '@prisma/client';
+import { MpesaTxType, TransactionStatus } from '@prisma/client';
 import { WithdrawalReconciliationProcessor } from './withdrawal-recon.processor';
 
 describe('WithdrawalReconciliationProcessor', () => {
@@ -6,165 +6,207 @@ describe('WithdrawalReconciliationProcessor', () => {
   const mpesaTxId = 'mpesa-tx-1';
   const ledgerTxId = 'ledger-tx-1';
 
-  function buildProcessor(args: {
-    stuckRows?: Array<Record<string, unknown>>;
-    updateManyCount?: number;
-    reverseTransactionError?: Error;
-  } = {}) {
+  function buildProcessor(
+    args: {
+      pendingRows?: Array<Record<string, unknown>>;
+      stuckRows?: Array<Record<string, unknown>>;
+      updateManyCount?: number;
+      existingAudit?: Record<string, unknown> | null;
+      auditError?: Error;
+    } = {},
+  ) {
     const tx = {
+      auditLog: {
+        findUnique: jest.fn().mockResolvedValue(args.existingAudit ?? null),
+      },
       mpesaTransaction: {
         updateMany: jest.fn().mockResolvedValue({ count: args.updateManyCount ?? 1 }),
       },
     };
 
+    const pendingRows = args.pendingRows ?? [];
+    const stuckRows = args.stuckRows ?? [
+      {
+        id: mpesaTxId,
+        tenantId,
+        transactionId: ledgerTxId,
+        amount: { toString: () => '500.0000' },
+        phoneNumber: '254712345678',
+        conversationId: 'conv-1',
+        referenceId: 'account-1',
+        failureReason: 'B2C_TIMEOUT',
+      },
+    ];
+
     const prisma = {
       direct: {
         mpesaTransaction: {
-          findMany: jest.fn().mockResolvedValue(
-            args.stuckRows ?? [
-              {
-                id: mpesaTxId,
-                tenantId,
-                transactionId: ledgerTxId,
-                amount: '500.0000',
-                phoneNumber: '254712345678',
-                conversationId: 'conv-1',
-              },
-            ],
-          ),
+          findMany: jest.fn().mockResolvedValueOnce(pendingRows).mockResolvedValueOnce(stuckRows),
         },
         $transaction: jest.fn((callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
       },
     };
 
-    const ledger = {
-      reverseTransaction: args.reverseTransactionError
-        ? jest.fn().mockRejectedValue(args.reverseTransactionError)
-        : jest.fn().mockResolvedValue({ transaction: { id: 'reversal-1' }, journalEntry: { id: 'je-1' } }),
-    };
-
     const audit = {
-      create: jest.fn().mockResolvedValue(undefined),
-      createAtomic: jest.fn().mockResolvedValue(undefined),
+      createAtomic: args.auditError
+        ? jest.fn().mockRejectedValue(args.auditError)
+        : jest.fn().mockResolvedValue(undefined),
     };
 
     const config = { get: jest.fn().mockReturnValue(30) };
 
     const processor = new WithdrawalReconciliationProcessor(
-      prisma as any,
-      ledger as any,
-      audit as any,
-      config as any,
+      prisma as never,
+      audit as never,
+      config as never,
     );
 
-    return { processor, prisma, tx, ledger, audit, config };
+    return { processor, prisma, tx, audit, config };
   }
 
   function buildJob() {
-    return { id: 'job-1' } as any;
+    return { id: 'job-1' } as never;
   }
 
-  it('does nothing when there are no stuck rows', async () => {
-    const { processor, ledger, audit } = buildProcessor({ stuckRows: [] });
+  it('does nothing when there are no stale rows', async () => {
+    const { processor, audit } = buildProcessor({ stuckRows: [] });
 
     await processor.process(buildJob());
 
-    expect(ledger.reverseTransaction).not.toHaveBeenCalled();
     expect(audit.createAtomic).not.toHaveBeenCalled();
   });
 
-  it('queries only RECON_PENDING FOSA_WITHDRAWAL rows older than the grace window', async () => {
+  it('queries RECON_PENDING FOSA withdrawals without requiring a failed provider outcome', async () => {
     const { processor, prisma } = buildProcessor({ stuckRows: [] });
 
     await processor.process(buildJob());
 
-    expect(prisma.direct.mpesaTransaction.findMany).toHaveBeenCalledWith(
+    expect(prisma.direct.mpesaTransaction.findMany).toHaveBeenNthCalledWith(
+      2,
       expect.objectContaining({
         where: expect.objectContaining({
           referenceType: 'FOSA_WITHDRAWAL',
           status: TransactionStatus.RECON_PENDING,
-          updatedAt: expect.objectContaining({ lt: expect.any(Date) }),
+          OR: expect.any(Array),
         }),
       }),
     );
   });
 
-  it('auto-refunds a stuck withdrawal that still has a linked ledger transaction', async () => {
-    const { processor, tx, ledger, audit } = buildProcessor();
+  it('does not auto-refund an ambiguous stuck withdrawal with a linked ledger transaction', async () => {
+    const { processor, tx, audit } = buildProcessor();
 
     await processor.process(buildJob());
 
     expect(tx.mpesaTransaction.updateMany).toHaveBeenCalledWith({
       where: { id: mpesaTxId, status: TransactionStatus.RECON_PENDING },
-      data: expect.objectContaining({
-        status: TransactionStatus.FAILED,
-        failureReason: 'RECONCILIATION_TIMEOUT_AUTO_REFUNDED',
-      }),
+      data: { lastRecoveryAt: expect.any(Date) },
     });
-    expect(ledger.reverseTransaction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tenantId,
-        originalTransactionId: ledgerTxId,
-      }),
-    );
     expect(audit.createAtomic).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ action: 'MPESA.WITHDRAWAL.RECONCILIATION_AUTO_REFUND' }),
+      expect.objectContaining({
+        action: 'MPESA.WITHDRAWAL.RECON_MANUAL_REVIEW_REQUIRED',
+        newValue: expect.objectContaining({
+          status: TransactionStatus.RECON_PENDING,
+          reason: 'AMBIGUOUS_PROVIDER_OUTCOME',
+        }),
+      }),
     );
   });
 
   it('flags rows with no linked ledger transaction for manual review instead of reversing', async () => {
-    const { processor, ledger, audit } = buildProcessor({
+    const { processor, audit } = buildProcessor({
       stuckRows: [
         {
           id: mpesaTxId,
           tenantId,
           transactionId: null,
-          amount: '500.0000',
+          amount: { toString: () => '500.0000' },
           phoneNumber: '254712345678',
           conversationId: 'conv-1',
+          referenceId: 'account-1',
+          failureReason: 'B2C_FAILURE_NO_LINKED_LEDGER_TRANSACTION',
         },
       ],
     });
 
     await processor.process(buildJob());
 
-    expect(ledger.reverseTransaction).not.toHaveBeenCalled();
-    expect(audit.create).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'MPESA.WITHDRAWAL.RECON_MANUAL_REVIEW_REQUIRED' }),
+    expect(audit.createAtomic).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'MPESA.WITHDRAWAL.RECON_MANUAL_REVIEW_REQUIRED',
+        metadata: expect.objectContaining({ transactionId: null }),
+      }),
     );
   });
 
-  it('skips a row without reversing when a concurrent writer already claimed it', async () => {
-    const { processor, ledger, audit } = buildProcessor({ updateManyCount: 0 });
+  it('does not duplicate manual-review audit when the deterministic audit already exists', async () => {
+    const { processor, tx, audit } = buildProcessor({ existingAudit: { id: 'audit-1' } });
 
     await processor.process(buildJob());
 
-    expect(ledger.reverseTransaction).not.toHaveBeenCalled();
+    expect(tx.mpesaTransaction.updateMany).not.toHaveBeenCalled();
     expect(audit.createAtomic).not.toHaveBeenCalled();
   });
 
-  it('logs and continues (does not throw) when the ledger reversal fails', async () => {
-    const { processor, audit } = buildProcessor({ reverseTransactionError: new Error('DB unavailable') });
-
-    await expect(processor.process(buildJob())).resolves.toBeUndefined();
-    expect(audit.create).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'MPESA.WITHDRAWAL.RECONCILIATION_AUTO_REFUND_FAILED' }),
-    );
-  });
-
-  it('processes multiple stuck rows independently — one failure does not stop the rest', async () => {
-    const rows = [
-      { id: 'mpesa-tx-a', tenantId, transactionId: 'ledger-a', amount: '100', phoneNumber: '254700000001', conversationId: 'conv-a' },
-      { id: 'mpesa-tx-b', tenantId, transactionId: 'ledger-b', amount: '200', phoneNumber: '254700000002', conversationId: 'conv-b' },
-    ];
-    const { processor, ledger } = buildProcessor({ stuckRows: rows });
-    (ledger.reverseTransaction as jest.Mock)
-      .mockRejectedValueOnce(new Error('transient failure for row A'))
-      .mockResolvedValueOnce({ transaction: { id: 'reversal-b' }, journalEntry: { id: 'je-b' } });
+  it('discovers historical pending B2C rows with no reconciliation deadline', async () => {
+    const historicalCreatedAt = new Date(Date.now() - 60 * 60 * 1000);
+    const { processor, tx, audit } = buildProcessor({
+      pendingRows: [
+        {
+          id: 'historical-pending-1',
+          tenantId,
+          conversationId: 'conv-historical',
+          referenceId: 'account-1',
+          referenceType: 'FOSA_WITHDRAWAL',
+          amount: { toString: () => '800.0000' },
+          phoneNumber: '254700000001',
+          createdAt: historicalCreatedAt,
+          reconciliationDueAt: null,
+        },
+      ],
+      stuckRows: [],
+    });
 
     await processor.process(buildJob());
 
-    expect(ledger.reverseTransaction).toHaveBeenCalledTimes(2);
+    expect(tx.mpesaTransaction.updateMany).toHaveBeenCalledWith({
+      where: { id: 'historical-pending-1', status: TransactionStatus.PENDING },
+      data: expect.objectContaining({
+        status: TransactionStatus.RECON_PENDING,
+        failureReason: 'B2C_HISTORICAL_PENDING_WITHOUT_RECON_DEADLINE',
+      }),
+    });
+    expect(audit.createAtomic).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'MPESA.B2C.RECONCILIATION_DEADLINE_EXPIRED',
+        metadata: expect.objectContaining({ historicalNullDeadline: true }),
+      }),
+    );
+  });
+
+  it('queries pending B2C rows by due date or historical null deadline', async () => {
+    const { processor, prisma } = buildProcessor({ stuckRows: [] });
+
+    await processor.process(buildJob());
+
+    expect(prisma.direct.mpesaTransaction.findMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: {
+          type: MpesaTxType.B2C,
+          status: TransactionStatus.PENDING,
+          OR: expect.arrayContaining([
+            expect.objectContaining({ reconciliationDueAt: expect.any(Object) }),
+            expect.objectContaining({
+              reconciliationDueAt: null,
+              createdAt: expect.any(Object),
+            }),
+          ]),
+        },
+      }),
+    );
   });
 });

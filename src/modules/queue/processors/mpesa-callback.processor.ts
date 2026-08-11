@@ -6,8 +6,8 @@ import { Job, Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import {
   Prisma,
+  OutboxStatus,
   TransactionStatus,
-  TransactionType,
   JournalEntryType,
   MpesaTxType,
   MpesaTriggerSource,
@@ -15,7 +15,7 @@ import {
 } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { AuditService } from '../../audit/audit.service';
+import { AuditService, CreateAuditLogDto } from '../../audit/audit.service';
 import { CacheService } from '../../../common/services/cache.service';
 import { DOMAIN_EVENTS, DomainEventName } from '../../../common/constants/events';
 import { LoanRepaymentService } from '../../loans/loan-repayment.service';
@@ -83,21 +83,58 @@ export class MpesaCallbackProcessor extends WorkerHost {
     }
   }
 
+  private async createAuditOnce(dto: CreateAuditLogDto): Promise<void> {
+    try {
+      await this.audit.create(dto);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return;
+      }
+      throw error;
+    }
+  }
+
   // ─── Main dispatcher ──────────────────────────────────────────────────────
 
   async process(job: Job<MpesaCallbackJobPayload>): Promise<void> {
-    const { mpesaTransactionId, callbackType, tenantId, correlationId } = job.data;
+    const { mpesaTransactionId, callbackType, tenantId, correlationId, callbackInboxId } = job.data;
     let callbackPayload = job.data.callbackPayload;
     let resolvedTenantId = tenantId;
+    let resolvedMpesaTransactionId = mpesaTransactionId;
 
-    if (mpesaTransactionId) {
+    if (callbackInboxId) {
+      const inbox = await this.prisma.mpesaCallbackInbox.findUnique({
+        where: { id: callbackInboxId },
+        select: {
+          id: true,
+          tenantId: true,
+          payload: true,
+          status: true,
+          mpesaTransactionId: true,
+        },
+      });
+      if (!inbox) {
+        throw new Error(`M-Pesa callback inbox row not found for ${callbackInboxId}`);
+      }
+      if (inbox.status === OutboxStatus.DELIVERED) {
+        this.logger.log(`M-Pesa callback inbox duplicate skipped: ${callbackInboxId}`);
+        return;
+      }
+      callbackPayload = inbox.payload as unknown as Record<string, unknown>;
+      resolvedTenantId = inbox.tenantId;
+      resolvedMpesaTransactionId = inbox.mpesaTransactionId ?? resolvedMpesaTransactionId;
+    }
+
+    if (resolvedMpesaTransactionId && !callbackPayload) {
       const transaction = await this.prisma.mpesaTransaction.findUnique({
-        where: { id: mpesaTransactionId },
+        where: { id: resolvedMpesaTransactionId },
         select: { id: true, tenantId: true, callbackPayload: true },
       });
 
       if (!transaction?.callbackPayload) {
-        throw new Error(`M-Pesa callback payload not found for transaction ${mpesaTransactionId}`);
+        throw new Error(
+          `M-Pesa callback payload not found for transaction ${resolvedMpesaTransactionId}`,
+        );
       }
 
       callbackPayload = transaction.callbackPayload as unknown as Record<string, unknown>;
@@ -109,27 +146,60 @@ export class MpesaCallbackProcessor extends WorkerHost {
     }
 
     this.logger.log(
-      `Processing mpesa callback | job=${job.id} type=${callbackType} tenant=${resolvedTenantId} mpesaTransactionId=${mpesaTransactionId ?? ''} correlation=${correlationId ?? ''}`,
+      `Processing mpesa callback | job=${job.id} type=${callbackType} tenant=${resolvedTenantId} mpesaTransactionId=${resolvedMpesaTransactionId ?? ''} correlation=${correlationId ?? ''}`,
     );
 
-    if (isStkCallback(callbackPayload)) {
-      await this.handleStkCallback(callbackPayload as unknown as StkCallbackPayload, job.id ?? '');
-    } else if (isC2bCallback(callbackPayload)) {
-      await this.handleC2bCallback(
-        callbackPayload as unknown as C2bCallbackPayload,
-        job.id ?? '',
-        resolvedTenantId,
-        mpesaTransactionId,
-      );
-    } else if (isB2cCallback(callbackPayload)) {
-      await this.handleB2cCallback(callbackPayload as unknown as B2cCallbackPayload, job.id ?? '');
-    } else {
-      this.logger.warn(`Unknown callback structure for job ${job.id} - logging and discarding`);
+    try {
+      if (isStkCallback(callbackPayload)) {
+        await this.handleStkCallback(
+          callbackPayload as unknown as StkCallbackPayload,
+          job.id ?? '',
+        );
+      } else if (isC2bCallback(callbackPayload)) {
+        await this.handleC2bCallback(
+          callbackPayload as unknown as C2bCallbackPayload,
+          job.id ?? '',
+          resolvedTenantId,
+          resolvedMpesaTransactionId,
+        );
+      } else if (isB2cCallback(callbackPayload)) {
+        await this.handleB2cCallback(
+          callbackPayload as unknown as B2cCallbackPayload,
+          job.id ?? '',
+        );
+      } else {
+        this.logger.warn(`Unknown callback structure for job ${job.id} - logging and discarding`);
+      }
+
+      if (callbackInboxId) {
+        await this.prisma.mpesaCallbackInbox.update({
+          where: { id: callbackInboxId },
+          data: {
+            status: OutboxStatus.DELIVERED,
+            processedAt: new Date(),
+            lastError: null,
+            nextRetryAt: null,
+          },
+        });
+      }
+    } catch (error) {
+      if (callbackInboxId) {
+        await this.prisma.mpesaCallbackInbox.update({
+          where: { id: callbackInboxId },
+          data: {
+            status: OutboxStatus.FAILED,
+            attempts: { increment: 1 },
+            lastError: error instanceof Error ? error.message : String(error),
+            nextRetryAt: new Date(Date.now() + 60_000),
+          },
+        });
+      }
+      throw error;
     }
   }
   // ─── STK Push result ──────────────────────────────────────────────────────
 
-  private async handleStkCallback(body: StkCallbackPayload, jobId: string): Promise<void> {
+  private async handleStkCallback(body: StkCallbackPayload, _jobId: string): Promise<void> {
     const cb = body.Body.stkCallback;
     const { CheckoutRequestID, ResultCode, ResultDesc, CallbackMetadata } = cb;
 
@@ -153,20 +223,19 @@ export class MpesaCallbackProcessor extends WorkerHost {
     const rawPayload = body as unknown as Prisma.InputJsonValue;
 
     if (ResultCode !== 0) {
-      await this.prisma.mpesaTransaction.update({
-        where: { id: mpesaTx.id },
-        data: {
-          status: TransactionStatus.FAILED,
-          resultCode: ResultCode,
-          resultDesc: ResultDesc,
-          callbackPayload: rawPayload,
-        },
-      });
-      this.logger.log(
-        `STK Push failed | checkout=${CheckoutRequestID} code=${ResultCode} desc=${ResultDesc}`,
-      );
-      this.audit
-        .create({
+      await this.prisma.$transaction(async (tx) => {
+        const claim = await tx.mpesaTransaction.updateMany({
+          where: { id: mpesaTx.id, status: TransactionStatus.PENDING },
+          data: {
+            status: TransactionStatus.FAILED,
+            resultCode: ResultCode,
+            resultDesc: ResultDesc,
+            callbackPayload: rawPayload,
+          },
+        });
+        if (claim.count === 0) return;
+
+        await this.audit.createAtomic(tx, {
           tenantId: mpesaTx.tenantId,
           actorId: 'SYSTEM',
           action: 'MPESA.DEPOSIT.FAILED',
@@ -175,14 +244,16 @@ export class MpesaCallbackProcessor extends WorkerHost {
           newValue: { status: 'FAILED', resultCode: ResultCode, resultDesc: ResultDesc },
           metadata: {
             checkoutRequestId: CheckoutRequestID,
-            amount: mpesaTx.amount,
+            amount: mpesaTx.amount.toString(),
             phone: maskPhone(mpesaTx.phoneNumber),
             accountReference: mpesaTx.accountReference,
           },
-        })
-        .catch((e: unknown) =>
-          this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-        );
+          requestId: `audit.MPESA.DEPOSIT.FAILED.${mpesaTx.tenantId}.${mpesaTx.id}`,
+        });
+      });
+      this.logger.log(
+        `STK Push failed | checkout=${CheckoutRequestID} code=${ResultCode} desc=${ResultDesc}`,
+      );
       this.emitDomainEvent(DOMAIN_EVENTS.MPESA.DEPOSIT_FAILED, {
         tenantId: mpesaTx.tenantId,
         memberId: mpesaTx.memberId ?? 'UNKNOWN',
@@ -236,7 +307,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
 
   private async handleC2bCallback(
     body: C2bCallbackPayload,
-    jobId: string,
+    _jobId: string,
     resolvedTenantId?: string,
     persistedTxId?: string,
   ): Promise<void> {
@@ -248,6 +319,14 @@ export class MpesaCallbackProcessor extends WorkerHost {
       });
       if (existing && existing.id !== persistedTxId) {
         this.logger.log(`C2B duplicate skipped: TransID=${TransID}`);
+        return;
+      }
+      if (
+        existing &&
+        existing.id === persistedTxId &&
+        existing.status !== TransactionStatus.PENDING
+      ) {
+        this.logger.log(`C2B duplicate skipped: TransID=${TransID} -> ${existing.status}`);
         return;
       }
 
@@ -273,13 +352,43 @@ export class MpesaCallbackProcessor extends WorkerHost {
         this.logger.warn(
           `C2B: account not found for BillRefNumber=${BillRefNumber} TransID=${TransID}`,
         );
-        this.audit
-          .create({
+        await this.prisma.$transaction(async (tx) => {
+          const rejected = persistedTxId
+            ? await tx.mpesaTransaction.update({
+                where: { id: persistedTxId },
+                data: {
+                  tenantId: fallbackTenantId,
+                  status: TransactionStatus.FAILED,
+                  resultCode: 9999,
+                  resultDesc: 'Account not found - requires manual reconciliation',
+                  callbackPayload: rawPayload,
+                  transactionDate: parseDarajaTimestamp(TransTime),
+                },
+              })
+            : await tx.mpesaTransaction.create({
+                data: {
+                  tenantId: fallbackTenantId,
+                  type: MpesaTxType.C2B,
+                  triggerSource: MpesaTriggerSource.MEMBER,
+                  phoneNumber: MSISDN,
+                  amount: amount.toDecimalPlaces(4).toString(),
+                  accountReference: BillRefNumber,
+                  mpesaReceiptNumber: TransID,
+                  reference,
+                  status: TransactionStatus.FAILED,
+                  resultCode: 9999,
+                  resultDesc: 'Account not found - requires manual reconciliation',
+                  callbackPayload: rawPayload,
+                  transactionDate: parseDarajaTimestamp(TransTime),
+                },
+              });
+
+          await this.audit.createAtomic(tx, {
             tenantId: fallbackTenantId,
             actorId: 'SYSTEM',
             action: 'MPESA.C2B.REJECTED',
             entityType: 'MpesaTransaction',
-            entityId: persistedTxId ?? TransID,
+            entityId: rejected.id,
             newValue: { status: 'FAILED', resultCode: 9999 },
             metadata: {
               transId: TransID,
@@ -288,41 +397,9 @@ export class MpesaCallbackProcessor extends WorkerHost {
               amount: amount.toFixed(4),
               rejection_reason: 'ACCOUNT_NOT_FOUND',
             },
-          })
-          .catch((e: unknown) =>
-            this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-          );
-        if (persistedTxId) {
-          await this.prisma.mpesaTransaction.update({
-            where: { id: persistedTxId },
-            data: {
-              tenantId: fallbackTenantId,
-              status: TransactionStatus.FAILED,
-              resultCode: 9999,
-              resultDesc: 'Account not found - requires manual reconciliation',
-              callbackPayload: rawPayload,
-              transactionDate: parseDarajaTimestamp(TransTime),
-            },
+            requestId: `audit.MPESA.C2B.REJECTED.${fallbackTenantId}.${TransID}`,
           });
-        } else {
-          await this.prisma.mpesaTransaction.create({
-            data: {
-              tenantId: fallbackTenantId,
-              type: MpesaTxType.C2B,
-              triggerSource: MpesaTriggerSource.MEMBER,
-              phoneNumber: MSISDN,
-              amount: amount.toDecimalPlaces(4).toString(),
-              accountReference: BillRefNumber,
-              mpesaReceiptNumber: TransID,
-              reference,
-              status: TransactionStatus.FAILED,
-              resultCode: 9999,
-              resultDesc: 'Account not found - requires manual reconciliation',
-              callbackPayload: rawPayload,
-              transactionDate: parseDarajaTimestamp(TransTime),
-            },
-          });
-        }
+        });
         return;
       }
 
@@ -332,13 +409,43 @@ export class MpesaCallbackProcessor extends WorkerHost {
             `accounts across tenants [${accounts.map((a) => a.tenantId).join(', ')}] ` +
             `TransID=${TransID} - requires manual reconciliation`,
         );
-        this.audit
-          .create({
+        await this.prisma.$transaction(async (tx) => {
+          const rejected = persistedTxId
+            ? await tx.mpesaTransaction.update({
+                where: { id: persistedTxId },
+                data: {
+                  tenantId: fallbackTenantId,
+                  status: TransactionStatus.FAILED,
+                  resultCode: 9998,
+                  resultDesc: 'Cross-tenant account collision - requires manual reconciliation',
+                  callbackPayload: rawPayload,
+                  transactionDate: parseDarajaTimestamp(TransTime),
+                },
+              })
+            : await tx.mpesaTransaction.create({
+                data: {
+                  tenantId: fallbackTenantId,
+                  type: MpesaTxType.C2B,
+                  triggerSource: MpesaTriggerSource.MEMBER,
+                  phoneNumber: MSISDN,
+                  amount: amount.toDecimalPlaces(4).toString(),
+                  accountReference: BillRefNumber,
+                  mpesaReceiptNumber: TransID,
+                  reference,
+                  status: TransactionStatus.FAILED,
+                  resultCode: 9998,
+                  resultDesc: 'Cross-tenant account collision - requires manual reconciliation',
+                  callbackPayload: rawPayload,
+                  transactionDate: parseDarajaTimestamp(TransTime),
+                },
+              });
+
+          await this.audit.createAtomic(tx, {
             tenantId: fallbackTenantId,
             actorId: 'SYSTEM',
             action: 'MPESA.C2B.REJECTED',
             entityType: 'MpesaTransaction',
-            entityId: persistedTxId ?? TransID,
+            entityId: rejected.id,
             newValue: { status: 'FAILED', resultCode: 9998 },
             metadata: {
               transId: TransID,
@@ -348,41 +455,9 @@ export class MpesaCallbackProcessor extends WorkerHost {
               rejection_reason: 'CROSS_TENANT_COLLISION',
               collidingTenantIds: accounts.map((a) => a.tenantId),
             },
-          })
-          .catch((e: unknown) =>
-            this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-          );
-        if (persistedTxId) {
-          await this.prisma.mpesaTransaction.update({
-            where: { id: persistedTxId },
-            data: {
-              tenantId: fallbackTenantId,
-              status: TransactionStatus.FAILED,
-              resultCode: 9998,
-              resultDesc: 'Cross-tenant account collision - requires manual reconciliation',
-              callbackPayload: rawPayload,
-              transactionDate: parseDarajaTimestamp(TransTime),
-            },
+            requestId: `audit.MPESA.C2B.REJECTED.${fallbackTenantId}.${TransID}`,
           });
-        } else {
-          await this.prisma.mpesaTransaction.create({
-            data: {
-              tenantId: fallbackTenantId,
-              type: MpesaTxType.C2B,
-              triggerSource: MpesaTriggerSource.MEMBER,
-              phoneNumber: MSISDN,
-              amount: amount.toDecimalPlaces(4).toString(),
-              accountReference: BillRefNumber,
-              mpesaReceiptNumber: TransID,
-              reference,
-              status: TransactionStatus.FAILED,
-              resultCode: 9998,
-              resultDesc: 'Cross-tenant account collision - requires manual reconciliation',
-              callbackPayload: rawPayload,
-              transactionDate: parseDarajaTimestamp(TransTime),
-            },
-          });
-        }
+        });
         return;
       }
 
@@ -449,7 +524,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
   }
   // ─── B2C result ───────────────────────────────────────────────────────────
 
-  private async handleB2cCallback(body: B2cCallbackPayload, jobId: string): Promise<void> {
+  private async handleB2cCallback(body: B2cCallbackPayload, _jobId: string): Promise<void> {
     const { ConversationID, ResultCode, ResultDesc, TransactionID, ResultParameters } = body.Result;
 
     const mpesaTx = await this.prisma.mpesaTransaction.findFirst({
@@ -469,7 +544,10 @@ export class MpesaCallbackProcessor extends WorkerHost {
     // unreconciled against it. The claim-then-act guards below (updateMany with a
     // status precondition) ensure whichever of {this callback, the recon sweep} acts
     // second on a given row safely no-ops instead of double-processing it.
-    if (mpesaTx.status !== TransactionStatus.PENDING && mpesaTx.status !== TransactionStatus.RECON_PENDING) {
+    if (
+      mpesaTx.status !== TransactionStatus.PENDING &&
+      mpesaTx.status !== TransactionStatus.RECON_PENDING
+    ) {
       this.logger.log(`B2C callback duplicate skipped: ${ConversationID} → ${mpesaTx.status}`);
       return;
     }
@@ -490,7 +568,10 @@ export class MpesaCallbackProcessor extends WorkerHost {
             // already won the race and reversed it (row is no longer PENDING/RECON_PENDING),
             // count is 0 and we must not call reverseTransaction() a second time.
             const claim = await tx.mpesaTransaction.updateMany({
-              where: { id: mpesaTx.id, status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] } },
+              where: {
+                id: mpesaTx.id,
+                status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+              },
               data: {
                 status: TransactionStatus.FAILED,
                 resultCode: ResultCode,
@@ -540,92 +621,90 @@ export class MpesaCallbackProcessor extends WorkerHost {
           );
         }
       } else if (mpesaTx.referenceType === 'FOSA_WITHDRAWAL' && mpesaTx.referenceId) {
-        // Legacy fallback for MpesaTransaction rows created before withdrawMpesa()
-        // started linking transactionId (see MpesaService.executeB2cDisbursement()).
-        // referenceId here is the FOSA Account.id, not a Transaction.id.
+        // Legacy rows may not have the original ledger Transaction.id needed for
+        // LedgerService.reverseTransaction(). Never guess by crediting Account.balance
+        // directly; leave the row in reconciliation for an operator to resolve.
         const txClient = this.prisma.direct ?? this.prisma;
-        await txClient.$transaction(
+        const claimed = await txClient.$transaction(
           async (tx) => {
             const account = await tx.account.findUnique({
               where: { id: mpesaTx.referenceId! },
+              select: { id: true, tenantId: true, memberId: true, accountNumber: true },
             });
 
-            if (account) {
-              const balanceBefore = new Decimal(account.balance.toString());
-              const amountToRefund = new Decimal(mpesaTx.amount.toString());
-              const balanceAfter = balanceBefore.plus(amountToRefund);
+            const claim = await tx.mpesaTransaction.updateMany({
+              where: {
+                id: mpesaTx.id,
+                status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+                OR: [
+                  { failureReason: null },
+                  { failureReason: { not: 'B2C_FAILURE_NO_LINKED_LEDGER_TRANSACTION' } },
+                ],
+              },
+              data: {
+                status: TransactionStatus.RECON_PENDING,
+                resultCode: ResultCode,
+                resultDesc: ResultDesc,
+                failureReason: 'B2C_FAILURE_NO_LINKED_LEDGER_TRANSACTION',
+                callbackPayload: rawPayload,
+              },
+            });
+            if (claim.count === 0) return false;
 
-              await tx.account.update({
-                where: { id: account.id },
-                data: { balance: balanceAfter.toString(), version: { increment: 1 } },
-              });
-
-              await tx.transaction.create({
-                data: {
-                  tenantId: mpesaTx.tenantId,
-                  accountId: account.id,
-                  type: TransactionType.DEPOSIT,
-                  status: TransactionStatus.COMPLETED,
-                  amount: amountToRefund.toString(),
-                  balanceBefore: balanceBefore.toString(),
-                  balanceAfter: balanceAfter.toString(),
-                  reference: `REFUND-B2C-${ConversationID}`,
-                  description: `B2C Disbursement Failed - Refund`,
-                  processedBy: 'SYSTEM',
-                },
-              });
-
-              await tx.mpesaTransaction.update({
-                where: { id: mpesaTx.id },
-                data: {
-                  status: TransactionStatus.FAILED,
-                  resultCode: ResultCode,
-                  resultDesc: ResultDesc,
-                  callbackPayload: rawPayload,
-                },
-              });
-
-              await this.audit.createAtomic(tx, {
-                tenantId: mpesaTx.tenantId,
-                actorId: 'SYSTEM',
-                action: 'MPESA.DISBURSEMENT.FAILED_REFUNDED',
-                entityType: 'MpesaTransaction',
-                entityId: mpesaTx.id,
-                newValue: {
-                  status: 'FAILED',
-                  resultCode: ResultCode,
-                  resultDesc: ResultDesc,
-                  refundedAmount: amountToRefund.toString(),
-                },
-                metadata: {
-                  conversationId: ConversationID,
-                  referenceId: mpesaTx.referenceId,
-                  amount: mpesaTx.amount,
-                  phone: maskPhone(mpesaTx.phoneNumber),
-                },
-              });
-            }
+            await this.audit.createAtomic(tx, {
+              tenantId: mpesaTx.tenantId,
+              actorId: 'SYSTEM',
+              action: 'MPESA.DISBURSEMENT.FAILURE_MANUAL_REVIEW_REQUIRED',
+              entityType: 'MpesaTransaction',
+              entityId: mpesaTx.id,
+              newValue: {
+                status: TransactionStatus.RECON_PENDING,
+                resultCode: ResultCode,
+                resultDesc: ResultDesc,
+                reason: 'NO_LINKED_LEDGER_TRANSACTION',
+              },
+              metadata: {
+                conversationId: ConversationID,
+                originatorConversationId: body.Result.OriginatorConversationID,
+                providerTransactionId: TransactionID,
+                referenceId: mpesaTx.referenceId,
+                originalReference: mpesaTx.reference,
+                accountId: account?.id ?? mpesaTx.referenceId,
+                accountNumber: account?.accountNumber ?? null,
+                memberId: account?.memberId ?? mpesaTx.memberId,
+                amount: mpesaTx.amount.toString(),
+                phone: maskPhone(mpesaTx.phoneNumber),
+                automaticReversalUnsafe: true,
+              },
+              requestId: `audit.MPESA.DISBURSEMENT.FAILURE_MANUAL_REVIEW_REQUIRED.${mpesaTx.tenantId}.${mpesaTx.id}`,
+            });
+            return true;
           },
           { isolationLevel: 'Serializable' },
         );
-        this.logger.warn(
-          `B2C failed and FOSA account refunded (legacy path) | conversation=${ConversationID} code=${ResultCode} desc=${ResultDesc}`,
-        );
+        if (claimed) {
+          this.logger.error(
+            `B2C failed but no linked ledger transaction exists; manual reconciliation required | ` +
+              `conversation=${ConversationID} mpesaTransactionId=${mpesaTx.id} code=${ResultCode}`,
+          );
+        }
       } else {
-        await this.prisma.mpesaTransaction.update({
-          where: { id: mpesaTx.id },
-          data: {
-            status: TransactionStatus.FAILED,
-            resultCode: ResultCode,
-            resultDesc: ResultDesc,
-            callbackPayload: rawPayload,
-          },
-        });
-        this.logger.warn(
-          `B2C failed | conversation=${ConversationID} code=${ResultCode} desc=${ResultDesc}`,
-        );
-        this.audit
-          .create({
+        await this.prisma.$transaction(async (tx) => {
+          const claim = await tx.mpesaTransaction.updateMany({
+            where: {
+              id: mpesaTx.id,
+              status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+            },
+            data: {
+              status: TransactionStatus.FAILED,
+              resultCode: ResultCode,
+              resultDesc: ResultDesc,
+              callbackPayload: rawPayload,
+            },
+          });
+          if (claim.count === 0) return;
+
+          await this.audit.createAtomic(tx, {
             tenantId: mpesaTx.tenantId,
             actorId: 'SYSTEM',
             action: 'MPESA.DISBURSEMENT.FAILED',
@@ -635,13 +714,15 @@ export class MpesaCallbackProcessor extends WorkerHost {
             metadata: {
               conversationId: ConversationID,
               referenceId: mpesaTx.referenceId,
-              amount: mpesaTx.amount,
+              amount: mpesaTx.amount.toString(),
               phone: maskPhone(mpesaTx.phoneNumber),
             },
-          })
-          .catch((e: unknown) =>
-            this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-          );
+            requestId: `audit.MPESA.DISBURSEMENT.FAILED.${mpesaTx.tenantId}.${mpesaTx.id}`,
+          });
+        });
+        this.logger.warn(
+          `B2C failed | conversation=${ConversationID} code=${ResultCode} desc=${ResultDesc}`,
+        );
       }
       return;
     }
@@ -654,7 +735,10 @@ export class MpesaCallbackProcessor extends WorkerHost {
       const txClient = this.prisma.direct ?? this.prisma;
       const claimed = await txClient.$transaction(async (tx) => {
         const claim = await tx.mpesaTransaction.updateMany({
-          where: { id: mpesaTx.id, status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] } },
+          where: {
+            id: mpesaTx.id,
+            status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+          },
           data: {
             status: TransactionStatus.COMPLETED,
             resultCode: ResultCode,
@@ -692,19 +776,21 @@ export class MpesaCallbackProcessor extends WorkerHost {
             `double-credited | conversation=${ConversationID} mpesaTransactionId=${mpesaTx.id} ` +
             `amount=${amount.toFixed(2)} phone=${maskPhone(mpesaTx.phoneNumber)}`,
         );
-        await this.audit
-          .create({
-            tenantId: mpesaTx.tenantId,
-            actorId: 'SYSTEM',
-            action: 'MPESA.WITHDRAWAL.LATE_SUCCESS_AFTER_AUTO_REFUND',
-            entityType: 'MpesaTransaction',
-            entityId: mpesaTx.id,
-            newValue: { receipt, amount: amount.toFixed(4) },
-            metadata: { conversationId: ConversationID, phone: maskPhone(mpesaTx.phoneNumber) },
-          })
-          .catch((e: unknown) =>
-            this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-          );
+        await this.createAuditOnce({
+          tenantId: mpesaTx.tenantId,
+          actorId: 'SYSTEM',
+          action: 'MPESA.WITHDRAWAL.LATE_SUCCESS_AFTER_AUTO_REFUND',
+          entityType: 'MpesaTransaction',
+          entityId: mpesaTx.id,
+          newValue: { receipt, amount: amount.toFixed(4) },
+          metadata: {
+            conversationId: ConversationID,
+            phone: maskPhone(mpesaTx.phoneNumber),
+            priorStatus: mpesaTx.status,
+            priorFailureReason: mpesaTx.failureReason,
+          },
+          requestId: `audit.MPESA.WITHDRAWAL.LATE_SUCCESS_AFTER_AUTO_REFUND.${mpesaTx.tenantId}.${mpesaTx.id}.${receipt}`,
+        });
       }
     } else if (mpesaTx.loanId) {
       await this.postDisbursementLedger({
@@ -791,31 +877,28 @@ export class MpesaCallbackProcessor extends WorkerHost {
         transactionDate: params.transactionDate,
       });
       await this.cache.invalidateTenantDashboard(params.tenantId);
-      this.audit
-        .create({
-          tenantId: params.tenantId,
-          actorId: 'SYSTEM',
-          action: 'MPESA.LOAN_REPAYMENT.COMPLETED',
-          entityType: 'MpesaTransaction',
-          entityId: params.mpesaTxId ?? result.loanId,
-          newValue: {
-            status: 'COMPLETED',
-            receipt: params.receipt,
-            amount: params.amount.toFixed(4),
-            loanId: result.loanId,
-            loanNumber: result.loanNumber,
-            isFullyPaid: result.status === LoanStatus.FULLY_PAID,
-          },
-          metadata: {
-            reference,
-            accountReference: params.accountReference,
-            memberId: params.memberId,
-            transactionDate: params.transactionDate.toISOString(),
-          },
-        })
-        .catch((e: unknown) =>
-          this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-        );
+      await this.createAuditOnce({
+        tenantId: params.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MPESA.LOAN_REPAYMENT.COMPLETED',
+        entityType: 'MpesaTransaction',
+        entityId: params.mpesaTxId ?? result.loanId,
+        newValue: {
+          status: 'COMPLETED',
+          receipt: params.receipt,
+          amount: params.amount.toFixed(4),
+          loanId: result.loanId,
+          loanNumber: result.loanNumber,
+          isFullyPaid: result.status === LoanStatus.FULLY_PAID,
+        },
+        metadata: {
+          reference,
+          accountReference: params.accountReference,
+          memberId: params.memberId,
+          transactionDate: params.transactionDate.toISOString(),
+        },
+        requestId: `audit.MPESA.LOAN_REPAYMENT.COMPLETED.${params.tenantId}.${params.receipt}`,
+      });
       this.emitDomainEvent(DOMAIN_EVENTS.MPESA.REPAYMENT_SUCCESS, {
         tenantId: params.tenantId,
         memberId: params.memberId ?? 'UNKNOWN',
@@ -891,6 +974,27 @@ export class MpesaCallbackProcessor extends WorkerHost {
           });
         }
 
+        await this.audit.createAtomic(tx, {
+          tenantId: params.tenantId,
+          actorId: 'SYSTEM',
+          action: 'MPESA.DEPOSIT.COMPLETED',
+          entityType: 'MpesaTransaction',
+          entityId: params.mpesaTxId ?? ledgerTx.id,
+          oldValue: { status: 'PENDING', balanceBefore: ledgerTx.balanceBefore.toString() },
+          newValue: {
+            status: 'COMPLETED',
+            balanceAfter: ledgerTx.balanceAfter.toString(),
+            receipt: params.receipt,
+            amount: params.amount.toFixed(4),
+          },
+          metadata: {
+            reference,
+            accountReference: params.accountReference,
+            memberId: params.memberId,
+            transactionDate: params.transactionDate.toISOString(),
+          },
+        });
+
         return {
           journalEntryId: journalEntry.id,
           balanceBefore: ledgerTx.balanceBefore.toString(),
@@ -913,33 +1017,6 @@ export class MpesaCallbackProcessor extends WorkerHost {
     // audit event never rolls back the ledger entry.
     if (auditData) {
       await this.cache.invalidateTenantDashboard(params.tenantId);
-      const { action, entityId, balanceBefore, balanceAfter, loanId, loanNumber, isFullyPaid } =
-        auditData;
-      this.audit
-        .create({
-          tenantId: params.tenantId,
-          actorId: 'SYSTEM',
-          action,
-          entityType: 'MpesaTransaction',
-          entityId,
-          oldValue: { status: 'PENDING', balanceBefore },
-          newValue: {
-            status: 'COMPLETED',
-            balanceAfter,
-            receipt: params.receipt,
-            amount: params.amount.toFixed(4),
-            ...(loanId ? { loanId, loanNumber, isFullyPaid } : {}),
-          },
-          metadata: {
-            reference,
-            accountReference: params.accountReference,
-            memberId: params.memberId,
-            transactionDate: params.transactionDate.toISOString(),
-          },
-        })
-        .catch((e: unknown) =>
-          this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-        );
       this.emitDomainEvent(DOMAIN_EVENTS.MPESA.DEPOSIT_SUCCESS, {
         tenantId: params.tenantId,
         memberId: params.memberId ?? 'UNKNOWN',
@@ -1047,31 +1124,28 @@ export class MpesaCallbackProcessor extends WorkerHost {
 
     if (auditData) {
       await this.cache.invalidateTenantDashboard(params.tenantId);
-      this.audit
-        .create({
-          tenantId: params.tenantId,
-          actorId: 'SYSTEM',
-          action: 'MPESA.DISBURSEMENT.COMPLETED',
-          entityType: 'MpesaTransaction',
-          entityId: params.mpesaTxId,
-          oldValue: { status: 'PENDING', balanceBefore: auditData.balanceBefore },
-          newValue: {
-            status: 'COMPLETED',
-            balanceAfter: auditData.balanceAfter,
-            receipt: params.receipt,
-            amount: params.amount.toFixed(4),
-            loanMarkedDisbursed: auditData.loanStatusChanged,
-          },
-          metadata: {
-            reference,
-            loanId: params.loanId,
-            memberId: params.memberId,
-            transactionDate: params.transactionDate.toISOString(),
-          },
-        })
-        .catch((e: unknown) =>
-          this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
-        );
+      await this.createAuditOnce({
+        tenantId: params.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MPESA.DISBURSEMENT.COMPLETED',
+        entityType: 'MpesaTransaction',
+        entityId: params.mpesaTxId,
+        oldValue: { status: 'PENDING', balanceBefore: auditData.balanceBefore },
+        newValue: {
+          status: 'COMPLETED',
+          balanceAfter: auditData.balanceAfter,
+          receipt: params.receipt,
+          amount: params.amount.toFixed(4),
+          loanMarkedDisbursed: auditData.loanStatusChanged,
+        },
+        metadata: {
+          reference,
+          loanId: params.loanId,
+          memberId: params.memberId,
+          transactionDate: params.transactionDate.toISOString(),
+        },
+        requestId: `audit.MPESA.DISBURSEMENT.COMPLETED.${params.tenantId}.${params.mpesaTxId}`,
+      });
     }
   }
 

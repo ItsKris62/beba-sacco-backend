@@ -109,6 +109,20 @@ export default registerAs('app', () => ({
     withdrawalReconGraceMinutes: parseInt(process.env.MPESA_WITHDRAWAL_RECON_GRACE_MINUTES || '30', 10),
   },
 
+  // Mwaloni wallet B2C provider for FOSA withdrawals to M-Pesa enabled lines.
+  // This is intentionally separate from Daraja C2B/STK settings so deposits remain untouched.
+  mwaloni: {
+    enabled: process.env.MWALONI_ENABLED === 'true',
+    env: process.env.MWALONI_ENV || 'sandbox',
+    debug: process.env.MWALONI_DEBUG === 'true',
+    urlProduction: process.env.MWALONI_URL_PRODUCTION || 'https://wallet.mwaloni.com/api/',
+    urlSandbox: process.env.MWALONI_URL_SANDBOX || 'https://wallet-stg.mwaloni.com/api/',
+    serviceId: process.env.MWALONI_SERVICE_ID,
+    username: process.env.MWALONI_USERNAME,
+    password: process.env.MWALONI_PASSWORD,
+    apiKey: process.env.MWALONI_API_KEY,
+  },
+
   audit: {
     hmacSecret: process.env.AUDIT_HMAC_SECRET,
   },

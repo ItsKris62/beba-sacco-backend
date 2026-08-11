@@ -4,6 +4,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Job, Queue } from 'bullmq';
 import { QUEUE_NAMES, MpesaDisbursementJobPayload } from '../../queue/queue.constants';
 import { MpesaService } from '../mpesa.service';
+import { MpesaPayoutOutboxService } from '../mpesa-payout-outbox.service';
 
 /**
  * Processes B2C loan disbursement jobs.
@@ -31,6 +32,7 @@ export class MpesaDisbursementProcessor extends WorkerHost {
 
   constructor(
     private readonly mpesaService: MpesaService,
+    private readonly payoutOutbox: MpesaPayoutOutboxService,
     @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT_DLQ)
     private readonly dlq: Queue,
   ) {
@@ -38,8 +40,18 @@ export class MpesaDisbursementProcessor extends WorkerHost {
   }
 
   async process(job: Job<MpesaDisbursementJobPayload>): Promise<void> {
-    const { referenceId, referenceType, tenantId, phone, amount, triggeredBy, sourceTransactionId } = job.data;
-    this.logger.log(`B2C disbursement job | job=${job.id} refType=${referenceType} refId=${referenceId} tenant=${tenantId}`);
+    const {
+      referenceId,
+      referenceType,
+      tenantId,
+      phone,
+      amount,
+      triggeredBy,
+      sourceTransactionId,
+    } = job.data;
+    this.logger.log(
+      `B2C disbursement job | job=${job.id} refType=${referenceType} refId=${referenceId} tenant=${tenantId}`,
+    );
 
     const result = await this.mpesaService.executeB2cDisbursement(
       referenceId,
@@ -50,6 +62,12 @@ export class MpesaDisbursementProcessor extends WorkerHost {
       triggeredBy,
       sourceTransactionId,
     );
+
+    await this.payoutOutbox.markDelivered({
+      payoutIntentId: job.data.payoutIntentId,
+      sourceTransactionId,
+      mpesaTransactionId: result.mpesaTxId,
+    });
 
     this.logger.log(
       `B2C initiated | refId=${referenceId} conversation=${result.conversationId} mpesaTx=${result.mpesaTxId}`,
@@ -76,5 +94,15 @@ export class MpesaDisbursementProcessor extends WorkerHost {
       },
       { removeOnFail: { age: 86400, count: 50 }, removeOnComplete: { age: 7200, count: 100 } },
     );
+
+    await this.payoutOutbox.markDeadLetter({
+      payoutIntentId: job.data.payoutIntentId,
+      sourceTransactionId: job.data.sourceTransactionId,
+      tenantId: job.data.tenantId,
+      queueJobId: job.id,
+      retryCount: job.attemptsMade ?? 0,
+      lastError: job.failedReason,
+      payload: job.data,
+    });
   }
 }

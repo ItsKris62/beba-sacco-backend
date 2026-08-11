@@ -9,11 +9,19 @@ import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
-import { Prisma, MpesaTxType, MpesaTriggerSource, TransactionStatus } from '@prisma/client';
+import { createHash } from 'crypto';
+import {
+  Prisma,
+  MpesaTxType,
+  MpesaTriggerSource,
+  OutboxStatus,
+  TransactionStatus,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
 import { DarajaClientService } from './daraja-client.service';
+import { MwaloniClientService, MwaloniResponse } from './mwaloni-client.service';
 import { MpesaException, MpesaConfigException } from './exceptions/mpesa.exceptions';
 import { MemberDepositDto, DepositPurpose } from './dto/deposit-request.dto';
 import { isStkCallback, isC2bCallback, isB2cCallback } from './dto/mpesa-callback.dto';
@@ -28,11 +36,14 @@ import {
 import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
 import { LoanRepaymentService } from '../loans/loan-repayment.service';
 import { MetricsService } from '../metrics/metrics.service';
+import { LedgerService } from '../accounting/ledger.service';
 
 // ─── Redis key helpers ────────────────────────────────────────────────────────
 
 const stkRateLimitKey = (tenantId: string, memberId: string) =>
   `mpesa:stk:rl:${tenantId}:${memberId}`;
+
+const CALLBACK_RETRY_DELAY_MS = 60_000;
 
 function secondsUntilMidnightEAT(): number {
   const now = new Date();
@@ -66,6 +77,8 @@ export class MpesaService {
     @InjectQueue(QUEUE_NAMES.MPESA_CALLBACK_DLQ)
     private readonly callbackDlqQueue: Queue,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional() private readonly mwaloni?: MwaloniClientService,
+    @Optional() private readonly ledger?: LedgerService,
   ) {}
 
   // ─── Member Deposit (STK Push) ──────────────────────────────────────────
@@ -322,6 +335,56 @@ export class MpesaService {
       accountReference = account.accountNumber;
     }
 
+    if (sourceTransactionId) {
+      const existing = await this.prisma.mpesaTransaction.findUnique({
+        where: { transactionId: sourceTransactionId },
+        select: {
+          id: true,
+          conversationId: true,
+          referenceId: true,
+          referenceType: true,
+          tenantId: true,
+          status: true,
+          reconciliationDueAt: true,
+        },
+      });
+      if (existing?.conversationId) {
+        if (
+          existing.status === TransactionStatus.PENDING ||
+          existing.status === TransactionStatus.RECON_PENDING
+        ) {
+          await this.scheduleB2cTimeoutCheck({
+            referenceId: existing.referenceId ?? referenceId,
+            referenceType: (existing.referenceType ?? referenceType) as
+              | 'LOAN_DISBURSEMENT'
+              | 'FOSA_WITHDRAWAL',
+            tenantId: existing.tenantId,
+            conversationId: existing.conversationId,
+          });
+        }
+        return { conversationId: existing.conversationId, mpesaTxId: existing.id };
+      }
+      if (existing) {
+        throw new BadRequestException(
+          'B2C dispatch is already in an ambiguous provider state and requires reconciliation',
+        );
+      }
+    }
+
+    if (this.mwaloni?.isEnabled()) {
+      return this.executeMwaloniMobilePayout({
+        referenceId,
+        referenceType,
+        tenantId,
+        memberId,
+        accountReference,
+        phone,
+        amount,
+        triggeredBy,
+        sourceTransactionId,
+      });
+    }
+
     const b2cShortcode = this.config.get<string>('app.mpesa.b2cShortcode', '600000');
     const initiatorName = this.config.get<string>('app.mpesa.initiatorName', 'testapi');
     const securityCredential = this.config.get<string>('app.mpesa.securityCredential', '');
@@ -331,6 +394,41 @@ export class MpesaService {
     if (!securityCredential) {
       throw new MpesaConfigException('MPESA_SECURITY_CREDENTIAL');
     }
+
+    const reconciliationDueAt = new Date(Date.now() + 30 * 60 * 1000);
+    const pendingReference = sourceTransactionId
+      ? buildMpesaRef.b2c(sourceTransactionId)
+      : buildMpesaRef.b2c(`${referenceType}-${referenceId}`);
+
+    const pendingMpesaTx = sourceTransactionId
+      ? await this.prisma.mpesaTransaction.create({
+          data: {
+            tenantId,
+            memberId,
+            referenceType,
+            referenceId,
+            transactionId: sourceTransactionId,
+            type: MpesaTxType.B2C,
+            triggerSource:
+              triggeredBy === 'SYSTEM' ? MpesaTriggerSource.SYSTEM : MpesaTriggerSource.OFFICER,
+            phoneNumber: phone,
+            amount: new Decimal(amount).toDecimalPlaces(4).toString(),
+            accountReference,
+            description: `${referenceType === 'FOSA_WITHDRAWAL' ? 'FOSA Withdrawal' : 'Loan disbursement'}`,
+            reference: pendingReference,
+            status: TransactionStatus.PENDING,
+            reconciliationDueAt,
+            callbackPayload: {
+              provider: 'DARAJA',
+              dispatchState: 'REQUESTING_PROVIDER',
+              referenceType,
+              referenceId,
+              sourceTransactionId,
+              requestedAt: new Date().toISOString(),
+            } satisfies Prisma.InputJsonObject,
+          },
+        })
+      : null;
 
     const darajaResp = await this.daraja.initiateB2C({
       initiatorName,
@@ -350,6 +448,40 @@ export class MpesaService {
     });
 
     const reference = buildMpesaRef.b2c(darajaResp.ConversationID);
+
+    if (pendingMpesaTx) {
+      const mpesaTx = await this.prisma.mpesaTransaction.update({
+        where: { id: pendingMpesaTx.id },
+        data: {
+          conversationId: darajaResp.ConversationID,
+          originatorConversationId: darajaResp.OriginatorConversationID,
+          reference,
+          callbackPayload: {
+            provider: 'DARAJA',
+            dispatchState: 'PROVIDER_ACCEPTED',
+            response: this.toJsonObject(darajaResp),
+            acceptedAt: new Date().toISOString(),
+          } satisfies Prisma.InputJsonObject,
+        },
+      });
+
+      this.logger.log(
+        `B2C initiated | tenant=${tenantId} refType=${referenceType} refId=${referenceId} ` +
+          `phone=${maskPhone(phone)} conversation=${darajaResp.ConversationID} amount=${amount}`,
+      );
+
+      await this.scheduleB2cTimeoutCheck({
+        referenceId,
+        referenceType,
+        tenantId,
+        conversationId: darajaResp.ConversationID,
+      });
+
+      return {
+        conversationId: darajaResp.ConversationID,
+        mpesaTxId: mpesaTx.id,
+      };
+    }
 
     const mpesaTx = await this.prisma.mpesaTransaction.create({
       data: {
@@ -372,6 +504,7 @@ export class MpesaService {
         description: `${referenceType === 'FOSA_WITHDRAWAL' ? 'FOSA Withdrawal' : 'Loan disbursement'}`,
         reference,
         status: TransactionStatus.PENDING,
+        reconciliationDueAt,
       },
     });
 
@@ -380,16 +513,12 @@ export class MpesaService {
         `phone=${maskPhone(phone)} conversation=${darajaResp.ConversationID} amount=${amount}`,
     );
 
-    await this.b2cTimeoutQueue.add(
-      'b2c-timeout-check',
-      { referenceId, referenceType, tenantId, conversationId: darajaResp.ConversationID },
-      {
-        delay: 30 * 60 * 1000,
-        jobId: `b2c-timeout.${darajaResp.ConversationID}`,
-        removeOnComplete: true,
-        removeOnFail: { age: 86400, count: 50 },
-      },
-    );
+    await this.scheduleB2cTimeoutCheck({
+      referenceId,
+      referenceType,
+      tenantId,
+      conversationId: darajaResp.ConversationID,
+    });
 
     return {
       conversationId: darajaResp.ConversationID,
@@ -399,6 +528,407 @@ export class MpesaService {
 
   // ─── Callback enqueueing ────────────────────────────────────────────────
 
+  private async executeMwaloniMobilePayout(params: {
+    referenceId: string;
+    referenceType: 'LOAN_DISBURSEMENT' | 'FOSA_WITHDRAWAL';
+    tenantId: string;
+    memberId: string;
+    accountReference: string;
+    phone: string;
+    amount: number;
+    triggeredBy: string;
+    sourceTransactionId?: string;
+  }): Promise<{ conversationId: string; mpesaTxId: string }> {
+    if (!this.mwaloni) {
+      throw new MpesaConfigException('MWALONI_CLIENT');
+    }
+
+    const orderNumber = this.buildMwaloniOrderNumber(params);
+    const reference = buildMpesaRef.b2c(orderNumber);
+    const existing = await this.prisma.mpesaTransaction.findUnique({ where: { reference } });
+
+    if (existing) {
+      if (
+        existing.status === TransactionStatus.PENDING ||
+        existing.status === TransactionStatus.RECON_PENDING
+      ) {
+        await this.refreshMwaloniB2cStatus(existing.id);
+      }
+      return { conversationId: orderNumber, mpesaTxId: existing.id };
+    }
+
+    const reconciliationDueAt = new Date(Date.now() + 30 * 60 * 1000);
+    const requestPayload = {
+      provider: 'MWALONI',
+      orderNumber,
+      request: {
+        channel: 'daraja-mobile',
+        serviceId: this.config.get<string>('app.mwaloni.serviceId'),
+        accountNumber: maskPhone(params.phone),
+        amount: params.amount,
+        accountReference: params.accountReference,
+      },
+    } satisfies Prisma.InputJsonObject;
+
+    const mpesaTx = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.mpesaTransaction.create({
+        data: {
+          tenantId: params.tenantId,
+          memberId: params.memberId,
+          referenceType: params.referenceType,
+          referenceId: params.referenceId,
+          ...(params.sourceTransactionId && { transactionId: params.sourceTransactionId }),
+          type: MpesaTxType.B2C,
+          triggerSource:
+            params.triggeredBy === 'SYSTEM'
+              ? MpesaTriggerSource.SYSTEM
+              : MpesaTriggerSource.OFFICER,
+          conversationId: orderNumber,
+          phoneNumber: params.phone,
+          amount: new Decimal(params.amount).toDecimalPlaces(4).toString(),
+          accountReference: params.accountReference,
+          description: 'FOSA Withdrawal via Mwaloni',
+          reference,
+          status: TransactionStatus.PENDING,
+          reconciliationDueAt,
+          callbackPayload: requestPayload,
+        },
+      });
+
+      await this.audit.createAtomic(tx, {
+        tenantId: params.tenantId,
+        actorId: params.triggeredBy,
+        action: 'MWALONI.B2C.INITIATED',
+        entityType: 'MpesaTransaction',
+        entityId: row.id,
+        newValue: {
+          status: 'PENDING',
+          provider: 'MWALONI',
+          orderNumber,
+          amount: params.amount,
+        },
+        metadata: {
+          referenceType: params.referenceType,
+          referenceId: params.referenceId,
+          transactionId: params.sourceTransactionId,
+          memberId: params.memberId,
+          phone: maskPhone(params.phone),
+        },
+      });
+
+      return row;
+    });
+
+    const response = await this.mwaloni.sendMobile({
+      orderNumber,
+      phoneNumber: params.phone,
+      amount: params.amount,
+      description: `FOSA withdrawal ${params.accountReference}`.slice(0, 100),
+    });
+
+    await this.applyMwaloniStatus(mpesaTx.id, response, 'send-money');
+
+    this.logger.log(
+      `Mwaloni B2C submitted | tenant=${params.tenantId} refType=${params.referenceType} ` +
+        `refId=${params.referenceId} order=${orderNumber} phone=${maskPhone(params.phone)} amount=${params.amount}`,
+    );
+
+    await this.scheduleB2cTimeoutCheck({
+      referenceId: params.referenceId,
+      referenceType: params.referenceType,
+      tenantId: params.tenantId,
+      conversationId: orderNumber,
+    });
+
+    return { conversationId: orderNumber, mpesaTxId: mpesaTx.id };
+  }
+
+  async refreshMwaloniB2cStatus(mpesaTransactionId: string): Promise<{
+    refreshed: boolean;
+    terminal: boolean;
+    status?: TransactionStatus;
+  }> {
+    if (!this.mwaloni?.isEnabled()) {
+      return { refreshed: false, terminal: false };
+    }
+
+    const mpesaTx = await this.prisma.mpesaTransaction.findUnique({
+      where: { id: mpesaTransactionId },
+      select: { id: true, conversationId: true, status: true, type: true },
+    });
+    if (!mpesaTx || mpesaTx.type !== MpesaTxType.B2C || !mpesaTx.conversationId) {
+      return { refreshed: false, terminal: false };
+    }
+    if (
+      mpesaTx.status !== TransactionStatus.PENDING &&
+      mpesaTx.status !== TransactionStatus.RECON_PENDING
+    ) {
+      return { refreshed: false, terminal: true, status: mpesaTx.status };
+    }
+
+    const response = await this.mwaloni.getStatus(mpesaTx.conversationId);
+    return this.applyMwaloniStatus(mpesaTx.id, response, 'get-transaction-status');
+  }
+
+  async refreshMwaloniB2cStatusByConversation(
+    tenantId: string,
+    conversationId: string,
+  ): Promise<{ refreshed: boolean; terminal: boolean; status?: TransactionStatus }> {
+    const mpesaTx = await this.prisma.mpesaTransaction.findFirst({
+      where: { tenantId, conversationId, type: MpesaTxType.B2C },
+      select: { id: true },
+    });
+    if (!mpesaTx) return { refreshed: false, terminal: false };
+    return this.refreshMwaloniB2cStatus(mpesaTx.id);
+  }
+
+  private async applyMwaloniStatus(
+    mpesaTransactionId: string,
+    response: MwaloniResponse,
+    source: 'send-money' | 'get-transaction-status',
+  ): Promise<{ refreshed: boolean; terminal: boolean; status?: TransactionStatus }> {
+    const status = String(response.status ?? '').trim();
+    const message = response.message ?? 'Mwaloni response received';
+    const payload = {
+      provider: 'MWALONI',
+      source,
+      response: this.toJsonObject(response),
+      checkedAt: new Date().toISOString(),
+    } satisfies Prisma.InputJsonObject;
+
+    if (this.isMwaloniSuccess(status)) {
+      await this.prisma.$transaction(async (tx) => {
+        const claim = await tx.mpesaTransaction.updateMany({
+          where: {
+            id: mpesaTransactionId,
+            status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+          },
+          data: {
+            status: TransactionStatus.COMPLETED,
+            resultCode: 0,
+            resultDesc: message,
+            callbackPayload: payload,
+            transactionDate: new Date(),
+          },
+        });
+        const row = await tx.mpesaTransaction.findUniqueOrThrow({
+          where: { id: mpesaTransactionId },
+        });
+        if (claim.count > 0) {
+          await this.audit.createAtomic(tx, {
+            tenantId: row.tenantId,
+            actorId: 'SYSTEM',
+            action: 'MWALONI.B2C.COMPLETED',
+            entityType: 'MpesaTransaction',
+            entityId: row.id,
+            newValue: {
+              status: row.status,
+              resultCode: row.resultCode,
+              resultDesc: row.resultDesc,
+            },
+            metadata: {
+              provider: 'MWALONI',
+              orderNumber: row.conversationId,
+              referenceId: row.referenceId,
+              transactionId: row.transactionId,
+              memberId: row.memberId,
+              amount: row.amount.toString(),
+              phone: maskPhone(row.phoneNumber),
+              providerStatus: response.status,
+            },
+          });
+        }
+        return row;
+      });
+
+      return { refreshed: true, terminal: true, status: TransactionStatus.COMPLETED };
+    }
+
+    if (this.isMwaloniPending(status)) {
+      await this.prisma.mpesaTransaction.update({
+        where: { id: mpesaTransactionId },
+        data: {
+          resultDesc: message,
+          callbackPayload: payload,
+        },
+      });
+      return { refreshed: true, terminal: false, status: TransactionStatus.PENDING };
+    }
+
+    const resultCode = /^\d+$/.test(status) ? Number(status) : null;
+    await this.failMwaloniTransaction(mpesaTransactionId, {
+      resultCode,
+      resultDesc: message,
+      failureReason: status ? `MWALONI_STATUS_${status}` : 'MWALONI_STATUS_UNKNOWN',
+      payload,
+    });
+
+    return { refreshed: true, terminal: true, status: TransactionStatus.FAILED };
+  }
+
+  private async failMwaloniTransaction(
+    mpesaTransactionId: string,
+    params: {
+      resultCode: number | null;
+      resultDesc: string;
+      failureReason: string;
+      payload: Prisma.InputJsonObject;
+    },
+  ) {
+    const txClient = this.prisma.directClient ?? this.prisma;
+    return txClient.$transaction(
+      async (tx) => {
+        const mpesaTx = await tx.mpesaTransaction.findUnique({
+          where: { id: mpesaTransactionId },
+        });
+        if (!mpesaTx) {
+          throw new NotFoundException('Mwaloni B2C transaction not found');
+        }
+
+        if (
+          mpesaTx.status !== TransactionStatus.PENDING &&
+          mpesaTx.status !== TransactionStatus.RECON_PENDING
+        ) {
+          return mpesaTx;
+        }
+
+        const updated = await tx.mpesaTransaction.update({
+          where: { id: mpesaTx.id },
+          data: {
+            status: TransactionStatus.FAILED,
+            resultCode: params.resultCode,
+            resultDesc: params.resultDesc,
+            failureReason: params.failureReason,
+            callbackPayload: params.payload,
+          },
+        });
+
+        if (mpesaTx.referenceType === 'FOSA_WITHDRAWAL' && mpesaTx.transactionId && this.ledger) {
+          await this.ledger.reverseTransaction({
+            tenantId: mpesaTx.tenantId,
+            originalTransactionId: mpesaTx.transactionId,
+            reason: `Mwaloni B2C failed: ${params.resultDesc}`,
+            tx,
+          });
+        }
+
+        await this.audit.createAtomic(tx, {
+          tenantId: mpesaTx.tenantId,
+          actorId: 'SYSTEM',
+          action: 'MWALONI.B2C.FAILED_REFUNDED',
+          entityType: 'MpesaTransaction',
+          entityId: mpesaTx.id,
+          oldValue: { status: mpesaTx.status },
+          newValue: {
+            status: TransactionStatus.FAILED,
+            resultCode: params.resultCode,
+            resultDesc: params.resultDesc,
+            failureReason: params.failureReason,
+          },
+          metadata: {
+            provider: 'MWALONI',
+            orderNumber: mpesaTx.conversationId,
+            referenceId: mpesaTx.referenceId,
+            transactionId: mpesaTx.transactionId,
+            memberId: mpesaTx.memberId,
+            amount: mpesaTx.amount.toString(),
+            phone: maskPhone(mpesaTx.phoneNumber),
+          },
+        });
+
+        return updated;
+      },
+      { isolationLevel: 'Serializable' },
+    );
+  }
+
+  private async auditMwaloniTerminal(
+    mpesaTx: {
+      id: string;
+      tenantId: string;
+      memberId: string | null;
+      referenceId: string | null;
+      transactionId: string | null;
+      phoneNumber: string;
+      amount: Decimal;
+      conversationId: string | null;
+      status: TransactionStatus;
+      resultCode: number | null;
+      resultDesc: string | null;
+    },
+    action: string,
+    response: MwaloniResponse,
+  ): Promise<void> {
+    await this.audit
+      .create({
+        tenantId: mpesaTx.tenantId,
+        actorId: 'SYSTEM',
+        action,
+        entityType: 'MpesaTransaction',
+        entityId: mpesaTx.id,
+        newValue: {
+          status: mpesaTx.status,
+          resultCode: mpesaTx.resultCode,
+          resultDesc: mpesaTx.resultDesc,
+        },
+        metadata: {
+          provider: 'MWALONI',
+          orderNumber: mpesaTx.conversationId,
+          referenceId: mpesaTx.referenceId,
+          transactionId: mpesaTx.transactionId,
+          memberId: mpesaTx.memberId,
+          amount: mpesaTx.amount.toString(),
+          phone: maskPhone(mpesaTx.phoneNumber),
+          providerStatus: response.status,
+        },
+      })
+      .catch((e: unknown) =>
+        this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
+      );
+  }
+
+  private buildMwaloniOrderNumber(params: {
+    referenceId: string;
+    sourceTransactionId?: string;
+  }): string {
+    if (params.sourceTransactionId) return `MWD-${params.sourceTransactionId}`;
+    return `MWD-${params.referenceId}-${Date.now()}`;
+  }
+
+  private isMwaloniSuccess(status: string): boolean {
+    return status === '00';
+  }
+
+  private isMwaloniPending(status: string): boolean {
+    return ['02', '03', 'PENDING', 'PROCESSING', 'QUEUED', 'IN_PROGRESS'].includes(
+      status.toUpperCase(),
+    );
+  }
+
+  private toJsonObject(value: unknown): Prisma.InputJsonObject {
+    return JSON.parse(JSON.stringify(value ?? {})) as Prisma.InputJsonObject;
+  }
+
+  private async scheduleB2cTimeoutCheck(params: {
+    referenceId: string;
+    referenceType: 'LOAN_DISBURSEMENT' | 'FOSA_WITHDRAWAL';
+    tenantId: string;
+    conversationId: string;
+  }): Promise<void> {
+    try {
+      await this.b2cTimeoutQueue.add('b2c-timeout-check', params, {
+        delay: 30 * 60 * 1000,
+        jobId: `b2c-timeout.${params.conversationId}`,
+        removeOnComplete: true,
+        removeOnFail: { age: 86400, count: 50 },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `B2C timeout job scheduling failed; DB reconciliationDueAt remains authoritative | conversation=${params.conversationId} error=${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async enqueueCallback(
     payload: Record<string, unknown>,
     callbackType: MpesaCallbackJobPayload['callbackType'],
@@ -406,105 +936,294 @@ export class MpesaService {
     tenantId = 'resolve-in-processor',
     correlationId?: string,
   ): Promise<void> {
-    const mpesaTransactionId = await this.persistCallbackPayload(payload, callbackType, tenantId);
-    const jobId = `${callbackType.toLowerCase().replace('_', '-')}-${uniqueId}`;
+    const inbox = await this.persistCallbackPayload(
+      payload,
+      callbackType,
+      uniqueId,
+      tenantId,
+      correlationId,
+    );
+    await this.enqueueCallbackInbox(inbox.id);
+  }
 
-    await this.callbackQueue.add(
-      'process-callback',
-      { tenantId, correlationId, mpesaTransactionId, callbackType },
-      {
-        jobId,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 3000 },
-        removeOnComplete: { age: 3600, count: 200 },
-        removeOnFail: { age: 604800, count: 100 },
+  async dispatchPendingCallbackInbox(limit = 50): Promise<number> {
+    const now = new Date();
+    const staleProcessingCutoff = new Date(Date.now() - 5 * 60_000);
+    const rows = await this.prisma.mpesaCallbackInbox.findMany({
+      where: {
+        OR: [
+          {
+            status: { in: [OutboxStatus.PENDING, OutboxStatus.FAILED] },
+            OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }],
+          },
+          {
+            status: OutboxStatus.PROCESSING,
+            updatedAt: { lt: staleProcessingCutoff },
+          },
+        ],
       },
-    );
-    this.logger.log(
-      `JOB_ENQUEUED queue=${QUEUE_NAMES.MPESA_CALLBACK} type=${callbackType} jobId=${jobId} tenant=${tenantId} mpesaTransactionId=${mpesaTransactionId} correlation=${correlationId ?? ''}`,
-    );
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+      select: { id: true },
+    });
+
+    let queued = 0;
+    for (const row of rows) {
+      const result = await this.enqueueCallbackInbox(row.id);
+      if (result.queued) queued++;
+    }
+    return queued;
+  }
+
+  private async enqueueCallbackInbox(
+    callbackInboxId: string,
+  ): Promise<{ queued: boolean; jobId?: string }> {
+    const inbox = await this.prisma.mpesaCallbackInbox.findUnique({
+      where: { id: callbackInboxId },
+      select: {
+        id: true,
+        tenantId: true,
+        callbackType: true,
+        providerUniqueId: true,
+        correlationId: true,
+        mpesaTransactionId: true,
+        status: true,
+      },
+    });
+    if (!inbox || inbox.status === OutboxStatus.DELIVERED) {
+      return { queued: false };
+    }
+
+    const callbackType = inbox.callbackType as MpesaCallbackJobPayload['callbackType'];
+    const jobId =
+      `mpesa-callback-${inbox.tenantId}-${callbackType}-${inbox.providerUniqueId}`.replace(
+        /[^A-Za-z0-9_.:-]/g,
+        '-',
+      );
+
+    try {
+      await this.callbackQueue.add(
+        'process-callback',
+        {
+          tenantId: inbox.tenantId,
+          correlationId: inbox.correlationId ?? undefined,
+          mpesaTransactionId: inbox.mpesaTransactionId ?? undefined,
+          callbackInboxId: inbox.id,
+          callbackType,
+        },
+        {
+          jobId,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 3000 },
+          removeOnComplete: { age: 3600, count: 200 },
+          removeOnFail: { age: 604800, count: 100 },
+        },
+      );
+      await this.prisma.mpesaCallbackInbox.update({
+        where: { id: inbox.id },
+        data: {
+          status: OutboxStatus.PROCESSING,
+          queueJobId: jobId,
+          lastError: null,
+          nextRetryAt: null,
+        },
+      });
+      this.logger.log(
+        `JOB_ENQUEUED queue=${QUEUE_NAMES.MPESA_CALLBACK} type=${callbackType} jobId=${jobId} tenant=${inbox.tenantId} mpesaTransactionId=${inbox.mpesaTransactionId ?? ''} correlation=${inbox.correlationId ?? ''}`,
+      );
+      return { queued: true, jobId };
+    } catch (error) {
+      await this.prisma.mpesaCallbackInbox.update({
+        where: { id: inbox.id },
+        data: {
+          status: OutboxStatus.FAILED,
+          attempts: { increment: 1 },
+          lastError: error instanceof Error ? error.message : String(error),
+          nextRetryAt: new Date(Date.now() + CALLBACK_RETRY_DELAY_MS),
+        },
+      });
+      this.logger.warn(
+        `Callback inbox persisted but queue dispatch failed inbox=${inbox.id} type=${callbackType}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { queued: false, jobId };
+    }
   }
 
   private async persistCallbackPayload(
     payload: Record<string, unknown>,
     callbackType: MpesaCallbackJobPayload['callbackType'],
+    uniqueId: string,
     tenantId: string,
-  ): Promise<string> {
+    correlationId?: string,
+  ): Promise<{ id: string; mpesaTransactionId?: string | null }> {
     const rawPayload = payload as Prisma.InputJsonValue;
+    const resolvedTenantId =
+      tenantId && tenantId !== 'resolve-in-processor' ? tenantId : 'UNRESOLVED';
+    const rawBodySha256 = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 
     if (isStkCallback(payload)) {
       const checkoutRequestId = payload.Body.stkCallback.CheckoutRequestID;
-      const transaction = await this.prisma.mpesaTransaction.findUnique({
-        where: { checkoutRequestId },
-        select: { id: true },
-      });
+      return this.prisma.$transaction(async (tx) => {
+        const transaction = await tx.mpesaTransaction.findUnique({
+          where: { checkoutRequestId },
+          select: { id: true, tenantId: true },
+        });
 
-      if (!transaction) {
-        throw new Error(
-          `STK callback has no MpesaTransaction for CheckoutRequestID=${checkoutRequestId}`,
+        if (!transaction) {
+          throw new Error(
+            `STK callback has no MpesaTransaction for CheckoutRequestID=${checkoutRequestId}`,
+          );
+        }
+
+        const uniqueKey = this.callbackUniqueKey(
+          'MPESA',
+          transaction.tenantId,
+          callbackType,
+          uniqueId,
         );
-      }
-
-      await this.prisma.mpesaTransaction.update({
-        where: { id: transaction.id },
-        data: { callbackPayload: rawPayload },
+        await tx.mpesaTransaction.update({
+          where: { id: transaction.id },
+          data: { callbackPayload: rawPayload },
+        });
+        return tx.mpesaCallbackInbox.upsert({
+          where: { uniqueKey },
+          create: {
+            tenantId: transaction.tenantId,
+            callbackType,
+            providerUniqueId: uniqueId,
+            uniqueKey,
+            payload: rawPayload,
+            rawBodySha256,
+            correlationId,
+            mpesaTransactionId: transaction.id,
+          },
+          update: {
+            payload: rawPayload,
+            rawBodySha256,
+            correlationId,
+            mpesaTransactionId: transaction.id,
+          },
+          select: { id: true, mpesaTransactionId: true },
+        });
       });
-      return transaction.id;
     }
 
     if (isB2cCallback(payload)) {
       const { ConversationID, OriginatorConversationID } = payload.Result;
-      const transaction = await this.prisma.mpesaTransaction.findFirst({
-        where: {
-          OR: [
-            { conversationId: ConversationID },
-            { originatorConversationId: OriginatorConversationID },
-          ],
-        },
-        select: { id: true },
-      });
+      return this.prisma.$transaction(async (tx) => {
+        const transaction = await tx.mpesaTransaction.findFirst({
+          where: {
+            OR: [
+              { conversationId: ConversationID },
+              { originatorConversationId: OriginatorConversationID },
+            ],
+          },
+          select: { id: true, tenantId: true },
+        });
 
-      if (!transaction) {
-        throw new Error(
-          `B2C callback has no MpesaTransaction for ConversationID=${ConversationID}`,
+        if (!transaction) {
+          throw new Error(
+            `B2C callback has no MpesaTransaction for ConversationID=${ConversationID}`,
+          );
+        }
+
+        const uniqueKey = this.callbackUniqueKey(
+          'MPESA',
+          transaction.tenantId,
+          callbackType,
+          uniqueId,
         );
-      }
-
-      await this.prisma.mpesaTransaction.update({
-        where: { id: transaction.id },
-        data: { callbackPayload: rawPayload },
+        await tx.mpesaTransaction.update({
+          where: { id: transaction.id },
+          data: { callbackPayload: rawPayload },
+        });
+        return tx.mpesaCallbackInbox.upsert({
+          where: { uniqueKey },
+          create: {
+            tenantId: transaction.tenantId,
+            callbackType,
+            providerUniqueId: uniqueId,
+            uniqueKey,
+            payload: rawPayload,
+            rawBodySha256,
+            correlationId,
+            mpesaTransactionId: transaction.id,
+          },
+          update: {
+            payload: rawPayload,
+            rawBodySha256,
+            correlationId,
+            mpesaTransactionId: transaction.id,
+          },
+          select: { id: true, mpesaTransactionId: true },
+        });
       });
-      return transaction.id;
     }
 
     if (isC2bCallback(payload)) {
       const amount = new Decimal(payload.TransAmount);
       const reference = buildMpesaRef.c2b(payload.TransID);
-      const transaction = await this.prisma.mpesaTransaction.upsert({
-        where: { reference },
-        create: {
-          tenantId: tenantId && tenantId !== 'resolve-in-processor' ? tenantId : 'UNRESOLVED',
-          type: MpesaTxType.C2B,
-          triggerSource: MpesaTriggerSource.MEMBER,
-          phoneNumber: payload.MSISDN,
-          amount: amount.toDecimalPlaces(4).toString(),
-          accountReference: payload.BillRefNumber,
-          mpesaReceiptNumber: payload.TransID,
-          reference,
-          status: TransactionStatus.PENDING,
-          callbackPayload: rawPayload,
-          transactionDate: parseDarajaTimestamp(payload.TransTime),
-        },
-        update: {
-          callbackPayload: rawPayload,
-          transactionDate: parseDarajaTimestamp(payload.TransTime),
-        },
-        select: { id: true },
+      return this.prisma.$transaction(async (tx) => {
+        const transaction = await tx.mpesaTransaction.upsert({
+          where: { reference },
+          create: {
+            tenantId: resolvedTenantId,
+            type: MpesaTxType.C2B,
+            triggerSource: MpesaTriggerSource.MEMBER,
+            phoneNumber: payload.MSISDN,
+            amount: amount.toDecimalPlaces(4).toString(),
+            accountReference: payload.BillRefNumber,
+            mpesaReceiptNumber: payload.TransID,
+            reference,
+            status: TransactionStatus.PENDING,
+            callbackPayload: rawPayload,
+            transactionDate: parseDarajaTimestamp(payload.TransTime),
+          },
+          update: {
+            callbackPayload: rawPayload,
+            transactionDate: parseDarajaTimestamp(payload.TransTime),
+          },
+          select: { id: true, tenantId: true },
+        });
+        const uniqueKey = this.callbackUniqueKey(
+          'MPESA',
+          transaction.tenantId,
+          callbackType,
+          uniqueId,
+        );
+        return tx.mpesaCallbackInbox.upsert({
+          where: { uniqueKey },
+          create: {
+            tenantId: transaction.tenantId,
+            callbackType,
+            providerUniqueId: uniqueId,
+            uniqueKey,
+            payload: rawPayload,
+            rawBodySha256,
+            correlationId,
+            mpesaTransactionId: transaction.id,
+          },
+          update: {
+            payload: rawPayload,
+            rawBodySha256,
+            correlationId,
+            mpesaTransactionId: transaction.id,
+          },
+          select: { id: true, mpesaTransactionId: true },
+        });
       });
-      return transaction.id;
     }
 
     throw new Error(`Unsupported M-Pesa callback structure for type=${callbackType}`);
+  }
+
+  private callbackUniqueKey(
+    provider: 'MPESA' | 'MWALONI',
+    tenantId: string,
+    callbackType: MpesaCallbackJobPayload['callbackType'],
+    uniqueId: string,
+  ): string {
+    return `${provider}:${tenantId}:${callbackType}:${uniqueId}`;
   }
   // ─── DLQ admin: requeue a failed callback job ───────────────────────────
 

@@ -1,6 +1,12 @@
 import { MpesaCallbackProcessor } from './mpesa-callback.processor';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { JournalEntryType, LoanStatus, TransactionStatus, MpesaTxType, MpesaTriggerSource } from '@prisma/client';
+import {
+  JournalEntryType,
+  LoanStatus,
+  TransactionStatus,
+  MpesaTxType,
+  MpesaTriggerSource,
+} from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { Queue } from 'bullmq';
 import { Job } from 'bullmq';
@@ -33,29 +39,35 @@ function makeAccount(tenantId: string) {
   return { id: `acct-${tenantId}`, balance: '10000', memberId: `mem-${tenantId}`, tenantId };
 }
 
-function makePrisma(overrides: Partial<{
-  txFindFirst: jest.Mock;
-  accountFindMany: jest.Mock;
-  txCreate: jest.Mock;
-  accountFindFirst: jest.Mock;
-  transactionCreate: jest.Mock;
-  transactionUpdate: jest.Mock;
-  accountUpdate: jest.Mock;
-  loanFindUnique: jest.Mock;
-  loanUpdate: jest.Mock;
-  auditLogCreate: jest.Mock;
-}>= {}) {
+function makePrisma(
+  overrides: Partial<{
+    txFindFirst: jest.Mock;
+    accountFindMany: jest.Mock;
+    txCreate: jest.Mock;
+    accountFindFirst: jest.Mock;
+    accountFindUnique: jest.Mock;
+    transactionCreate: jest.Mock;
+    transactionUpdate: jest.Mock;
+    transactionUpdateMany: jest.Mock;
+    accountUpdate: jest.Mock;
+    loanFindUnique: jest.Mock;
+    loanUpdate: jest.Mock;
+    auditLogCreate: jest.Mock;
+  }> = {},
+) {
   return {
     mpesaTransaction: {
       findFirst: overrides.txFindFirst ?? jest.fn().mockResolvedValue(null),
       findUnique: jest.fn().mockResolvedValue(null),
       create: overrides.txCreate ?? jest.fn().mockResolvedValue({ id: 'mpesa-tx-1' }),
       update: overrides.transactionUpdate ?? jest.fn().mockResolvedValue({}),
+      updateMany: overrides.transactionUpdateMany ?? jest.fn().mockResolvedValue({ count: 1 }),
     },
     account: {
       findMany: overrides.accountFindMany ?? jest.fn().mockResolvedValue([]),
       findFirst: overrides.accountFindFirst ?? jest.fn().mockResolvedValue(null),
       update: overrides.accountUpdate ?? jest.fn().mockResolvedValue({}),
+      findUnique: overrides.accountFindUnique ?? jest.fn().mockResolvedValue(null),
     },
     transaction: {
       create: overrides.transactionCreate ?? jest.fn().mockResolvedValue({ id: 'ledger-1' }),
@@ -63,40 +75,53 @@ function makePrisma(overrides: Partial<{
     auditLog: {
       create: overrides.auditLogCreate ?? jest.fn().mockResolvedValue({}),
     },
-    $transaction: jest.fn((fn: (tx: unknown) => Promise<unknown>) => fn({
-      mpesaTransaction: {
-        create: overrides.txCreate ?? jest.fn().mockResolvedValue({ id: 'mpesa-tx-1' }),
-        update: overrides.transactionUpdate ?? jest.fn().mockResolvedValue({}),
-      },
-      account: {
-        update: overrides.accountUpdate ?? jest.fn().mockResolvedValue({}),
-        findFirst: overrides.accountFindFirst ?? jest.fn().mockResolvedValue(null),
-      },
-      loan: {
-        findUnique: overrides.loanFindUnique ?? jest.fn().mockResolvedValue(null),
-        update: overrides.loanUpdate ?? jest.fn().mockResolvedValue({}),
-      },
-      transaction: {
-        // postLedgerEntry calls findFirst to check for duplicate references (Layer 3)
-        findFirst: jest.fn().mockResolvedValue(null),
-        create: overrides.transactionCreate ?? jest.fn().mockResolvedValue({ id: 'ledger-1' }),
-      },
-      auditLog: {
-        create: overrides.auditLogCreate ?? jest.fn().mockResolvedValue({}),
-      },
-    })),
+    $transaction: jest.fn((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({
+        mpesaTransaction: {
+          create: overrides.txCreate ?? jest.fn().mockResolvedValue({ id: 'mpesa-tx-1' }),
+          update: overrides.transactionUpdate ?? jest.fn().mockResolvedValue({}),
+          updateMany: overrides.transactionUpdateMany ?? jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        account: {
+          update: overrides.accountUpdate ?? jest.fn().mockResolvedValue({}),
+          findFirst: overrides.accountFindFirst ?? jest.fn().mockResolvedValue(null),
+          findUnique: overrides.accountFindUnique ?? jest.fn().mockResolvedValue(null),
+        },
+        loan: {
+          findUnique: overrides.loanFindUnique ?? jest.fn().mockResolvedValue(null),
+          update: overrides.loanUpdate ?? jest.fn().mockResolvedValue({}),
+        },
+        transaction: {
+          // postLedgerEntry calls findFirst to check for duplicate references (Layer 3)
+          findFirst: jest.fn().mockResolvedValue(null),
+          create: overrides.transactionCreate ?? jest.fn().mockResolvedValue({ id: 'ledger-1' }),
+        },
+        auditLog: {
+          create: overrides.auditLogCreate ?? jest.fn().mockResolvedValue({}),
+        },
+      }),
+    ),
   } as unknown as PrismaService;
 }
 
 const mockDlq = { add: jest.fn().mockResolvedValue({}) } as unknown as Queue;
 const mockEventEmitter = { emit: jest.fn() };
-const mockAudit = { create: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+const mockAudit = {
+  create: jest.fn().mockResolvedValue(undefined),
+  createAtomic: jest.fn().mockResolvedValue(undefined),
+} as unknown as AuditService;
 const mockCache = { invalidateTenantDashboard: jest.fn().mockResolvedValue(undefined) };
-const mockLoanRepayment = { processMpesaRepayment: jest.fn().mockResolvedValue(undefined) } as unknown as LoanRepaymentService;
+const mockLoanRepayment = {
+  processMpesaRepayment: jest.fn().mockResolvedValue(undefined),
+} as unknown as LoanRepaymentService;
 const mockLedger = {
   postEntry: jest.fn().mockResolvedValue({
     transaction: { id: 'ledger-tx-1', balanceBefore: '10000', balanceAfter: '11000' },
     journalEntry: { id: 'je-1' },
+  }),
+  reverseTransaction: jest.fn().mockResolvedValue({
+    transaction: { id: 'reversal-tx-1' },
+    journalEntry: { id: 'reversal-je-1' },
   }),
 } as unknown as LedgerService;
 
@@ -117,7 +142,15 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       accountFindMany,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq, mockEventEmitter as never);
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(accountFindMany).not.toHaveBeenCalled();
@@ -132,7 +165,15 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       txCreate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq, mockEventEmitter as never);
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(txCreate).toHaveBeenCalledWith(
@@ -157,7 +198,15 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       txCreate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq, mockEventEmitter as never);
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(txCreate).toHaveBeenCalledWith(
@@ -183,7 +232,15 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       txCreate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq, mockEventEmitter as never);
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(txCreate).toHaveBeenCalledWith(
@@ -207,7 +264,15 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       accountUpdate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq, mockEventEmitter as never);
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(accountUpdate).not.toHaveBeenCalled();
@@ -218,7 +283,15 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
     const accountFindFirst = jest.fn();
     const prisma = makePrisma({ accountFindMany, accountFindFirst });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq, mockEventEmitter as never);
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
     await processor.process(makeJob(C2B_PAYLOAD as never));
 
     expect(accountFindMany).toHaveBeenCalledWith(
@@ -247,21 +320,31 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       loanUpdate,
     });
 
-    const processor = new MpesaCallbackProcessor(prisma, mockAudit, mockLoanRepayment, mockCache as never, mockLedger, mockDlq, mockEventEmitter as never);
-    await (processor as unknown as {
-      postDisbursementLedger(params: {
-        tenantId: string;
-        loanId: string;
-        memberId?: string;
-        amount: Decimal;
-        receipt: string;
-        mpesaTxId: string;
-        rawPayload: Record<string, never>;
-        resultCode: number;
-        resultDesc: string;
-        transactionDate: Date;
-      }): Promise<void>;
-    }).postDisbursementLedger({
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
+    await (
+      processor as unknown as {
+        postDisbursementLedger(params: {
+          tenantId: string;
+          loanId: string;
+          memberId?: string;
+          amount: Decimal;
+          receipt: string;
+          mpesaTxId: string;
+          rawPayload: Record<string, never>;
+          resultCode: number;
+          resultDesc: string;
+          transactionDate: Date;
+        }): Promise<void>;
+      }
+    ).postDisbursementLedger({
       tenantId: 'tenant-1',
       loanId: 'loan-1',
       memberId: 'member-1',
@@ -300,6 +383,138 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
         where: { id: 'mpesa-tx-1' },
         data: expect.objectContaining({ transactionId: 'ledger-tx-1' }),
       }),
+    );
+  });
+
+  it('routes historical FOSA B2C failure without transactionId to manual reconciliation, not balance mutation', async () => {
+    const accountUpdate = jest.fn().mockResolvedValue({});
+    const transactionCreate = jest.fn().mockResolvedValue({ id: 'fake-refund-tx' });
+    const transactionUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = makePrisma({
+      txFindFirst: jest.fn().mockResolvedValue({
+        id: 'mpesa-tx-legacy',
+        tenantId: 'tenant-1',
+        transactionId: null,
+        referenceType: 'FOSA_WITHDRAWAL',
+        referenceId: 'account-1',
+        reference: 'B2C-conv-legacy',
+        memberId: 'member-1',
+        amount: new Decimal(750),
+        phoneNumber: '254712345678',
+        status: TransactionStatus.PENDING,
+      }),
+      accountFindUnique: jest.fn().mockResolvedValue({
+        id: 'account-1',
+        tenantId: 'tenant-1',
+        memberId: 'member-1',
+        accountNumber: 'FOSA-001',
+      }),
+      accountUpdate,
+      transactionCreate,
+      transactionUpdateMany,
+    });
+
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
+
+    await processor.process(
+      makeJob(
+        {
+          Result: {
+            ConversationID: 'conv-legacy',
+            OriginatorConversationID: 'orig-legacy',
+            ResultCode: 17,
+            ResultDesc: 'Provider rejected',
+            TransactionID: 'provider-tx-1',
+            ResultParameters: { ResultParameter: [] },
+          },
+        },
+        'B2C_RESULT',
+      ),
+    );
+
+    expect(accountUpdate).not.toHaveBeenCalled();
+    expect(transactionCreate).not.toHaveBeenCalled();
+    expect(mockLedger.reverseTransaction).not.toHaveBeenCalled();
+    expect(transactionUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: TransactionStatus.RECON_PENDING,
+          failureReason: 'B2C_FAILURE_NO_LINKED_LEDGER_TRANSACTION',
+        }),
+      }),
+    );
+    expect(mockAudit.createAtomic).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'MPESA.DISBURSEMENT.FAILURE_MANUAL_REVIEW_REQUIRED',
+      }),
+    );
+  });
+
+  it('reverses an authoritative FOSA B2C failure exactly through LedgerService', async () => {
+    const accountUpdate = jest.fn().mockResolvedValue({});
+    const transactionUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = makePrisma({
+      txFindFirst: jest.fn().mockResolvedValue({
+        id: 'mpesa-tx-linked',
+        tenantId: 'tenant-1',
+        transactionId: 'ledger-withdrawal-1',
+        referenceType: 'FOSA_WITHDRAWAL',
+        referenceId: 'account-1',
+        reference: 'B2C-conv-linked',
+        memberId: 'member-1',
+        amount: new Decimal(750),
+        phoneNumber: '254712345678',
+        status: TransactionStatus.PENDING,
+      }),
+      accountUpdate,
+      transactionUpdateMany,
+    });
+
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
+
+    await processor.process(
+      makeJob(
+        {
+          Result: {
+            ConversationID: 'conv-linked',
+            OriginatorConversationID: 'orig-linked',
+            ResultCode: 17,
+            ResultDesc: 'Provider rejected',
+            TransactionID: 'provider-tx-2',
+            ResultParameters: { ResultParameter: [] },
+          },
+        },
+        'B2C_RESULT',
+      ),
+    );
+
+    expect(accountUpdate).not.toHaveBeenCalled();
+    expect(mockLedger.reverseTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: 'tenant-1',
+        originalTransactionId: 'ledger-withdrawal-1',
+      }),
+    );
+    expect(mockAudit.createAtomic).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'MPESA.DISBURSEMENT.FAILED_REFUNDED' }),
     );
   });
 });

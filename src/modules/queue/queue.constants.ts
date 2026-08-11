@@ -9,7 +9,7 @@ export const QUEUE_NAMES = {
   MPESA_DISBURSEMENT_DLQ: 'mpesa.disbursement.dlq', // Dead-letter queue for B2C failures
   MPESA_STK_EXPIRY: 'mpesa.stk-expiry',
   MPESA_B2C_TIMEOUT: 'mpesa.b2c-timeout',
-  MPESA_WITHDRAWAL_RECON: 'mpesa.withdrawal-recon', // Auto-refund sweep for RECON_PENDING FOSA withdrawals
+  MPESA_WITHDRAWAL_RECON: 'mpesa.withdrawal-recon', // Manual reconciliation sweep for ambiguous FOSA withdrawals
   MPESA_CALLBACK_DLQ: 'mpesa.callback.dlq', // Dead-letter queue for callback failures
   LOAN_GUARANTOR_REMINDER: 'loan.guarantor.reminder',
   LOAN_GUARANTOR_EXPIRY: 'loan.guarantor.expiry',
@@ -87,7 +87,8 @@ export const DOCUMENT_ORPHAN_CLEANUP_JOB = 'document-orphan-cleanup';
 export interface MpesaCallbackJobPayload {
   tenantId: string;
   correlationId?: string;
-  mpesaTransactionId: string;
+  mpesaTransactionId?: string;
+  callbackInboxId?: string;
   /** Legacy fallback for jobs that were queued before the payload reference migration. */
   callbackPayload?: Record<string, unknown>;
   /** Discriminator so the processor routes to the right handler */
@@ -95,6 +96,7 @@ export interface MpesaCallbackJobPayload {
 }
 
 export interface MpesaDisbursementJobPayload {
+  payoutIntentId?: string;
   referenceType: 'LOAN_DISBURSEMENT' | 'FOSA_WITHDRAWAL';
   referenceId: string;
   tenantId: string;

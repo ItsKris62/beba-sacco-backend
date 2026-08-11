@@ -79,21 +79,25 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    (mockTenantResolver.validateCallback as jest.Mock).mockImplementation(({ rawBody, signature }: { rawBody?: Buffer; signature?: string }) =>
-      Boolean(rawBody && signature && hmac(rawBody, SECRET) === signature),
+    (mockTenantResolver.validateCallback as jest.Mock).mockImplementation(
+      ({ rawBody, signature }: { rawBody?: Buffer; signature?: string }) =>
+        Boolean(rawBody && signature && hmac(rawBody, SECRET) === signature),
     );
-    (mockTenantResolver.resolveTenant as jest.Mock).mockImplementation((body: Record<string, unknown>) => {
-      if ('TransactionType' in body) return { tenantId: 'tenant-1', callbackType: 'C2B', uniqueId: 'TXN123456' };
-      const result = (body as typeof B2C_BODY).Result;
-      if (result) {
-        return {
-          tenantId: 'tenant-1',
-          callbackType: result.ResultCode === 17 ? 'B2C_TIMEOUT' : 'B2C_RESULT',
-          uniqueId: 'conv-abc',
-        };
-      }
-      return { tenantId: 'tenant-1', callbackType: 'STK_PUSH', uniqueId: 'ws_CO_1' };
-    });
+    (mockTenantResolver.resolveTenant as jest.Mock).mockImplementation(
+      (body: Record<string, unknown>) => {
+        if ('TransactionType' in body)
+          return { tenantId: 'tenant-1', callbackType: 'C2B', uniqueId: 'TXN123456' };
+        const result = (body as typeof B2C_BODY).Result;
+        if (result) {
+          return {
+            tenantId: 'tenant-1',
+            callbackType: result.ResultCode === 17 ? 'B2C_TIMEOUT' : 'B2C_RESULT',
+            uniqueId: 'conv-abc',
+          };
+        }
+        return { tenantId: 'tenant-1', callbackType: 'STK_PUSH', uniqueId: 'ws_CO_1' };
+      },
+    );
     controller = new MpesaController(mockMpesaService, makeConfig(SECRET), mockTenantResolver);
   });
 
@@ -129,50 +133,41 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
     const rawBody = Buffer.from(JSON.stringify(STK_BODY));
     const sig = hmac(rawBody, SECRET);
 
-    const result = await controller.unifiedCallback(
-      { rawBody } as never,
-      STK_BODY as never,
-      sig,
-    );
+    const result = await controller.unifiedCallback({ rawBody } as never, STK_BODY as never, sig);
     await flushCallbacks();
     expect(result).toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
     expect(mockMpesaService.enqueueCallback).toHaveBeenCalledTimes(1);
   });
 
-  it('[C-3] silently ACKs and discards a callback with a missing signature', async () => {
+  it('[C-3] rejects a callback with a missing signature without enqueueing', async () => {
     const rawBody = Buffer.from(JSON.stringify(STK_BODY));
 
-    const result = await controller.unifiedCallback(
-      { rawBody } as never,
-      STK_BODY as never,
-      undefined, // no signature
-    );
-    expect(result).toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    await expect(
+      controller.unifiedCallback(
+        { rawBody } as never,
+        STK_BODY as never,
+        undefined, // no signature
+      ),
+    ).rejects.toThrow('M-Pesa callback validation failed');
     expect(mockMpesaService.enqueueCallback).not.toHaveBeenCalled();
   });
 
-  it('[C-3] silently ACKs and discards a callback with a tampered signature', async () => {
+  it('[C-3] rejects a callback with a tampered signature without enqueueing', async () => {
     const rawBody = Buffer.from(JSON.stringify(STK_BODY));
     const wrongSig = hmac(rawBody, 'different-secret');
 
-    const result = await controller.unifiedCallback(
-      { rawBody } as never,
-      STK_BODY as never,
-      wrongSig,
-    );
-    expect(result).toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    await expect(
+      controller.unifiedCallback({ rawBody } as never, STK_BODY as never, wrongSig),
+    ).rejects.toThrow('M-Pesa callback validation failed');
     expect(mockMpesaService.enqueueCallback).not.toHaveBeenCalled();
   });
 
-  it('[C-3] silently ACKs and discards a callback with a non-hex signature string', async () => {
+  it('[C-3] rejects a callback with a non-hex signature string without enqueueing', async () => {
     const rawBody = Buffer.from(JSON.stringify(STK_BODY));
 
-    const result = await controller.unifiedCallback(
-      { rawBody } as never,
-      STK_BODY as never,
-      'not-a-hex-string!!',
-    );
-    expect(result).toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    await expect(
+      controller.unifiedCallback({ rawBody } as never, STK_BODY as never, 'not-a-hex-string!!'),
+    ).rejects.toThrow('M-Pesa callback validation failed');
     expect(mockMpesaService.enqueueCallback).not.toHaveBeenCalled();
   });
 
