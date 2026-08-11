@@ -1,8 +1,10 @@
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
+import { UserRole } from '@prisma/client';
 import { MpesaController } from './mpesa.controller';
 import { MpesaService } from './mpesa.service';
 import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
+import { ROLES_KEY } from '../../common/decorators/roles.decorator';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -26,6 +28,7 @@ const mockMpesaService = {
   queueLoanDisbursement: jest.fn(),
   requeueFromDlq: jest.fn(),
   initiateDeposit: jest.fn(),
+  getB2cWalletBalance: jest.fn(),
 } as unknown as MpesaService;
 
 const mockTenantResolver = {
@@ -222,5 +225,34 @@ describe('MpesaController – unified callback HMAC [C-3]', () => {
       'tenant-1',
       expect.any(String),
     );
+  });
+
+  it('fetches global B2C wallet balance through the super-admin endpoint', async () => {
+    const snapshot = {
+      provider: 'MWALONI',
+      currency: 'KES',
+      balance: 125000,
+      availableBalance: 125000,
+      actualBalance: 125000,
+      providerStatus: '00',
+      message: 'Success',
+      checkedAt: '2026-08-11T14:30:00.000Z',
+      providerData: { status: '00' },
+    };
+    (mockMpesaService.getB2cWalletBalance as jest.Mock).mockResolvedValueOnce(snapshot);
+
+    await expect(
+      controller.getB2cWalletBalance(
+        { id: 'tenant-1' } as never,
+        { id: 'super-1', role: UserRole.SUPER_ADMIN } as never,
+      ),
+    ).resolves.toEqual(snapshot);
+    expect(mockMpesaService.getB2cWalletBalance).toHaveBeenCalledWith('super-1', 'tenant-1');
+  });
+
+  it('marks the global B2C wallet balance endpoint as SUPER_ADMIN only', () => {
+    expect(Reflect.getMetadata(ROLES_KEY, controller.getB2cWalletBalance)).toEqual([
+      UserRole.SUPER_ADMIN,
+    ]);
   });
 });

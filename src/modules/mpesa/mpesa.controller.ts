@@ -74,6 +74,35 @@ class DlqRequeueResponse {
   jobId!: string;
 }
 
+class B2cWalletBalanceResponse {
+  @ApiProperty({ example: 'MWALONI' })
+  provider!: 'MWALONI';
+
+  @ApiProperty({ example: 'KES' })
+  currency!: string;
+
+  @ApiProperty({ example: 125000, nullable: true })
+  balance!: number | null;
+
+  @ApiProperty({ example: 125000, nullable: true })
+  availableBalance!: number | null;
+
+  @ApiProperty({ example: 125000, nullable: true })
+  actualBalance!: number | null;
+
+  @ApiProperty({ example: '00', nullable: true })
+  providerStatus!: string | null;
+
+  @ApiProperty({ example: 'Success', nullable: true })
+  message!: string | null;
+
+  @ApiProperty({ example: '2026-08-11T14:30:00.000Z' })
+  checkedAt!: string;
+
+  @ApiProperty({ type: Object })
+  providerData!: unknown;
+}
+
 const DARAJA_ACK = { ResultCode: 0, ResultDesc: 'Accepted' };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -229,14 +258,38 @@ export class MpesaController {
     return this.mpesaService.getTransactionStatus(checkoutRequestId, actor.id, tenant.id);
   }
 
-  // ─── Admin: replay a DLQ job ─────────────────────────────────────────────
+  // Admin: B2C wallet balance
+
+  /**
+   * GET /api/mpesa/admin/b2c-wallet/balance
+   *
+   * Access: SUPER_ADMIN only.
+   */
+  @Get('admin/b2c-wallet/balance')
+  @Roles(UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Get global B2C wallet balance',
+    description:
+      'Super-admin-only operational balance check for the configured Mwaloni B2C payment wallet. ' +
+      'This is provider liquidity visibility only; SACCO member/account balances remain ledger-authoritative.',
+  })
+  @ApiResponse({ status: 200, description: 'B2C wallet balance', type: B2cWalletBalanceResponse })
+  @ApiResponse({ status: 403, description: 'SUPER_ADMIN role required' })
+  @ApiResponse({ status: 503, description: 'B2C wallet provider is not enabled or unavailable' })
+  async getB2cWalletBalance(
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<B2cWalletBalanceResponse> {
+    return this.mpesaService.getB2cWalletBalance(actor.id, tenant.id);
+  }
+
+  // Admin: replay a DLQ job
 
   /**
    * POST /api/mpesa/admin/dlq/:jobId/requeue
    *
    * Moves a failed callback job from MPESA_CALLBACK_DLQ back into the live
-   * mpesa.callback queue for replay. Use only after manual investigation —
-   * DLQ jobs failed for a reason and blind replays can cause double-posting.
+   * mpesa.callback queue for replay. Use only after manual investigation.
    *
    * Access: TENANT_ADMIN, MANAGER only.
    */

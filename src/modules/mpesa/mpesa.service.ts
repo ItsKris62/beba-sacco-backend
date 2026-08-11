@@ -4,6 +4,7 @@ import {
   BadRequestException,
   NotFoundException,
   Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -37,6 +38,18 @@ import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
 import { LoanRepaymentService } from '../loans/loan-repayment.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { LedgerService } from '../accounting/ledger.service';
+
+export interface B2cWalletBalanceSnapshot {
+  provider: 'MWALONI';
+  currency: string;
+  balance: number | null;
+  availableBalance: number | null;
+  actualBalance: number | null;
+  providerStatus: string | null;
+  message: string | null;
+  checkedAt: string;
+  providerData: Prisma.JsonValue;
+}
 
 // ─── Redis key helpers ────────────────────────────────────────────────────────
 
@@ -301,6 +314,47 @@ export class MpesaService {
       lastUpdated: transaction.updatedAt,
       failureReason: transaction.failureReason ?? undefined,
     };
+  }
+
+  async getB2cWalletBalance(
+    actorUserId: string,
+    tenantId: string,
+  ): Promise<B2cWalletBalanceSnapshot> {
+    if (!this.mwaloni?.isEnabled()) {
+      throw new ServiceUnavailableException('Mwaloni B2C wallet is not enabled');
+    }
+
+    const response = await this.mwaloni.fetchBalance();
+    const snapshot = this.normalizeMwaloniBalance(response);
+
+    await this.audit
+      .create({
+        tenantId,
+        actorId: actorUserId,
+        action: 'MPESA.B2C_WALLET.BALANCE_CHECK',
+        entityType: 'MwaloniWallet',
+        entityId: 'global',
+        newValue: {
+          provider: snapshot.provider,
+          currency: snapshot.currency,
+          balance: snapshot.balance,
+          availableBalance: snapshot.availableBalance,
+          actualBalance: snapshot.actualBalance,
+          providerStatus: snapshot.providerStatus,
+        },
+        metadata: {
+          provider: snapshot.provider,
+          providerStatus: snapshot.providerStatus,
+          hasBalance: snapshot.balance !== null,
+        },
+      })
+      .catch((error: unknown) =>
+        this.logger.warn(
+          `B2C wallet balance audit failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+
+    return snapshot;
   }
 
   // ─── Direct B2C (called by the disbursement processor) ─────────────────
@@ -903,6 +957,129 @@ export class MpesaService {
     return ['02', '03', 'PENDING', 'PROCESSING', 'QUEUED', 'IN_PROGRESS'].includes(
       status.toUpperCase(),
     );
+  }
+
+  private normalizeMwaloniBalance(response: MwaloniResponse): B2cWalletBalanceSnapshot {
+    const availableBalance = this.extractNumericField(response, [
+      'availableBalance',
+      'available_balance',
+      'available',
+      'walletBalance',
+      'wallet_balance',
+      'balance',
+    ]);
+    const actualBalance = this.extractNumericField(response, [
+      'actualBalance',
+      'actual_balance',
+      'ledgerBalance',
+      'ledger_balance',
+      'currentBalance',
+      'current_balance',
+      'balance',
+    ]);
+    const balance = availableBalance ?? actualBalance;
+    const currency =
+      this.extractStringField(response, ['currency', 'currencyCode', 'currency_code']) ?? 'KES';
+
+    return {
+      provider: 'MWALONI',
+      currency,
+      balance,
+      availableBalance,
+      actualBalance,
+      providerStatus: response.status ?? null,
+      message: response.message ?? null,
+      checkedAt: new Date().toISOString(),
+      providerData: this.sanitizeProviderPayload(response),
+    };
+  }
+
+  private extractNumericField(value: unknown, fieldNames: string[]): number | null {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = this.extractNumericField(item, fieldNames);
+        if (found !== null) return found;
+      }
+      return null;
+    }
+
+    if (!value || typeof value !== 'object') return null;
+    const record = value as Record<string, unknown>;
+    const wanted = new Set(fieldNames.map((name) => name.toLowerCase()));
+
+    for (const [key, raw] of Object.entries(record)) {
+      if (!wanted.has(key.toLowerCase())) continue;
+      const numeric = this.toFiniteNumber(raw);
+      if (numeric !== null) return numeric;
+    }
+
+    for (const raw of Object.values(record)) {
+      const found = this.extractNumericField(raw, fieldNames);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+
+  private extractStringField(value: unknown, fieldNames: string[]): string | null {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = this.extractStringField(item, fieldNames);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    if (!value || typeof value !== 'object') return null;
+    const record = value as Record<string, unknown>;
+    const wanted = new Set(fieldNames.map((name) => name.toLowerCase()));
+
+    for (const [key, raw] of Object.entries(record)) {
+      if (wanted.has(key.toLowerCase()) && typeof raw === 'string' && raw.trim()) {
+        return raw.trim();
+      }
+    }
+
+    for (const raw of Object.values(record)) {
+      const found = this.extractStringField(raw, fieldNames);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  private toFiniteNumber(value: unknown): number | null {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value !== 'string') return null;
+    const normalized = value
+      .replace(/,/g, '')
+      .replace(/[^\d.-]/g, '')
+      .trim();
+    if (!normalized) return null;
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  private sanitizeProviderPayload(value: unknown): Prisma.JsonValue {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => this.sanitizeProviderPayload(item));
+    }
+    if (typeof value === 'object') {
+      const sanitized: Record<string, Prisma.JsonValue> = {};
+      for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+        sanitized[key] = this.isSensitiveProviderKey(key)
+          ? '[REDACTED]'
+          : this.sanitizeProviderPayload(raw);
+      }
+      return sanitized;
+    }
+    return String(value);
+  }
+
+  private isSensitiveProviderKey(key: string): boolean {
+    return /(token|password|secret|api[_-]?key|authorization|credential)/i.test(key);
   }
 
   private toJsonObject(value: unknown): Prisma.InputJsonObject {
