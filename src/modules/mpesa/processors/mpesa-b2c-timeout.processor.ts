@@ -4,6 +4,7 @@ import { Job } from 'bullmq';
 import { LoanStatus, Prisma, TransactionStatus } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { QUEUE_NAMES, MpesaB2cTimeoutJobPayload } from '../../queue/queue.constants';
+import { MpesaService } from '../mpesa.service';
 
 /**
  * Fires 30 minutes after a B2C call is initiated (see MpesaService.executeB2cDisbursement).
@@ -21,12 +22,26 @@ import { QUEUE_NAMES, MpesaB2cTimeoutJobPayload } from '../../queue/queue.consta
 export class MpesaB2cTimeoutProcessor extends WorkerHost {
   private readonly logger = new Logger(MpesaB2cTimeoutProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly mpesaService: MpesaService,
+  ) {
     super();
   }
 
   async process(job: Job<MpesaB2cTimeoutJobPayload>): Promise<void> {
     const { referenceId, referenceType, tenantId, conversationId } = job.data;
+
+    const providerStatus = await this.mpesaService.refreshMwaloniB2cStatusByConversation(
+      tenantId,
+      conversationId,
+    );
+    if (providerStatus.terminal) {
+      this.logger.log(
+        `B2C timeout resolved by provider status poll | refType=${referenceType} refId=${referenceId} conversation=${conversationId} status=${providerStatus.status}`,
+      );
+      return;
+    }
 
     const result = await this.prisma.directClient.$transaction(
       async (tx) => {

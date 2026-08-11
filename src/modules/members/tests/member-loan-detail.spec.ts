@@ -12,6 +12,7 @@ import { AccountsService } from '../../accounts/accounts.service';
 import { LedgerService } from '../../accounting/ledger.service';
 import { IdempotencyService } from '../../../common/services/idempotency.service';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
+import { MpesaPayoutOutboxService } from '../../mpesa/mpesa-payout-outbox.service';
 
 // ─── Stubs ────────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ const mockStorage = { getUploadUrl: jest.fn() };
 const mockAccounts = {};
 const mockLedger = { postEntry: jest.fn() };
 const mockIdempotency = {};
+const mockPayoutOutbox = { dispatchIntent: jest.fn() };
 const mockDisbursementQueue = { add: jest.fn() };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -68,7 +70,11 @@ function buildLoanStub(overrides: Record<string, unknown> = {}) {
     dueDate: new Date('2027-01-01T00:00:00Z'),
     appliedAt: new Date('2025-12-15T00:00:00Z'),
     notes: null,
-    loanProduct: { name: 'Development Loan', interestType: 'REDUCING_BALANCE', interestRate: '0.1200' },
+    loanProduct: {
+      name: 'Development Loan',
+      interestType: 'REDUCING_BALANCE',
+      interestRate: '0.1200',
+    },
     guarantors: [],
     ...overrides,
   };
@@ -102,6 +108,7 @@ describe('MemberPortalService.getLoanDetail()', () => {
         { provide: AccountsService, useValue: mockAccounts },
         { provide: LedgerService, useValue: mockLedger },
         { provide: IdempotencyService, useValue: mockIdempotency },
+        { provide: MpesaPayoutOutboxService, useValue: mockPayoutOutbox },
         { provide: getQueueToken(QUEUE_NAMES.MPESA_DISBURSEMENT), useValue: mockDisbursementQueue },
       ],
     }).compile();
@@ -145,7 +152,9 @@ describe('MemberPortalService.getLoanDetail()', () => {
 
   it('reads accruedInterest from the Loan record (Tier 3)', async () => {
     mockPrisma.member.findFirst.mockResolvedValueOnce(buildMemberStub());
-    mockPrisma.loan.findFirst.mockResolvedValueOnce(buildLoanStub({ accruedInterest: '1200.0000' }));
+    mockPrisma.loan.findFirst.mockResolvedValueOnce(
+      buildLoanStub({ accruedInterest: '1200.0000' }),
+    );
     mockPrisma.transaction.findMany.mockResolvedValueOnce([]);
     mockPrisma.loanRepayment.findMany.mockResolvedValueOnce([]);
 

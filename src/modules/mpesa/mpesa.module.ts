@@ -1,14 +1,18 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { MpesaService } from './mpesa.service';
+import { MpesaPayoutOutboxService } from './mpesa-payout-outbox.service';
 import { AdminReconciliationService } from './admin-reconciliation.service';
 import { DarajaClientService } from './daraja-client.service';
+import { MwaloniClientService } from './mwaloni-client.service';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
 import { MpesaB2cTimeoutProcessor } from './processors/mpesa-b2c-timeout.processor';
 import { StkExpiryScheduler } from './jobs/stk-expiry.scheduler';
 import { StkExpiryProcessor } from './jobs/stk-expiry.processor';
 import { WithdrawalReconciliationScheduler } from './jobs/withdrawal-recon.scheduler';
 import { WithdrawalReconciliationProcessor } from './jobs/withdrawal-recon.processor';
+import { MpesaPayoutOutboxScheduler } from './jobs/mpesa-payout-outbox.scheduler';
+import { MpesaCallbackInboxScheduler } from './jobs/mpesa-callback-inbox.scheduler';
 import { MpesaStkTimeoutService } from './mpesa-stk-timeout.service';
 import { MpesaTenantResolverService } from './mpesa-tenant-resolver.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -27,6 +31,8 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
       StkExpiryScheduler,
       WithdrawalReconciliationProcessor,
       WithdrawalReconciliationScheduler,
+      MpesaPayoutOutboxScheduler,
+      MpesaCallbackInboxScheduler,
       MpesaStkTimeoutService,
     ]
   : [];
@@ -77,7 +83,9 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
   ],
   providers: [
     DarajaClientService,
+    MwaloniClientService,
     MpesaService,
+    MpesaPayoutOutboxService,
     AdminReconciliationService,
     MpesaTenantResolverService,
     ...MPESA_WORKER_PROVIDERS,
@@ -85,7 +93,14 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
     // this module is self-documenting about its dependencies.
     PrismaService,
   ],
-  exports: [MpesaService, AdminReconciliationService, DarajaClientService, MpesaTenantResolverService],
+  exports: [
+    MpesaService,
+    MpesaPayoutOutboxService,
+    AdminReconciliationService,
+    DarajaClientService,
+    MwaloniClientService,
+    MpesaTenantResolverService,
+  ],
 })
 export class MpesaModule {}
 

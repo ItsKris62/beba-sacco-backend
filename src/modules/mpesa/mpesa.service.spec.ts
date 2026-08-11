@@ -70,6 +70,7 @@ const mockIdempotency = {
 
 const mockAudit = {
   create: jest.fn().mockResolvedValue(undefined),
+  createAtomic: jest.fn().mockResolvedValue(undefined),
 } as unknown as AuditService;
 
 const mockLoanRepaymentService = {
@@ -115,11 +116,13 @@ const BASE_DTO = {
 // ─── Suite: rounding + rate-limit atomicity [M-6, M-1] ───────────────────────
 
 describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
-
   beforeEach(() => {
     jest.clearAllMocks();
     (mockPrisma.member.findFirst as jest.Mock).mockResolvedValue({ id: 'member-1' });
-    (mockPrisma.account.findFirst as jest.Mock).mockResolvedValue({ id: 'acct-1', tenantId: 'tenant-1' });
+    (mockPrisma.account.findFirst as jest.Mock).mockResolvedValue({
+      id: 'acct-1',
+      tenantId: 'tenant-1',
+    });
     (mockDaraja.initiateSTKPush as jest.Mock).mockResolvedValue({
       CheckoutRequestID: 'ws_CO_001',
       MerchantRequestID: 'mr-001',
@@ -135,7 +138,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
   it('[M-6] rounds fractional amounts (x.5 rounds up, not always ceil)', async () => {
     const service = makeService(1);
     const dto = { ...BASE_DTO, amount: 100.5 };
-    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      dto,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     const stkCall = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
     expect(stkCall.amount).toBe(101); // Math.round(100.5) = 101
@@ -144,7 +154,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
   it('[M-6] rounds 100.4 down to 100, not up to 101 (Math.ceil would give 101)', async () => {
     const service = makeService(1);
     const dto = { ...BASE_DTO, amount: 100.4 };
-    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      dto,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     const stkCall = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
     // Math.ceil(100.4) = 101 (WRONG — overcharges member)
@@ -154,7 +171,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
 
   it('[M-6] passes integer amounts through unchanged', async () => {
     const service = makeService(1);
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     const stkCall = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
     expect(stkCall.amount).toBe(1000);
@@ -178,7 +202,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
       mockDlqQueue as never,
     );
 
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     expect(redis.incrWithExpireAt).toHaveBeenCalledTimes(1);
     expect(redis.incr).not.toHaveBeenCalled();
@@ -202,7 +233,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
     );
 
     const before = Date.now();
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
     const after = Date.now();
 
     const [, expireAtMs] = (redis.incrWithExpireAt as jest.Mock).mock.calls[0];
@@ -218,7 +256,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
     const service = makeService(4); // maxPerDay = 3, currentCount = 4
 
     await expect(
-      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1'),
+      service.initiateDeposit(
+        BASE_DTO,
+        'tenant-1',
+        'user-1',
+        'user-1',
+        MpesaTriggerSource.MEMBER,
+        'idem-1',
+      ),
     ).rejects.toThrow(BadRequestException);
   });
 
@@ -226,7 +271,14 @@ describe('MpesaService.initiateDeposit [M-6, M-1]', () => {
     const service = makeService(3); // count === limit → allowed
 
     await expect(
-      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1'),
+      service.initiateDeposit(
+        BASE_DTO,
+        'tenant-1',
+        'user-1',
+        'user-1',
+        MpesaTriggerSource.MEMBER,
+        'idem-1',
+      ),
     ).resolves.toBeDefined();
   });
 });
@@ -239,7 +291,10 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (mockPrisma.member.findFirst as jest.Mock).mockResolvedValue({ id: 'member-1' });
-    (mockPrisma.account.findFirst as jest.Mock).mockResolvedValue({ id: 'acct-1', tenantId: 'tenant-1' });
+    (mockPrisma.account.findFirst as jest.Mock).mockResolvedValue({
+      id: 'acct-1',
+      tenantId: 'tenant-1',
+    });
     (mockPrisma.mpesaTransaction.create as jest.Mock).mockResolvedValue({ id: 'mpesa-tx-1' });
     (mockDaraja.initiateSTKPush as jest.Mock).mockResolvedValue({
       CheckoutRequestID: 'ws_CO_001',
@@ -253,7 +308,14 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
   });
 
   it('checks and reserves the idempotency key derived from tenant, member, and caller key', async () => {
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-key-1');
+    await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-key-1',
+    );
 
     expect(mockIdempotency.checkAndReserve).toHaveBeenCalledTimes(1);
     const [idemKey, tenantId] = (mockIdempotency.checkAndReserve as jest.Mock).mock.calls[0];
@@ -263,7 +325,14 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
 
   it('calls initiateSTKPush with Math.round(amount) and the raw accountRef for SAVINGS', async () => {
     const dto = { ...BASE_DTO, amount: 1500.7 };
-    await service.initiateDeposit(dto, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      dto,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     expect(mockDaraja.initiateSTKPush).toHaveBeenCalledTimes(1);
     const stkArgs = (mockDaraja.initiateSTKPush as jest.Mock).mock.calls[0][0];
@@ -273,7 +342,14 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
   });
 
   it('creates a PENDING STK_PUSH MpesaTransaction with correct fields', async () => {
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     expect(mockPrisma.mpesaTransaction.create).toHaveBeenCalledTimes(1);
     const { data } = (mockPrisma.mpesaTransaction.create as jest.Mock).mock.calls[0][0];
@@ -288,7 +364,14 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
   });
 
   it('emits an MPESA.DEPOSIT.INITIATED audit log with entity and tenant context', async () => {
-    await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     expect(mockAudit.create).toHaveBeenCalledTimes(1);
     const auditArgs = (mockAudit.create as jest.Mock).mock.calls[0][0];
@@ -300,7 +383,14 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
   });
 
   it('returns checkoutRequestId, customerMessage, and mpesaTxId on success', async () => {
-    const result = await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    const result = await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     expect(result).toEqual({
       checkoutRequestId: 'ws_CO_001',
@@ -311,10 +401,24 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
   });
 
   it('short-circuits and returns cached result when idempotency key is already COMPLETED', async () => {
-    const cached = { checkoutRequestId: 'ws_CO_cached', customerMessage: 'Cached', mpesaTxId: 'mpesa-tx-cached' };
-    (mockIdempotency.checkAndReserve as jest.Mock).mockResolvedValue({ status: 'COMPLETED', result: cached });
+    const cached = {
+      checkoutRequestId: 'ws_CO_cached',
+      customerMessage: 'Cached',
+      mpesaTxId: 'mpesa-tx-cached',
+    };
+    (mockIdempotency.checkAndReserve as jest.Mock).mockResolvedValue({
+      status: 'COMPLETED',
+      result: cached,
+    });
 
-    const result = await service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1');
+    const result = await service.initiateDeposit(
+      BASE_DTO,
+      'tenant-1',
+      'user-1',
+      'user-1',
+      MpesaTriggerSource.MEMBER,
+      'idem-1',
+    );
 
     expect(result).toEqual(cached);
     expect(mockDaraja.initiateSTKPush).not.toHaveBeenCalled();
@@ -325,7 +429,14 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
     (mockIdempotency.checkAndReserve as jest.Mock).mockResolvedValue({ status: 'PROCESSING' });
 
     await expect(
-      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, 'idem-1'),
+      service.initiateDeposit(
+        BASE_DTO,
+        'tenant-1',
+        'user-1',
+        'user-1',
+        MpesaTriggerSource.MEMBER,
+        'idem-1',
+      ),
     ).rejects.toThrow(BadRequestException);
 
     expect(mockDaraja.initiateSTKPush).not.toHaveBeenCalled();
@@ -333,7 +444,14 @@ describe('MpesaService.initiateDeposit – SAVINGS flow', () => {
 
   it('throws BadRequestException when no idempotency key is supplied', async () => {
     await expect(
-      service.initiateDeposit(BASE_DTO, 'tenant-1', 'user-1', 'user-1', MpesaTriggerSource.MEMBER, ''),
+      service.initiateDeposit(
+        BASE_DTO,
+        'tenant-1',
+        'user-1',
+        'user-1',
+        MpesaTriggerSource.MEMBER,
+        '',
+      ),
     ).rejects.toThrow(BadRequestException);
   });
 });
@@ -383,7 +501,14 @@ describe('MpesaService.executeB2cDisbursement', () => {
     const service = makeService(1);
 
     await expect(
-      service.executeB2cDisbursement('loan-1', 'LOAN_DISBURSEMENT', 'tenant-1', '254712345678', 50000, 'officer-1'),
+      service.executeB2cDisbursement(
+        'loan-1',
+        'LOAN_DISBURSEMENT',
+        'tenant-1',
+        '254712345678',
+        50000,
+        'officer-1',
+      ),
     ).rejects.toThrow(BadRequestException);
 
     expect(mockPrisma.loan.findFirst).not.toHaveBeenCalled();
@@ -396,10 +521,125 @@ describe('MpesaService.executeB2cDisbursement', () => {
     const service = makeService(1);
 
     await expect(
-      service.executeB2cDisbursement('loan-2', 'LOAN_DISBURSEMENT', 'tenant-1', '254712345678', 50000, 'officer-1'),
+      service.executeB2cDisbursement(
+        'loan-2',
+        'LOAN_DISBURSEMENT',
+        'tenant-1',
+        '254712345678',
+        50000,
+        'officer-1',
+      ),
     ).rejects.toThrow(BadRequestException);
 
     expect(mockPrisma.loan.findFirst).not.toHaveBeenCalled();
+    expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+  });
+
+  it('routes FOSA withdrawals through Mwaloni when enabled and links the ledger transaction', async () => {
+    const prisma = {
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(prisma)),
+      account: {
+        findUnique: jest.fn().mockResolvedValue({
+          memberId: 'member-1',
+          accountNumber: 'FOSA-001',
+        }),
+      },
+      mpesaTransaction: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({
+          id: 'mpesa-tx-1',
+          tenantId: 'tenant-1',
+          memberId: 'member-1',
+          referenceId: 'account-1',
+          transactionId: 'ledger-tx-1',
+          phoneNumber: '254712345678',
+          amount: { toString: () => '500' },
+          conversationId: 'MWD-ledger-tx-1',
+          status: TransactionStatus.PENDING,
+          resultCode: null,
+          resultDesc: null,
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'mpesa-tx-1',
+          tenantId: 'tenant-1',
+          memberId: 'member-1',
+          referenceId: 'account-1',
+          transactionId: 'ledger-tx-1',
+          phoneNumber: '254712345678',
+          amount: { toString: () => '500' },
+          conversationId: 'MWD-ledger-tx-1',
+          status: TransactionStatus.COMPLETED,
+          resultCode: 0,
+          resultDesc: 'Cashout was successful.',
+        }),
+        update: jest.fn().mockImplementation(({ data }) => ({
+          id: 'mpesa-tx-1',
+          tenantId: 'tenant-1',
+          memberId: 'member-1',
+          referenceId: 'account-1',
+          transactionId: 'ledger-tx-1',
+          phoneNumber: '254712345678',
+          amount: { toString: () => '500' },
+          conversationId: 'MWD-ledger-tx-1',
+          status: data.status,
+          resultCode: data.resultCode,
+          resultDesc: data.resultDesc,
+        })),
+      },
+    } as unknown as PrismaService;
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(true),
+      sendMobile: jest.fn().mockResolvedValue({
+        status: '00',
+        message: 'Cashout was successful.',
+      }),
+    };
+    const service = new MpesaService(
+      mockConfig,
+      prisma,
+      makeRedis(1),
+      mockIdempotency,
+      mockDaraja,
+      mockAudit,
+      mockLoanRepaymentService,
+      mockCallbackQueue as never,
+      mockDisbursementQueue as never,
+      mockB2cTimeoutQueue as never,
+      mockDlqQueue as never,
+      undefined,
+      mwaloni as never,
+      {} as never,
+    );
+
+    const result = await service.executeB2cDisbursement(
+      'account-1',
+      'FOSA_WITHDRAWAL',
+      'tenant-1',
+      '254712345678',
+      500,
+      'user-1',
+      'ledger-tx-1',
+    );
+
+    expect(result).toEqual({ conversationId: 'MWD-ledger-tx-1', mpesaTxId: 'mpesa-tx-1' });
+    expect(mwaloni.sendMobile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderNumber: 'MWD-ledger-tx-1',
+        phoneNumber: '254712345678',
+        amount: 500,
+      }),
+    );
+    expect(prisma.mpesaTransaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          transactionId: 'ledger-tx-1',
+          memberId: 'member-1',
+          conversationId: 'MWD-ledger-tx-1',
+          reference: 'B2C-MWD-ledger-tx-1',
+        }),
+      }),
+    );
     expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
   });
 });

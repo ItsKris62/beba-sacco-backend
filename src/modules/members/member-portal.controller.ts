@@ -155,10 +155,7 @@ export class MemberPortalController {
     description: 'Pre-signed profile image display URL, or null when no image is saved',
     type: ProfileImageUrlResponseDto,
   })
-  getProfileImageUrl(
-    @CurrentUser() user: AuthenticatedUser,
-    @CurrentTenant() tenant: Tenant,
-  ) {
+  getProfileImageUrl(@CurrentUser() user: AuthenticatedUser, @CurrentTenant() tenant: Tenant) {
     return this.portal.getProfileImageUrl(tenant.id, user.id);
   }
 
@@ -630,6 +627,7 @@ export class MemberPortalController {
   }
 
   @Post('withdraw/mpesa')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Withdraw from FOSA to M-Pesa',
@@ -654,7 +652,35 @@ export class MemberPortalController {
     const idempotencyKey =
       (req.headers['x-idempotency-key'] as string | undefined) ??
       (req.headers['idempotency-key'] as string | undefined);
-    return this.portal.withdrawMpesa(user.id, dto.phoneNumber, dto.amount, tenant.id, req.ip, idempotencyKey);
+    return this.portal.withdrawMpesa(
+      user.id,
+      dto.phoneNumber,
+      dto.amount,
+      tenant.id,
+      req.ip,
+      idempotencyKey,
+    );
+  }
+
+  @Get('withdraw/mpesa/:transactionId/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Check M-Pesa withdrawal status',
+    description:
+      'Returns the provider payout status for a FOSA withdrawal owned by the authenticated member.',
+  })
+  @ApiParam({
+    name: 'transactionId',
+    description: 'Ledger Transaction UUID returned by withdraw/mpesa',
+  })
+  @ApiResponse({ status: 200, description: 'Withdrawal status' })
+  @ApiResponse({ status: 404, description: 'Withdrawal transaction not found' })
+  async getWithdrawalStatus(
+    @Param('transactionId', ParseUUIDPipe) transactionId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentTenant() tenant: Tenant,
+  ) {
+    return this.portal.getWithdrawalStatus(user.id, transactionId, tenant.id);
   }
 
   @Post('accounts/transfer')

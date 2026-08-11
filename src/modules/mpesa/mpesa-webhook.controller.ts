@@ -10,6 +10,7 @@ import {
   UseGuards,
   ServiceUnavailableException,
   OnModuleInit,
+  BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
@@ -20,10 +21,7 @@ import { ConfigService } from '@nestjs/config';
 import { Public } from '../../common/decorators/public.decorator';
 import { MpesaIpGuard } from './guards/mpesa-ip.guard';
 import { MpesaService } from './mpesa.service';
-import {
-  isB2cCallback,
-  StkCallbackPayload,
-} from './dto/mpesa-callback.dto';
+import { isB2cCallback, StkCallbackPayload } from './dto/mpesa-callback.dto';
 
 /**
  * Legacy / split webhook routes retained for backward compatibility and for
@@ -39,8 +37,8 @@ import {
  *  - HMAC signature validation via X-Mpesa-Signature header
  *
  * Daraja retry behaviour: if we return any non-200 or take > 5 seconds,
- * Daraja will retry. We ALWAYS return { ResultCode: 0, ResultDesc: "Accepted" }
- * and process asynchronously via the callback queue.
+ * Daraja will retry. We return success only after durable callback persistence,
+ * then process asynchronously via the callback queue.
  */
 @ApiTags('M-Pesa Webhooks')
 @Throttle({ global: { limit: 10, ttl: 60_000 } })
@@ -63,12 +61,12 @@ export class MpesaWebhookController implements OnModuleInit {
       if (this.isProduction) {
         this.logger.warn(
           '⚠️  MPESA_WEBHOOK_SECRET is not set in production. ' +
-          'All incoming Daraja callbacks on legacy routes will be rejected.',
+            'All incoming Daraja callbacks on legacy routes will be rejected.',
         );
       } else {
         this.logger.warn(
           'MPESA_WEBHOOK_SECRET not configured — HMAC signature validation is DISABLED. ' +
-          'Safe for sandbox/staging only.',
+            'Safe for sandbox/staging only.',
         );
       }
     }
@@ -88,8 +86,8 @@ export class MpesaWebhookController implements OnModuleInit {
     @Headers('x-mpesa-signature') signature?: string,
   ) {
     if (!this.isSignatureValid(req.rawBody, signature)) {
-      this.logger.warn('STK callback: invalid HMAC signature – discarding');
-      return { ResultCode: 0, ResultDesc: 'Accepted' };
+      this.logger.warn('STK callback: invalid HMAC signature - rejecting');
+      throw new BadRequestException('Invalid M-Pesa callback signature');
     }
 
     const checkoutId = body?.Body?.stkCallback?.CheckoutRequestID ?? 'unknown';
@@ -113,8 +111,8 @@ export class MpesaWebhookController implements OnModuleInit {
     @Headers('x-mpesa-signature') signature?: string,
   ) {
     if (!this.isSignatureValid(req.rawBody, signature)) {
-      this.logger.warn('B2C result: invalid HMAC signature – discarding');
-      return { ResultCode: 0, ResultDesc: 'Accepted' };
+      this.logger.warn('B2C result: invalid HMAC signature - rejecting');
+      throw new BadRequestException('Invalid M-Pesa callback signature');
     }
 
     if (isB2cCallback(body)) {
@@ -123,6 +121,7 @@ export class MpesaWebhookController implements OnModuleInit {
       await this.safeEnqueue(body as Record<string, unknown>, 'B2C_RESULT', convId);
     } else {
       this.logger.warn('B2C result endpoint received unexpected payload structure');
+      throw new BadRequestException('Unexpected B2C callback payload');
     }
 
     return { ResultCode: 0, ResultDesc: 'Accepted' };
@@ -142,14 +141,16 @@ export class MpesaWebhookController implements OnModuleInit {
     @Headers('x-mpesa-signature') signature?: string,
   ) {
     if (!this.isSignatureValid(req.rawBody, signature)) {
-      this.logger.warn('B2C timeout: invalid HMAC signature – discarding');
-      return { ResultCode: 0, ResultDesc: 'Accepted' };
+      this.logger.warn('B2C timeout: invalid HMAC signature - rejecting');
+      throw new BadRequestException('Invalid M-Pesa callback signature');
     }
 
     if (isB2cCallback(body)) {
       const convId = body.Result.ConversationID;
       this.logger.warn(`B2C TIMEOUT | conversation=${convId} – queuing for retry`);
       await this.safeEnqueue(body as Record<string, unknown>, 'B2C_TIMEOUT', convId);
+    } else {
+      throw new BadRequestException('Unexpected B2C timeout payload');
     }
 
     return { ResultCode: 0, ResultDesc: 'Accepted' };
@@ -173,7 +174,7 @@ export class MpesaWebhookController implements OnModuleInit {
       if (this.isProduction) {
         throw new ServiceUnavailableException(
           'MPESA_WEBHOOK_SECRET is not configured. ' +
-          'Set the environment variable and redeploy before processing live callbacks.',
+            'Set the environment variable and redeploy before processing live callbacks.',
         );
       }
       return true;
@@ -181,10 +182,7 @@ export class MpesaWebhookController implements OnModuleInit {
 
     if (!signature || !rawBody) return false;
 
-    const expected = crypto
-      .createHmac('sha256', this.webhookSecret)
-      .update(rawBody)
-      .digest('hex');
+    const expected = crypto.createHmac('sha256', this.webhookSecret).update(rawBody).digest('hex');
 
     const expectedBuf = Buffer.from(expected, 'hex');
     let sigBuf: Buffer;
@@ -197,20 +195,12 @@ export class MpesaWebhookController implements OnModuleInit {
     return crypto.timingSafeEqual(expectedBuf, sigBuf);
   }
 
-  /** Enqueue without throwing – queue failure must never stop us ACKing Daraja */
+  /** Persist callback durably, then try queue dispatch. DB persistence failures propagate. */
   private async safeEnqueue(
     payload: Record<string, unknown>,
     type: Parameters<MpesaService['enqueueCallback']>[1],
     uniqueId: string,
   ): Promise<void> {
-    try {
-      await this.mpesaService.enqueueCallback(payload, type, uniqueId);
-    } catch (err: unknown) {
-      this.logger.error(
-        `Failed to enqueue ${type} callback (queue down?)`,
-        err instanceof Error ? err.message : err,
-      );
-      // Do NOT rethrow – Daraja must always receive 200
-    }
+    await this.mpesaService.enqueueCallback(payload, type, uniqueId);
   }
 }

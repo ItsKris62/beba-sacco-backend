@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { LoanStatus, TransactionStatus } from '@prisma/client';
 import { MpesaB2cTimeoutProcessor } from '../../src/modules/mpesa/processors/mpesa-b2c-timeout.processor';
+import { MpesaService } from '../../src/modules/mpesa/mpesa.service';
 import { PrismaService } from '../../src/prisma/prisma.service';
 
 describe('B2C Timeout Handler', () => {
@@ -30,9 +31,18 @@ describe('B2C Timeout Handler', () => {
         ),
       },
     };
+    const mpesaService = {
+      refreshMwaloniB2cStatusByConversation: jest
+        .fn()
+        .mockResolvedValue({ refreshed: false, terminal: false }),
+    };
 
     const moduleRef = await Test.createTestingModule({
-      providers: [MpesaB2cTimeoutProcessor, { provide: PrismaService, useValue: prisma }],
+      providers: [
+        MpesaB2cTimeoutProcessor,
+        { provide: PrismaService, useValue: prisma },
+        { provide: MpesaService, useValue: mpesaService },
+      ],
     }).compile();
 
     return {
@@ -51,6 +61,8 @@ describe('B2C Timeout Handler', () => {
         loanId: 'loan-1',
         tenantId: 'tenant-1',
         conversationId: 'conversation-1',
+        referenceId: 'loan-1',
+        referenceType: 'LOAN_DISBURSEMENT',
       },
     } as never);
 
@@ -89,6 +101,8 @@ describe('B2C Timeout Handler', () => {
         loanId: 'loan-1',
         tenantId: 'tenant-1',
         conversationId: 'conversation-1',
+        referenceId: 'loan-1',
+        referenceType: 'LOAN_DISBURSEMENT',
       },
     } as never);
 

@@ -56,7 +56,8 @@ export class MpesaTenantResolverService {
       return false;
     }
 
-    return this.claimReplay(bodyHash, input.signature);
+    await this.claimReplay(bodyHash, input.signature);
+    return true;
   }
 
   async resolveTenant(payload: Record<string, unknown>): Promise<MpesaTenantResolution | null> {
@@ -129,13 +130,18 @@ export class MpesaTenantResolverService {
     return skewSeconds <= this.maxTimestampSkewSeconds;
   }
 
-  private async claimReplay(bodyHash: string, signature: string | undefined): Promise<boolean> {
+  private async claimReplay(bodyHash: string, signature: string | undefined): Promise<void> {
     const replayKey = `mpesa:callback:replay:${signature ?? bodyHash}`;
-    const claimed = await this.redis.set(replayKey, bodyHash, this.replayTtlSeconds, true);
-    if (!claimed) {
-      this.logger.warn(`M-Pesa callback replay detected hash=${bodyHash}`);
+    try {
+      const claimed = await this.redis.set(replayKey, bodyHash, this.replayTtlSeconds, true);
+      if (!claimed) {
+        this.logger.warn(`M-Pesa callback replay detected hash=${bodyHash}`);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `M-Pesa callback replay cache unavailable; durable inbox unique key will enforce idempotency hash=${bodyHash} error=${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-    return claimed;
   }
 
   private getCallbackType(

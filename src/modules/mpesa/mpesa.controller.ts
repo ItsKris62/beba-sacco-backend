@@ -12,6 +12,7 @@ import {
   UseGuards,
   Logger,
   ServiceUnavailableException,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -274,8 +275,16 @@ export class MpesaController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Unified Safaricom Daraja callback (STK / C2B / B2C)' })
   @ApiExcludeEndpoint()
-  @ApiHeader({ name: 'X-Mpesa-Signature', required: false, description: 'HMAC-SHA256 over raw callback body' })
-  @ApiHeader({ name: 'X-Mpesa-Timestamp', required: false, description: 'Callback timestamp used for replay protection' })
+  @ApiHeader({
+    name: 'X-Mpesa-Signature',
+    required: false,
+    description: 'HMAC-SHA256 over raw callback body',
+  })
+  @ApiHeader({
+    name: 'X-Mpesa-Timestamp',
+    required: false,
+    description: 'Callback timestamp used for replay protection',
+  })
   @ApiResponse({
     status: 200,
     description:
@@ -290,7 +299,7 @@ export class MpesaController {
     @Headers('x-daraja-timestamp') darajaTimestamp?: string,
   ) {
     const correlationId = uuidv4();
-    void this.acceptCallbackAsync({
+    await this.acceptCallback({
       rawBody: req.rawBody,
       body,
       signature,
@@ -309,7 +318,7 @@ export class MpesaController {
    *  - Production: throws ServiceUnavailableException so Daraja retries and
    *    operators are alerted immediately — no unvalidated webhooks go through.
    */
-  private async acceptCallbackAsync(params: {
+  private async acceptCallback(params: {
     rawBody?: Buffer;
     body: Record<string, unknown>;
     signature?: string;
@@ -325,13 +334,15 @@ export class MpesaController {
       });
 
       if (!valid) {
-        return;
+        throw new BadRequestException('M-Pesa callback validation failed');
       }
 
       const resolved = await this.tenantResolver.resolveTenant(params.body);
       if (!resolved) {
-        this.logger.warn(`M-Pesa callback accepted but tenant unresolved correlation=${params.correlationId}`);
-        return;
+        this.logger.warn(
+          `M-Pesa callback rejected; tenant unresolved correlation=${params.correlationId}`,
+        );
+        throw new BadRequestException('M-Pesa callback tenant could not be resolved');
       }
 
       await this.mpesaService.enqueueCallback(
@@ -347,9 +358,10 @@ export class MpesaController {
       );
     } catch (error) {
       this.logger.error(
-        `M-Pesa callback async accept failed correlation=${params.correlationId}`,
+        `M-Pesa callback accept failed correlation=${params.correlationId}`,
         error instanceof Error ? error.stack : String(error),
       );
+      throw error;
     }
   }
 
@@ -380,5 +392,3 @@ export class MpesaController {
     return crypto.timingSafeEqual(expectedBuf, sigBuf);
   }
 }
-
-

@@ -173,6 +173,34 @@ export const validationSchema = Joi.object({
   }),
   MPESA_STK_RATE_LIMIT_PER_DAY: Joi.number().integer().min(1).default(3),
 
+  // Mwaloni wallet B2C provider. Required only when explicitly enabled, so C2B/STK
+  // deployments can continue to boot without Mwaloni credentials.
+  MWALONI_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
+  MWALONI_ENV: Joi.string().valid('sandbox', 'production').default('sandbox'),
+  MWALONI_DEBUG: Joi.boolean().truthy('true').falsy('false').default(false),
+  MWALONI_URL_PRODUCTION: Joi.string().uri().default('https://wallet.mwaloni.com/api/'),
+  MWALONI_URL_SANDBOX: Joi.string().uri().default('https://wallet-stg.mwaloni.com/api/'),
+  MWALONI_SERVICE_ID: Joi.string().when('MWALONI_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  MWALONI_USERNAME: Joi.string().when('MWALONI_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  MWALONI_PASSWORD: Joi.string().when('MWALONI_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  MWALONI_API_KEY: Joi.string().when('MWALONI_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+
   // ── Email (Plunk) ──────────────────────────────────────────────────────────
   PLUNK_API_KEY: Joi.string().optional(),
   PLUNK_SECRET_KEY: Joi.string().when('NODE_ENV', {

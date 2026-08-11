@@ -561,6 +561,8 @@ model MpesaTransaction {
   failureReason            String?
   referenceId              String?
   referenceType            String?
+  reconciliationDueAt      DateTime?
+  lastRecoveryAt           DateTime?
   member                   Member?            @relation(fields: [memberId], references: [id])
   transaction              Transaction?       @relation(fields: [transactionId], references: [id])
   supportTickets           SupportTicket[]
@@ -570,10 +572,69 @@ model MpesaTransaction {
   @@index([tenantId, loanId])
   @@index([tenantId, status])
   @@index([tenantId, status, createdAt])
+  @@index([tenantId, status, reconciliationDueAt])
   @@index([tenantId, type])
   @@index([checkoutRequestId])
   @@index([conversationId])
   @@index([reference])
+  @@schema("public")
+}
+
+model MpesaPayoutIntent {
+  id                  String       @id @default(uuid())
+  tenantId            String
+  dispatchKey         String       @unique
+  jobId               String       @unique
+  referenceType       String
+  referenceId         String
+  sourceTransactionId String       @unique
+  memberId            String?
+  accountId           String?
+  phoneNumber         String
+  amount              Decimal      @db.Decimal(18, 4)
+  triggeredBy         String
+  provider            String?
+  status              OutboxStatus @default(PENDING)
+  attempts            Int          @default(0)
+  lastError           String?
+  nextRetryAt         DateTime?
+  dispatchedAt        DateTime?
+  deadLetteredAt      DateTime?
+  mpesaTransactionId  String?      @unique
+  metadata            Json?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, status, nextRetryAt])
+  @@index([tenantId, referenceType, referenceId])
+  @@index([sourceTransactionId])
+  @@schema("public")
+}
+
+model MpesaCallbackInbox {
+  id                 String       @id @default(uuid())
+  tenantId           String
+  callbackType       String
+  providerUniqueId   String
+  uniqueKey          String       @unique
+  payload            Json
+  rawBodySha256      String?
+  correlationId      String?
+  mpesaTransactionId String?
+  status             OutboxStatus @default(PENDING)
+  attempts           Int          @default(0)
+  queueJobId         String?
+  lastError          String?
+  nextRetryAt        DateTime?
+  processedAt        DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, status, nextRetryAt])
+  @@index([callbackType, providerUniqueId])
+  @@index([mpesaTransactionId])
   @@schema("public")
 }
 

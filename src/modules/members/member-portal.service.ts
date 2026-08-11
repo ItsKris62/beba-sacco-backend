@@ -5,19 +5,9 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
-import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
 import { Decimal } from 'decimal.js';
 import { createHash } from 'crypto';
-import {
-  AccountType,
-  LoanStatus,
-  InterestType,
-  JournalEntryType,
-  TransactionStatus,
-  TransactionType,
-} from '@prisma/client';
-import { v4 as uuidv4 } from 'uuid';
+import { AccountType, LoanStatus, JournalEntryType } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MpesaService } from '../mpesa/mpesa.service';
@@ -37,8 +27,8 @@ import {
   ProfileImageUploadUrlResponseDto,
   ProfileImageUrlResponseDto,
 } from './dto/profile-image.dto';
-import { QUEUE_NAMES, MpesaDisbursementJobPayload } from '../queue/queue.constants';
 import { InternalTransferDto } from './dto/internal-transfer.dto';
+import { MpesaPayoutOutboxService } from '../mpesa/mpesa-payout-outbox.service';
 
 const PROFILE_IMAGE_CONTENT_TYPES: Record<string, string> = {
   jpg: 'image/jpeg',
@@ -66,8 +56,7 @@ export class MemberPortalService {
     private readonly accountsService: AccountsService,
     private readonly ledger: LedgerService,
     private readonly idempotency: IdempotencyService,
-    @InjectQueue(QUEUE_NAMES.MPESA_DISBURSEMENT)
-    private readonly disbursementQueue: Queue<MpesaDisbursementJobPayload>,
+    private readonly payoutOutbox: MpesaPayoutOutboxService,
   ) {}
 
   // ─── DASHBOARD ────────────────────────────────────────────────
@@ -484,48 +473,58 @@ export class MemberPortalService {
           tx,
         });
 
-        await this.audit
-          .create({
+        await this.audit.createAtomic(tx, {
+          tenantId,
+          actorId: userId,
+          action: 'MPESA.WITHDRAW.INITIATED',
+          entityType: 'Transaction',
+          entityId: transaction.id,
+          newValue: { amount, phone: maskPhone(phone), status: 'PROCESSING' },
+          metadata: { accountId: fosaAccount.id },
+          ipAddress,
+        });
+
+        const dispatchKey = `FOSA_WITHDRAWAL:${tenantId}:${transaction.id}`;
+        const payoutIntent = await tx.mpesaPayoutIntent.upsert({
+          where: { dispatchKey },
+          create: {
             tenantId,
-            actorId: userId,
-            action: 'MPESA.WITHDRAW.INITIATED',
-            entityType: 'Transaction',
-            entityId: transaction.id,
-            newValue: { amount, phone: maskPhone(phone), status: 'PROCESSING' },
-            metadata: { accountId: fosaAccount.id },
-            ipAddress,
-          })
-          .catch((e: unknown) => this.logger.error('Audit write failed', e));
+            dispatchKey,
+            jobId: `fosa-withdraw-${transaction.id}`,
+            referenceType: 'FOSA_WITHDRAWAL',
+            referenceId: fosaAccount.id,
+            sourceTransactionId: transaction.id,
+            memberId,
+            accountId: fosaAccount.id,
+            phoneNumber: phone,
+            amount: requestedAmount.toDecimalPlaces(4).toString(),
+            triggeredBy: userId,
+            metadata: {
+              idempotencyKey,
+              withdrawalFee: withdrawalFee.toString(),
+              maskedPhone: maskPhone(phone),
+            },
+          },
+          update: {},
+          select: { id: true },
+        });
 
         return {
           message: 'Withdrawal initiated successfully',
           transactionId: transaction.id,
           accountId: fosaAccount.id,
+          payoutIntentId: payoutIntent.id,
         };
       },
       { isolationLevel: 'Serializable' },
     );
 
-    // Enqueue only after the database transaction commits to avoid ghost B2C payouts.
-    await this.disbursementQueue.add(
-      QUEUE_NAMES.MPESA_DISBURSEMENT,
-      {
-        referenceType: 'FOSA_WITHDRAWAL',
-        referenceId: result.accountId,
-        tenantId,
-        phone,
-        amount,
-        triggeredBy: userId,
-        sourceTransactionId: result.transactionId,
-      },
-      {
-        jobId: `fosa-withdraw-${result.transactionId}`,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: true,
-        removeOnFail: { age: 86400, count: 50 },
-      },
-    );
+    const dispatch = await this.payoutOutbox.dispatchIntent(result.payoutIntentId);
+    if (!dispatch.queued) {
+      this.logger.warn(
+        `Withdrawal payout intent persisted but not queued yet | transaction=${result.transactionId} intent=${result.payoutIntentId}`,
+      );
+    }
 
     return {
       message: result.message,
@@ -861,6 +860,89 @@ export class MemberPortalService {
    * Resolves account IDs from the account types in the DTO, then delegates
    * to AccountsService.transfer() → LedgerService.postInternalTransfer().
    */
+  async getWithdrawalStatus(
+    userId: string,
+    transactionId: string,
+    tenantId: string,
+  ): Promise<{
+    transactionId: string;
+    status: 'PENDING' | 'SUCCESS' | 'FAILED';
+    amount: string;
+    requestedAt: Date;
+    lastUpdated?: Date;
+    failureReason?: string;
+    providerReference?: string | null;
+  }> {
+    const member = await this.resolveMember(userId, tenantId);
+
+    const ledgerTx = await this.prisma.transaction.findFirst({
+      where: {
+        id: transactionId,
+        tenantId,
+        account: { memberId: member.id, accountType: 'FOSA' },
+      },
+      select: {
+        id: true,
+        amount: true,
+        createdAt: true,
+        mpesaTransaction: {
+          select: {
+            id: true,
+            status: true,
+            updatedAt: true,
+            failureReason: true,
+            resultDesc: true,
+            conversationId: true,
+          },
+        },
+      },
+    });
+
+    if (!ledgerTx) {
+      throw new NotFoundException('Withdrawal transaction not found');
+    }
+
+    if (ledgerTx.mpesaTransaction?.id) {
+      await this.mpesaService.refreshMwaloniB2cStatus(ledgerTx.mpesaTransaction.id);
+    }
+
+    const refreshed = await this.prisma.mpesaTransaction.findUnique({
+      where: { transactionId: ledgerTx.id },
+      select: {
+        status: true,
+        updatedAt: true,
+        failureReason: true,
+        resultDesc: true,
+        conversationId: true,
+      },
+    });
+
+    const statusMap: Record<string, 'PENDING' | 'SUCCESS' | 'FAILED'> = {
+      PENDING: 'PENDING',
+      RECON_PENDING: 'PENDING',
+      COMPLETED: 'SUCCESS',
+      FAILED: 'FAILED',
+      REVERSED: 'FAILED',
+    };
+    const providerStatus = refreshed?.status ?? ledgerTx.mpesaTransaction?.status;
+
+    return {
+      transactionId: ledgerTx.id,
+      status: providerStatus ? (statusMap[providerStatus] ?? 'PENDING') : 'PENDING',
+      amount: ledgerTx.amount.toString(),
+      requestedAt: ledgerTx.createdAt,
+      lastUpdated: refreshed?.updatedAt ?? ledgerTx.mpesaTransaction?.updatedAt,
+      failureReason:
+        refreshed?.failureReason ??
+        refreshed?.resultDesc ??
+        ledgerTx.mpesaTransaction?.failureReason ??
+        ledgerTx.mpesaTransaction?.resultDesc ??
+        undefined,
+      providerReference:
+        refreshed?.conversationId ?? ledgerTx.mpesaTransaction?.conversationId ?? null,
+    };
+  }
+
   async internalTransfer(
     userId: string,
     tenantId: string,
