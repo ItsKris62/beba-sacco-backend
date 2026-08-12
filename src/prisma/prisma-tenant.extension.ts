@@ -18,6 +18,7 @@ export const TENANT_SCOPED_MODELS = [
   'LoanGuarantor',
   'Transaction',
   'MpesaTransaction',
+  'MpesaPayoutIntent',
   'LoanApprovalChain',
   'LoginSession',
   'WebhookSubscription',
