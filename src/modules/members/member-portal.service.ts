@@ -423,7 +423,7 @@ export class MemberPortalService {
       throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
     }
     const member = await this.resolveMember(userId, tenantId);
-    const phone = await this.resolveVerifiedWithdrawalPhone({
+    const phone = await this.resolveProfileWithdrawalPhone({
       tenantId,
       userId,
       member,
@@ -602,7 +602,7 @@ export class MemberPortalService {
     };
   }
 
-  private async resolveVerifiedWithdrawalPhone(params: {
+  private async resolveProfileWithdrawalPhone(params: {
     tenantId: string;
     userId: string;
     member: Awaited<ReturnType<MemberPortalService['resolveMember']>>;
@@ -623,13 +623,13 @@ export class MemberPortalService {
       throw new BadRequestException('Withdrawal phone number is invalid');
     }
 
-    if (!params.member.user.phoneVerified || uniqueCandidates.length === 0) {
-      await this.auditWithdrawalRejection(params, 'VERIFIED_PHONE_REQUIRED', {
+    if (uniqueCandidates.length === 0) {
+      await this.auditWithdrawalRejection(params, 'PROFILE_PHONE_REQUIRED', {
         hasPhone: uniqueCandidates.length > 0,
         phoneVerified: params.member.user.phoneVerified,
       });
       throw new BadRequestException(
-        'A verified M-Pesa phone number is required before withdrawing to M-Pesa',
+        'Add your member phone number in your profile before withdrawing to M-Pesa',
       );
     }
 
@@ -643,18 +643,18 @@ export class MemberPortalService {
       );
     }
 
-    const verifiedPhone = uniqueCandidates[0];
-    if (requested?.normalized && requested.normalized !== verifiedPhone) {
+    const profilePhone = uniqueCandidates[0];
+    if (requested?.normalized && requested.normalized !== profilePhone) {
       await this.auditWithdrawalRejection(params, 'REQUEST_PHONE_MISMATCH', {
         requestedPhone: maskPhone(requested.normalized),
-        verifiedPhone: maskPhone(verifiedPhone),
+        profilePhone: maskPhone(profilePhone),
       });
       throw new BadRequestException(
-        'Withdrawal destination must match your verified M-Pesa phone number',
+        'Withdrawal destination must match your member profile phone number',
       );
     }
 
-    return verifiedPhone;
+    return profilePhone;
   }
 
   private async auditWithdrawalRejection(

@@ -14,7 +14,7 @@ export class WithdrawMpesaDto {
     example: '254700000000',
     required: false,
     description:
-      'Deprecated compatibility field. The server resolves the payout destination from the member verified phone and rejects mismatches.',
+      'Deprecated compatibility field. The server resolves the payout destination from the member profile phone and rejects mismatches.',
   })
   @IsOptional()
   @IsPhoneNumber('KE', { message: 'Must be a valid Kenyan phone number' })

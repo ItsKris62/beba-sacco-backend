@@ -55,8 +55,8 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
             firstName: 'Jane',
             lastName: 'Member',
             email: 'jane@example.test',
-            phone: args.memberPhone ?? phone,
-            phoneNumber: args.memberPhoneNumber ?? phone,
+            phone: args.memberPhone === undefined ? phone : args.memberPhone,
+            phoneNumber: args.memberPhoneNumber === undefined ? phone : args.memberPhoneNumber,
             phoneVerified: args.phoneVerified ?? true,
           },
         }),
@@ -119,7 +119,7 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
 
   // ── Happy path ───────────────────────────────────────────────────────────
 
-  it('debits the FOSA account exactly once for a fresh idempotency key using the verified server-side phone', async () => {
+  it('debits the FOSA account exactly once for a fresh idempotency key using the member profile phone', async () => {
     const { service, ledger, idempotency, payoutOutbox, tx, audit } = buildService({
       idempotencyStatus: 'NEW',
     });
@@ -170,7 +170,7 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
     });
   });
 
-  it('rejects a request phone that differs from the verified server-side phone before debit', async () => {
+  it('rejects a request phone that differs from the member profile phone before debit', async () => {
     const { service, ledger, payoutOutbox, audit } = buildService();
 
     await expect(
@@ -187,11 +187,29 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
     );
   });
 
-  it('rejects withdrawal when the member phone is not verified before debit', async () => {
+  it('allows withdrawal when the member profile phone exists even if phoneVerified is false', async () => {
     const { service, ledger, tx } = buildService({ phoneVerified: false });
 
     await expect(
       service.withdrawMpesa(userId, phone, 500, tenantId, '127.0.0.1', 'key-1'),
+    ).resolves.toMatchObject({
+      message: 'Withdrawal initiated successfully',
+      transactionId: 'txn-500',
+    });
+
+    expect(ledger.postEntry).toHaveBeenCalledTimes(1);
+    expect(tx.mpesaPayoutIntent.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects withdrawal when the member profile phone is missing before debit', async () => {
+    const { service, ledger, tx } = buildService({
+      memberPhone: null,
+      memberPhoneNumber: null,
+      phoneVerified: false,
+    });
+
+    await expect(
+      service.withdrawMpesa(userId, undefined, 500, tenantId, '127.0.0.1', 'key-1'),
     ).rejects.toThrow(BadRequestException);
 
     expect(ledger.postEntry).not.toHaveBeenCalled();

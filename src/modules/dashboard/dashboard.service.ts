@@ -1448,8 +1448,8 @@ export class DashboardService {
             }
           : {
               maskedPhone: maskDashboardPhone(uniquePhones[0]),
-              verified: member.user.phoneVerified,
-              status: member.user.phoneVerified ? ('VERIFIED' as const) : ('UNVERIFIED' as const),
+              verified: true,
+              status: 'VERIFIED' as const,
             };
     const data: MemberDashboardDto = {
       member: {
@@ -1458,7 +1458,7 @@ export class DashboardService {
         name: `${member.user.firstName} ${member.user.lastName}`,
         email: member.user.email,
         phone: normalizeDashboardPhone(member.user.phone ?? member.user.phoneNumber),
-        phoneVerified: member.user.phoneVerified,
+        phoneVerified: uniquePhones.length === 1,
         withdrawalDestination,
         kycStatus: member.kycStatus,
         kycRejectionReason: member.kycRejectionReason,

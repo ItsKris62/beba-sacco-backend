@@ -101,7 +101,7 @@ model User {
   totpSecret              String?
   twoFactorEnabled        Boolean                  @default(false)
   lastPasswordChangeAt    DateTime                 @default(now())
-  phoneVerified           Boolean                  @default(false)
+  phoneVerified           Boolean                  @default(true)
   pinLoginRequired        Boolean                  @default(false)
   auditLogs               AuditLog[]
   approvedJournalEntries  JournalEntry[]           @relation("JournalEntryApprover")

@@ -332,7 +332,7 @@ export class MembersService {
             ...(normalizedPhone?.normalized !== undefined && {
               phone: normalizedPhone.normalized,
               phoneNumber: normalizedPhone.normalized,
-              ...(phoneChanged && { phoneVerified: false }),
+              phoneVerified: true,
             }),
             ...(dto.email !== undefined && { email: dto.email.toLowerCase() }),
             ...(dto.profileImageKey !== undefined && { profileImageKey: dto.profileImageKey }),
@@ -422,11 +422,12 @@ export class MembersService {
           },
           newValue: {
             phone: maskPhone(normalizedPhone.normalized),
-            phoneVerified: false,
+            phoneVerified: true,
           },
           metadata: {
             memberId,
-            verificationRequired: true,
+            verificationRequired: false,
+            policy: 'PROFILE_PHONE_USED_FOR_WITHDRAWAL',
           },
           ipAddress,
         })

@@ -631,7 +631,7 @@ export class MemberPortalController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Withdraw from FOSA to M-Pesa',
-    description: "Withdraws available FOSA funds to the member's phone via M-Pesa B2C.",
+    description: "Withdraws available FOSA funds to the member's profile phone via M-Pesa B2C.",
   })
   @ApiHeader({
     name: 'X-Idempotency-Key',
