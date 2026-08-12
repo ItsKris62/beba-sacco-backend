@@ -29,6 +29,7 @@ import {
 } from './dto/profile-image.dto';
 import { InternalTransferDto } from './dto/internal-transfer.dto';
 import { MpesaPayoutOutboxService } from '../mpesa/mpesa-payout-outbox.service';
+import { normalizePhone } from '../data-import/utils/phone-normalizer';
 
 const PROFILE_IMAGE_CONTENT_TYPES: Record<string, string> = {
   jpg: 'image/jpeg',
@@ -353,7 +354,7 @@ export class MemberPortalService {
 
   async withdrawMpesa(
     userId: string,
-    phone: string,
+    requestedPhone: string | undefined,
     amount: number,
     tenantId: string,
     ipAddress?: string,
@@ -363,6 +364,14 @@ export class MemberPortalService {
       throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
     }
     const member = await this.resolveMember(userId, tenantId);
+    const phone = await this.resolveVerifiedWithdrawalPhone({
+      tenantId,
+      userId,
+      member,
+      requestedPhone,
+      amount,
+      ipAddress,
+    });
 
     // Redis-layer idempotency (mirrors MpesaService.initiateDeposit / GuarantorResponseService):
     // guards the whole operation, not just the ledger post below, and lets a replayed
@@ -530,6 +539,95 @@ export class MemberPortalService {
       message: result.message,
       transactionId: result.transactionId,
     };
+  }
+
+  private async resolveVerifiedWithdrawalPhone(params: {
+    tenantId: string;
+    userId: string;
+    member: Awaited<ReturnType<MemberPortalService['resolveMember']>>;
+    requestedPhone?: string;
+    amount: number;
+    ipAddress?: string;
+  }): Promise<string> {
+    const candidates = [params.member.user.phone, params.member.user.phoneNumber]
+      .map((phone) => normalizePhone(phone).normalized)
+      .filter((phone): phone is string => Boolean(phone));
+    const uniqueCandidates = Array.from(new Set(candidates));
+    const requested = params.requestedPhone ? normalizePhone(params.requestedPhone) : null;
+
+    if (requested && !requested.isValid) {
+      await this.auditWithdrawalRejection(params, 'REQUEST_PHONE_INVALID', {
+        requestedPhone: maskPhone(params.requestedPhone ?? ''),
+      });
+      throw new BadRequestException('Withdrawal phone number is invalid');
+    }
+
+    if (!params.member.user.phoneVerified || uniqueCandidates.length === 0) {
+      await this.auditWithdrawalRejection(params, 'VERIFIED_PHONE_REQUIRED', {
+        hasPhone: uniqueCandidates.length > 0,
+        phoneVerified: params.member.user.phoneVerified,
+      });
+      throw new BadRequestException(
+        'A verified M-Pesa phone number is required before withdrawing to M-Pesa',
+      );
+    }
+
+    if (uniqueCandidates.length > 1) {
+      await this.auditWithdrawalRejection(params, 'MEMBER_PHONE_FIELDS_MISMATCH', {
+        phone: maskPhone(uniqueCandidates[0]),
+        phoneNumber: maskPhone(uniqueCandidates[1]),
+      });
+      throw new BadRequestException(
+        'Your profile phone records need verification before withdrawing to M-Pesa',
+      );
+    }
+
+    const verifiedPhone = uniqueCandidates[0];
+    if (requested?.normalized && requested.normalized !== verifiedPhone) {
+      await this.auditWithdrawalRejection(params, 'REQUEST_PHONE_MISMATCH', {
+        requestedPhone: maskPhone(requested.normalized),
+        verifiedPhone: maskPhone(verifiedPhone),
+      });
+      throw new BadRequestException(
+        'Withdrawal destination must match your verified M-Pesa phone number',
+      );
+    }
+
+    return verifiedPhone;
+  }
+
+  private async auditWithdrawalRejection(
+    params: {
+      tenantId: string;
+      userId: string;
+      member: Awaited<ReturnType<MemberPortalService['resolveMember']>>;
+      amount: number;
+      ipAddress?: string;
+    },
+    reasonCode: string,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    await this.audit
+      .create({
+        tenantId: params.tenantId,
+        actorId: params.userId,
+        action: 'MPESA.WITHDRAW.REJECTED',
+        entityType: 'Member',
+        entityId: params.member.id,
+        newValue: { status: 'REJECTED', reasonCode },
+        metadata: {
+          memberId: params.member.id,
+          amount: params.amount,
+          reasonCode,
+          ...metadata,
+        },
+        ipAddress: params.ipAddress,
+      })
+      .catch((e: unknown) =>
+        this.logger.warn(
+          `Withdrawal rejection audit failed: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
   }
   // ─── DOCUMENT UPLOAD ─────────────────────────────────────────
 
@@ -1005,7 +1103,16 @@ export class MemberPortalService {
       select: {
         id: true,
         memberNumber: true,
-        user: { select: { firstName: true, lastName: true, email: true } },
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            phoneNumber: true,
+            phoneVerified: true,
+          },
+        },
       },
     });
     if (!member) throw new NotFoundException('Member profile not found for this user');

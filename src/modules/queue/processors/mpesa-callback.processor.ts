@@ -39,6 +39,7 @@ import {
   parseDarajaTimestamp,
   isTimestampSkewed,
 } from '../../mpesa/utils/mpesa.utils';
+import { normalizePhone } from '../../data-import/utils/phone-normalizer';
 
 /**
  * Processes all Daraja callback payloads (STK Push, C2B, B2C results).
@@ -554,6 +555,20 @@ export class MpesaCallbackProcessor extends WorkerHost {
 
     const rawPayload = body as unknown as Prisma.InputJsonValue;
 
+    const callbackMeta = parseB2cResultMeta(ResultParameters);
+    const callbackMismatches = this.findB2cCallbackMismatches(mpesaTx, callbackMeta);
+    if (callbackMismatches.length > 0) {
+      await this.markB2cCallbackMismatch(mpesaTx, rawPayload, {
+        conversationId: ConversationID,
+        originatorConversationId: body.Result.OriginatorConversationID,
+        providerTransactionId: TransactionID,
+        resultCode: ResultCode,
+        resultDesc: ResultDesc,
+        mismatches: callbackMismatches,
+      });
+      return;
+    }
+
     if (ResultCode !== 0) {
       if (mpesaTx.referenceType === 'FOSA_WITHDRAWAL' && mpesaTx.transactionId) {
         // Reverse the original ledger debit through LedgerService.reverseTransaction()
@@ -727,7 +742,7 @@ export class MpesaCallbackProcessor extends WorkerHost {
       return;
     }
 
-    const meta = parseB2cResultMeta(ResultParameters);
+    const meta = callbackMeta;
     const amount = new Decimal(mpesaTx.amount.toString());
     const receipt = meta.TransactionReceipt ?? TransactionID ?? uuidv4();
 
@@ -818,6 +833,109 @@ export class MpesaCallbackProcessor extends WorkerHost {
       `B2C disbursement processed | receipt=${receipt} amount=${amount.toFixed(2)} ` +
         `loan=${mpesaTx.loanId} phone=${maskPhone(mpesaTx.phoneNumber)}`,
     );
+  }
+
+  private findB2cCallbackMismatches(
+    mpesaTx: { amount: Decimal; phoneNumber: string },
+    meta: ReturnType<typeof parseB2cResultMeta>,
+  ): string[] {
+    const mismatches: string[] = [];
+    if (meta.TransactionAmount !== undefined) {
+      const normalizedAmount = String(meta.TransactionAmount)
+        .replace(/,/g, '')
+        .replace(/[^\d.-]/g, '')
+        .trim();
+      if (!normalizedAmount) {
+        mismatches.push('AMOUNT_MISMATCH');
+      } else if (
+        !new Decimal(normalizedAmount).toDecimalPlaces(4).equals(mpesaTx.amount.toDecimalPlaces(4))
+      ) {
+        mismatches.push('AMOUNT_MISMATCH');
+      }
+    }
+
+    if (meta.ReceiverPartyPublicName) {
+      const receiverPhone = this.extractPhoneFromProviderText(meta.ReceiverPartyPublicName);
+      const expectedPhone = normalizePhone(mpesaTx.phoneNumber).normalized;
+      if (receiverPhone && expectedPhone && receiverPhone !== expectedPhone) {
+        mismatches.push('PHONE_MISMATCH');
+      }
+    }
+    return mismatches;
+  }
+
+  private extractPhoneFromProviderText(value: string): string | null {
+    const match = value.match(/(?:\+?254|0)?[17]\d{8}/);
+    return match ? normalizePhone(match[0]).normalized : null;
+  }
+
+  private async markB2cCallbackMismatch(
+    mpesaTx: {
+      id: string;
+      tenantId: string;
+      memberId: string | null;
+      referenceId: string | null;
+      reference: string;
+      transactionId: string | null;
+      phoneNumber: string;
+      amount: Decimal;
+      status: TransactionStatus;
+    },
+    rawPayload: Prisma.InputJsonValue,
+    details: {
+      conversationId: string;
+      originatorConversationId: string;
+      providerTransactionId: string;
+      resultCode: number;
+      resultDesc: string;
+      mismatches: string[];
+    },
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.mpesaTransaction.updateMany({
+        where: {
+          id: mpesaTx.id,
+          status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+        },
+        data: {
+          status: TransactionStatus.RECON_PENDING,
+          resultCode: details.resultCode,
+          resultDesc: details.resultDesc,
+          failureReason: 'B2C_CALLBACK_MISMATCH',
+          callbackPayload: rawPayload,
+        },
+      });
+      if (claim.count === 0) return;
+
+      await this.audit.createAtomic(tx, {
+        tenantId: mpesaTx.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MPESA.DISBURSEMENT.CALLBACK_MISMATCH',
+        entityType: 'MpesaTransaction',
+        entityId: mpesaTx.id,
+        oldValue: { status: mpesaTx.status },
+        newValue: {
+          status: TransactionStatus.RECON_PENDING,
+          resultCode: details.resultCode,
+          resultDesc: details.resultDesc,
+          failureReason: 'B2C_CALLBACK_MISMATCH',
+          mismatches: details.mismatches,
+        },
+        metadata: {
+          conversationId: details.conversationId,
+          originatorConversationId: details.originatorConversationId,
+          providerTransactionId: details.providerTransactionId,
+          referenceId: mpesaTx.referenceId,
+          transactionId: mpesaTx.transactionId,
+          originalReference: mpesaTx.reference,
+          memberId: mpesaTx.memberId,
+          expectedAmount: mpesaTx.amount.toString(),
+          expectedPhone: maskPhone(mpesaTx.phoneNumber),
+          automaticCompletionUnsafe: true,
+        },
+        requestId: `audit.MPESA.DISBURSEMENT.CALLBACK_MISMATCH.${mpesaTx.tenantId}.${mpesaTx.id}.${details.providerTransactionId}`,
+      });
+    });
   }
 
   // ─── Ledger helpers ───────────────────────────────────────────────────────

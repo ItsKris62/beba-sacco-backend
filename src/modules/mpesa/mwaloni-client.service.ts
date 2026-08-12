@@ -117,7 +117,7 @@ export class MwaloniClientService implements OnModuleInit {
       currency_code: 'KES',
     };
 
-    return this.makeRequest('send-money', body, 'send money');
+    return this.makeRequest('send-money', body, 'send money', 1);
   }
 
   async getStatus(orderNumber: string): Promise<MwaloniResponse> {
@@ -285,9 +285,10 @@ export class MwaloniClientService implements OnModuleInit {
     endpoint: string,
     body: Record<string, unknown>,
     label: string,
+    attempts = RETRY_ATTEMPTS,
   ): Promise<MwaloniResponse> {
     const token = await this.authenticate();
-    return this.post<MwaloniResponse>(endpoint, body, token, label);
+    return this.post<MwaloniResponse>(endpoint, body, token, label, attempts);
   }
 
   private async post<T>(
@@ -295,6 +296,7 @@ export class MwaloniClientService implements OnModuleInit {
     body: Record<string, unknown>,
     token: string | undefined,
     label: string,
+    attempts = RETRY_ATTEMPTS,
   ): Promise<T> {
     const apiKey = this.getRequiredConfig('apiKey', 'MWALONI_API_KEY');
     const url = `${this.baseUrl()}${endpoint}`;
@@ -342,7 +344,7 @@ export class MwaloniClientService implements OnModuleInit {
 
         return (await res.json()) as T;
       },
-      RETRY_ATTEMPTS,
+      attempts,
       RETRY_BASE_MS,
       label,
     );

@@ -187,4 +187,30 @@ describe('MwaloniClientService.diagnoseAuthentication', () => {
     });
     expect(JSON.stringify(result)).not.toContain('secret-provider-token');
   });
+
+  it('does not automatically retry the money-moving send-money POST after an ambiguous provider failure', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        mockJsonResponse(200, {
+          status: '00',
+          message: 'Success',
+          data: { token: 'provider-token', expiresIn: 3600 },
+        }),
+      )
+      .mockResolvedValueOnce(mockJsonResponse(500, { status: '99', message: 'Provider down' }));
+
+    const service = new MwaloniClientService(makeConfig(), makeRedis());
+
+    await expect(
+      service.sendMobile({
+        orderNumber: 'MWD-ledger-tx-1',
+        phoneNumber: '254712345678',
+        amount: 500,
+        description: 'FOSA withdrawal FOSA-001',
+      }),
+    ).rejects.toThrow('Mwaloni send money HTTP 500');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toBe('https://wallet.mwaloni.com/api/send-money');
+  });
 });

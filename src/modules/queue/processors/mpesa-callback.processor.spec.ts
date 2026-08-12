@@ -517,4 +517,130 @@ describe('MpesaCallbackProcessor – C2B tenant isolation [C-4]', () => {
       expect.objectContaining({ action: 'MPESA.DISBURSEMENT.FAILED_REFUNDED' }),
     );
   });
+
+  it('moves a FOSA B2C callback with the wrong amount to reconciliation without completing or reversing', async () => {
+    const transactionUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = makePrisma({
+      txFindFirst: jest.fn().mockResolvedValue({
+        id: 'mpesa-tx-linked',
+        tenantId: 'tenant-1',
+        transactionId: 'ledger-withdrawal-1',
+        referenceType: 'FOSA_WITHDRAWAL',
+        referenceId: 'account-1',
+        reference: 'B2C-conv-linked',
+        memberId: 'member-1',
+        amount: new Decimal(750),
+        phoneNumber: '254712345678',
+        status: TransactionStatus.PENDING,
+      }),
+      transactionUpdateMany,
+    });
+
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
+
+    await processor.process(
+      makeJob(
+        {
+          Result: {
+            ConversationID: 'conv-linked',
+            OriginatorConversationID: 'orig-linked',
+            ResultCode: 0,
+            ResultDesc: 'Success',
+            TransactionID: 'provider-tx-3',
+            ResultParameters: {
+              ResultParameter: [
+                { Key: 'TransactionAmount', Value: 500 },
+                { Key: 'ReceiverPartyPublicName', Value: '254712345678 - Jane Member' },
+              ],
+            },
+          },
+        },
+        'B2C_RESULT',
+      ),
+    );
+
+    expect(mockLedger.reverseTransaction).not.toHaveBeenCalled();
+    expect(transactionUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: TransactionStatus.RECON_PENDING,
+          failureReason: 'B2C_CALLBACK_MISMATCH',
+        }),
+      }),
+    );
+    expect(mockAudit.createAtomic).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'MPESA.DISBURSEMENT.CALLBACK_MISMATCH',
+      }),
+    );
+  });
+
+  it('moves a FOSA B2C callback with the wrong receiver phone to reconciliation', async () => {
+    const transactionUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = makePrisma({
+      txFindFirst: jest.fn().mockResolvedValue({
+        id: 'mpesa-tx-linked',
+        tenantId: 'tenant-1',
+        transactionId: 'ledger-withdrawal-1',
+        referenceType: 'FOSA_WITHDRAWAL',
+        referenceId: 'account-1',
+        reference: 'B2C-conv-linked',
+        memberId: 'member-1',
+        amount: new Decimal(750),
+        phoneNumber: '254712345678',
+        status: TransactionStatus.PENDING,
+      }),
+      transactionUpdateMany,
+    });
+
+    const processor = new MpesaCallbackProcessor(
+      prisma,
+      mockAudit,
+      mockLoanRepayment,
+      mockCache as never,
+      mockLedger,
+      mockDlq,
+      mockEventEmitter as never,
+    );
+
+    await processor.process(
+      makeJob(
+        {
+          Result: {
+            ConversationID: 'conv-linked',
+            OriginatorConversationID: 'orig-linked',
+            ResultCode: 0,
+            ResultDesc: 'Success',
+            TransactionID: 'provider-tx-4',
+            ResultParameters: {
+              ResultParameter: [
+                { Key: 'TransactionAmount', Value: 750 },
+                { Key: 'ReceiverPartyPublicName', Value: '254700000000 - Intruder' },
+              ],
+            },
+          },
+        },
+        'B2C_RESULT',
+      ),
+    );
+
+    expect(mockLedger.reverseTransaction).not.toHaveBeenCalled();
+    expect(transactionUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: TransactionStatus.RECON_PENDING,
+          failureReason: 'B2C_CALLBACK_MISMATCH',
+        }),
+      }),
+    );
+  });
 });

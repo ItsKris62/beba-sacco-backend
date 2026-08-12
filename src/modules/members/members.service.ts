@@ -17,6 +17,8 @@ import { PatchProfileDto } from './dto/patch-profile.dto';
 import type { Member, PaginatedResponse } from './members.types';
 import { provisionMemberAccounts } from '../accounts/utils/provision-accounts.util';
 import { QUEUE_NAMES, EmailJobPayload } from '../queue/queue.constants';
+import { normalizePhone } from '../data-import/utils/phone-normalizer';
+import { maskPhone } from '../mpesa/utils/mpesa.utils';
 
 /**
  * Members Service
@@ -39,7 +41,9 @@ export class MembersService {
     this.emailQueue
       .add('send', payload, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } })
       .catch((e: unknown) =>
-        this.logger.error(`[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`),
+        this.logger.error(
+          `[EmailQueue] enqueue failed [${ctx}]: ${e instanceof Error ? e.message : String(e)}`,
+        ),
       );
   }
 
@@ -66,7 +70,9 @@ export class MembersService {
         select: { id: true },
       });
       if (stages.length !== dto.stageIds.length) {
-        throw new BadRequestException('One or more stage IDs are invalid or do not belong to this tenant');
+        throw new BadRequestException(
+          'One or more stage IDs are invalid or do not belong to this tenant',
+        );
       }
     }
 
@@ -90,7 +96,9 @@ export class MembersService {
               occupation: dto.occupation,
               dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
             },
-            include: { user: { select: { firstName: true, lastName: true, email: true, phone: true } } },
+            include: {
+              user: { select: { firstName: true, lastName: true, email: true, phone: true } },
+            },
           });
 
           if (dto.stageIds && dto.stageIds.length > 0) {
@@ -134,27 +142,36 @@ export class MembersService {
       );
     }
 
-    await this.audit.create({
-      tenantId,
-      userId: createdBy,
-      action: 'MEMBER.CREATE',
-      resource: 'Member',
-      resourceId: member.id,
-      metadata: { memberNumber: member.memberNumber, linkedUserId: dto.userId, stageIds: dto.stageIds },
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    await this.audit
+      .create({
+        tenantId,
+        userId: createdBy,
+        action: 'MEMBER.CREATE',
+        resource: 'Member',
+        resourceId: member.id,
+        metadata: {
+          memberNumber: member.memberNumber,
+          linkedUserId: dto.userId,
+          stageIds: dto.stageIds,
+        },
+        ipAddress,
+      })
+      .catch((e: unknown) => this.logger.error('Audit write failed', e));
 
     if (user.email) {
       const tenant = await this.prisma.tenant.findUnique({
         where: { id: tenantId },
         select: { name: true },
       });
-      this.enqueueEmail({
-        type: 'WELCOME',
-        to: user.email,
-        firstName: user.firstName,
-        saccoName: tenant?.name ?? 'Beba SACCO',
-      }, `members.create:${member.id}`);
+      this.enqueueEmail(
+        {
+          type: 'WELCOME',
+          to: user.email,
+          firstName: user.firstName,
+          saccoName: tenant?.name ?? 'Beba SACCO',
+        },
+        `members.create:${member.id}`,
+      );
     }
 
     return member as Member;
@@ -191,7 +208,7 @@ export class MembersService {
 
     const hasMore = rows.length > limit;
     const data = (hasMore ? rows.slice(0, limit) : rows) as Member[];
-    const nextCursor = hasMore ? data[data.length - 1]?.id ?? null : null;
+    const nextCursor = hasMore ? (data[data.length - 1]?.id ?? null) : null;
 
     return {
       data,
@@ -207,9 +224,23 @@ export class MembersService {
       where: { id, tenantId },
       include: {
         user: { select: { firstName: true, lastName: true, email: true, phone: true, role: true } },
-        accounts: { select: { id: true, accountNumber: true, accountType: true, balance: true, isActive: true } },
+        accounts: {
+          select: {
+            id: true,
+            accountNumber: true,
+            accountType: true,
+            balance: true,
+            isActive: true,
+          },
+        },
         loans: {
-          select: { id: true, loanNumber: true, status: true, principalAmount: true, outstandingBalance: true },
+          select: {
+            id: true,
+            loanNumber: true,
+            status: true,
+            principalAmount: true,
+            outstandingBalance: true,
+          },
           orderBy: { appliedAt: 'desc' },
           take: 5,
         },
@@ -243,15 +274,17 @@ export class MembersService {
       include: { user: { select: { firstName: true, lastName: true, email: true } } },
     });
 
-    await this.audit.create({
-      tenantId,
-      userId: updatedBy,
-      action: 'MEMBER.UPDATE',
-      resource: 'Member',
-      resourceId: id,
-      metadata: dto as Record<string, unknown>,
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    await this.audit
+      .create({
+        tenantId,
+        userId: updatedBy,
+        action: 'MEMBER.UPDATE',
+        resource: 'Member',
+        resourceId: id,
+        metadata: dto as Record<string, unknown>,
+        ipAddress,
+      })
+      .catch((e: unknown) => this.logger.error('Audit write failed', e));
 
     return updated as Member;
   }
@@ -267,9 +300,25 @@ export class MembersService {
   ): Promise<Member> {
     const member = await this.prisma.member.findFirst({
       where: { id: memberId, tenantId },
-      select: { id: true, userId: true },
+      select: {
+        id: true,
+        userId: true,
+        user: { select: { phone: true, phoneNumber: true, phoneVerified: true } },
+      },
     });
     if (!member) throw new NotFoundException('Member not found');
+
+    const normalizedPhone = dto.phone === undefined ? undefined : normalizePhone(dto.phone);
+    if (normalizedPhone && !normalizedPhone.isValid) {
+      throw new BadRequestException('Phone must be a valid Kenyan number');
+    }
+    const currentPhones = [member.user.phone, member.user.phoneNumber]
+      .map((phone) => normalizePhone(phone).normalized)
+      .filter((phone): phone is string => Boolean(phone));
+    const phoneChanged =
+      (normalizedPhone?.normalized !== undefined &&
+        !currentPhones.every((phone) => phone === normalizedPhone.normalized)) ||
+      (normalizedPhone?.normalized !== undefined && currentPhones.length === 0);
 
     await this.prisma.$transaction(async (tx) => {
       if (dto.profileImageKey !== undefined) {
@@ -280,7 +329,11 @@ export class MembersService {
         await tx.user.update({
           where: { id: member.userId },
           data: {
-            ...(dto.phone !== undefined && { phone: dto.phone }),
+            ...(normalizedPhone?.normalized !== undefined && {
+              phone: normalizedPhone.normalized,
+              phoneNumber: normalizedPhone.normalized,
+              ...(phoneChanged && { phoneVerified: false }),
+            }),
             ...(dto.email !== undefined && { email: dto.email.toLowerCase() }),
             ...(dto.profileImageKey !== undefined && { profileImageKey: dto.profileImageKey }),
           },
@@ -304,7 +357,9 @@ export class MembersService {
             where: { id: { in: uniqueIds }, tenantId },
           });
           if (validCount !== uniqueIds.length) {
-            throw new BadRequestException('One or more stage IDs are invalid or do not belong to this tenant');
+            throw new BadRequestException(
+              'One or more stage IDs are invalid or do not belong to this tenant',
+            );
           }
         }
         await tx.memberStage.updateMany({
@@ -335,15 +390,48 @@ export class MembersService {
       },
     });
 
-    await this.audit.create({
-      tenantId,
-      userId: actorId,
-      action: 'MEMBER.PATCH_PROFILE',
-      resource: 'Member',
-      resourceId: memberId,
-      metadata: dto as unknown as Record<string, unknown>,
-      ipAddress,
-    }).catch((e: unknown) => this.logger.error('Audit write failed', e));
+    await this.audit
+      .create({
+        tenantId,
+        userId: actorId,
+        action: 'MEMBER.PATCH_PROFILE',
+        resource: 'Member',
+        resourceId: memberId,
+        metadata: {
+          ...dto,
+          ...(dto.phone !== undefined && {
+            phone: normalizedPhone?.normalized ? maskPhone(normalizedPhone.normalized) : null,
+            phoneVerificationReset: phoneChanged,
+          }),
+        } as unknown as Record<string, unknown>,
+        ipAddress,
+      })
+      .catch((e: unknown) => this.logger.error('Audit write failed', e));
+
+    if (phoneChanged && normalizedPhone?.normalized) {
+      await this.audit
+        .create({
+          tenantId,
+          userId: actorId,
+          action: 'MEMBER.PHONE_CHANGE_REQUESTED',
+          resource: 'User',
+          resourceId: member.userId,
+          oldValue: {
+            phone: currentPhones[0] ? maskPhone(currentPhones[0]) : null,
+            phoneVerified: member.user.phoneVerified,
+          },
+          newValue: {
+            phone: maskPhone(normalizedPhone.normalized),
+            phoneVerified: false,
+          },
+          metadata: {
+            memberId,
+            verificationRequired: true,
+          },
+          ipAddress,
+        })
+        .catch((e: unknown) => this.logger.error('Audit write failed', e));
+    }
 
     return updated as Member;
   }
@@ -357,7 +445,10 @@ export class MembersService {
   }
 
   private async assertExists(id: string, tenantId: string): Promise<void> {
-    const exists = await this.prisma.member.findFirst({ where: { id, tenantId }, select: { id: true } });
+    const exists = await this.prisma.member.findFirst({
+      where: { id, tenantId },
+      select: { id: true },
+    });
     if (!exists) throw new NotFoundException('Member not found');
   }
 

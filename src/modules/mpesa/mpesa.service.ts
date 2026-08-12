@@ -41,6 +41,16 @@ import { MpesaTransactionStatusDto } from './dto/mpesa-transaction-status.dto';
 import { LoanRepaymentService } from '../loans/loan-repayment.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { LedgerService } from '../accounting/ledger.service';
+import { normalizePhone } from '../data-import/utils/phone-normalizer';
+
+const MWALONI_PROVIDER_STATE = {
+  LOCAL_CREATED: 'LOCAL_CREATED',
+  SEND_ATTEMPTED: 'PROVIDER_SEND_ATTEMPTED',
+  ACCEPTED: 'PROVIDER_ACCEPTED',
+  OUTCOME_UNKNOWN: 'PROVIDER_OUTCOME_UNKNOWN',
+  COMPLETED: 'COMPLETED',
+  FAILED: 'FAILED',
+} as const;
 
 export interface B2cWalletBalanceSnapshot {
   provider: 'MWALONI';
@@ -509,10 +519,29 @@ export class MpesaService {
           referenceType: true,
           tenantId: true,
           status: true,
+          providerSubmissionState: true,
           reconciliationDueAt: true,
         },
       });
       if (existing?.conversationId) {
+        if (existing.providerSubmissionState === MWALONI_PROVIDER_STATE.LOCAL_CREATED) {
+          if (!this.mwaloni?.isEnabled()) {
+            throw new B2cProviderUnavailableException(
+              'Mwaloni B2C payment wallet is not enabled or available',
+            );
+          }
+          return this.submitMwaloniMobilePayout(existing.id, existing.conversationId, {
+            referenceId,
+            referenceType,
+            tenantId,
+            memberId,
+            accountReference,
+            phone,
+            amount,
+            triggeredBy,
+            sourceTransactionId,
+          });
+        }
         if (
           existing.status === TransactionStatus.PENDING ||
           existing.status === TransactionStatus.RECON_PENDING
@@ -525,6 +554,15 @@ export class MpesaService {
             tenantId: existing.tenantId,
             conversationId: existing.conversationId,
           });
+        }
+        if (
+          existing.providerSubmissionState === MWALONI_PROVIDER_STATE.SEND_ATTEMPTED ||
+          existing.providerSubmissionState === MWALONI_PROVIDER_STATE.OUTCOME_UNKNOWN
+        ) {
+          await this.markMwaloniOutcomeUnknown(
+            existing.id,
+            'B2C dispatch retry found an ambiguous prior provider send state',
+          );
         }
         return { conversationId: existing.conversationId, mpesaTxId: existing.id };
       }
@@ -576,6 +614,9 @@ export class MpesaService {
     const existing = await this.prisma.mpesaTransaction.findUnique({ where: { reference } });
 
     if (existing) {
+      if (existing.providerSubmissionState === MWALONI_PROVIDER_STATE.LOCAL_CREATED) {
+        return this.submitMwaloniMobilePayout(existing.id, orderNumber, params);
+      }
       if (
         existing.status === TransactionStatus.PENDING ||
         existing.status === TransactionStatus.RECON_PENDING
@@ -618,6 +659,7 @@ export class MpesaService {
           description: 'FOSA Withdrawal via Mwaloni',
           reference,
           status: TransactionStatus.PENDING,
+          providerSubmissionState: MWALONI_PROVIDER_STATE.LOCAL_CREATED,
           reconciliationDueAt,
           callbackPayload: requestPayload,
         },
@@ -647,14 +689,7 @@ export class MpesaService {
       return row;
     });
 
-    const response = await this.mwaloni.sendMobile({
-      orderNumber,
-      phoneNumber: params.phone,
-      amount: params.amount,
-      description: `FOSA withdrawal ${params.accountReference}`.slice(0, 100),
-    });
-
-    await this.applyMwaloniStatus(mpesaTx.id, response, 'send-money');
+    await this.submitMwaloniMobilePayout(mpesaTx.id, orderNumber, params);
 
     this.logger.log(
       `Mwaloni B2C submitted | tenant=${params.tenantId} refType=${params.referenceType} ` +
@@ -669,6 +704,114 @@ export class MpesaService {
     });
 
     return { conversationId: orderNumber, mpesaTxId: mpesaTx.id };
+  }
+
+  private async submitMwaloniMobilePayout(
+    mpesaTransactionId: string,
+    orderNumber: string,
+    params: {
+      referenceId: string;
+      referenceType: 'LOAN_DISBURSEMENT' | 'FOSA_WITHDRAWAL';
+      tenantId: string;
+      memberId: string;
+      accountReference: string;
+      phone: string;
+      amount: number;
+      triggeredBy: string;
+      sourceTransactionId?: string;
+    },
+  ): Promise<{ conversationId: string; mpesaTxId: string }> {
+    if (!this.mwaloni) {
+      throw new B2cProviderUnavailableException('Mwaloni B2C client is not available');
+    }
+
+    const attemptedAt = new Date();
+    const claim = await this.prisma.mpesaTransaction.updateMany({
+      where: {
+        id: mpesaTransactionId,
+        status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+        providerSubmissionState: MWALONI_PROVIDER_STATE.LOCAL_CREATED,
+      },
+      data: {
+        providerSubmissionState: MWALONI_PROVIDER_STATE.SEND_ATTEMPTED,
+        providerSendAttemptedAt: attemptedAt,
+        providerLastCheckedAt: attemptedAt,
+      },
+    });
+
+    if (claim.count === 0) {
+      const existing = await this.prisma.mpesaTransaction.findUniqueOrThrow({
+        where: { id: mpesaTransactionId },
+        select: { conversationId: true },
+      });
+      return {
+        conversationId: existing.conversationId ?? orderNumber,
+        mpesaTxId: mpesaTransactionId,
+      };
+    }
+
+    await this.audit
+      .create({
+        tenantId: params.tenantId,
+        actorId: params.triggeredBy,
+        action: 'MWALONI.B2C.SEND_ATTEMPTED',
+        entityType: 'MpesaTransaction',
+        entityId: mpesaTransactionId,
+        newValue: {
+          providerSubmissionState: MWALONI_PROVIDER_STATE.SEND_ATTEMPTED,
+          orderNumber,
+          amount: params.amount,
+        },
+        metadata: {
+          provider: 'MWALONI',
+          referenceType: params.referenceType,
+          referenceId: params.referenceId,
+          transactionId: params.sourceTransactionId,
+          memberId: params.memberId,
+          phone: maskPhone(params.phone),
+        },
+      })
+      .catch((e: unknown) =>
+        this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
+      );
+
+    try {
+      const response = await this.mwaloni.sendMobile({
+        orderNumber,
+        phoneNumber: params.phone,
+        amount: params.amount,
+        description: `FOSA withdrawal ${params.accountReference}`.slice(0, 100),
+      });
+
+      await this.prisma.mpesaTransaction.updateMany({
+        where: { id: mpesaTransactionId },
+        data: {
+          providerSubmissionState: MWALONI_PROVIDER_STATE.ACCEPTED,
+          providerAcceptedAt: new Date(),
+          providerLastCheckedAt: new Date(),
+        },
+      });
+
+      await this.applyMwaloniStatus(mpesaTransactionId, response, 'send-money');
+      return { conversationId: orderNumber, mpesaTxId: mpesaTransactionId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.markMwaloniOutcomeUnknown(
+        mpesaTransactionId,
+        `Mwaloni send outcome unknown: ${message}`,
+      );
+      await this.scheduleB2cTimeoutCheck({
+        referenceId: params.referenceId,
+        referenceType: params.referenceType,
+        tenantId: params.tenantId,
+        conversationId: orderNumber,
+      });
+      this.logger.error(
+        `Mwaloni B2C send outcome unknown; no blind retry will be attempted | ` +
+          `tenant=${params.tenantId} order=${orderNumber} tx=${mpesaTransactionId} error=${message}`,
+      );
+      return { conversationId: orderNumber, mpesaTxId: mpesaTransactionId };
+    }
   }
 
   async refreshMwaloniB2cStatus(mpesaTransactionId: string): Promise<{
@@ -723,6 +866,26 @@ export class MpesaService {
       response: this.toJsonObject(response),
       checkedAt: new Date().toISOString(),
     } satisfies Prisma.InputJsonObject;
+    const current = await this.prisma.mpesaTransaction.findUnique({
+      where: { id: mpesaTransactionId },
+      select: {
+        id: true,
+        tenantId: true,
+        memberId: true,
+        referenceId: true,
+        transactionId: true,
+        phoneNumber: true,
+        amount: true,
+        conversationId: true,
+      },
+    });
+    if (!current) throw new NotFoundException('Mwaloni B2C transaction not found');
+
+    const mismatches = this.findMwaloniResponseMismatches(current, response);
+    if (mismatches.length > 0) {
+      await this.markMwaloniMismatchReconciliation(current, payload, mismatches, message);
+      return { refreshed: true, terminal: false, status: TransactionStatus.RECON_PENDING };
+    }
 
     if (this.isMwaloniSuccess(status)) {
       await this.prisma.$transaction(async (tx) => {
@@ -733,6 +896,8 @@ export class MpesaService {
           },
           data: {
             status: TransactionStatus.COMPLETED,
+            providerSubmissionState: MWALONI_PROVIDER_STATE.COMPLETED,
+            providerLastCheckedAt: new Date(),
             resultCode: 0,
             resultDesc: message,
             callbackPayload: payload,
@@ -778,6 +943,7 @@ export class MpesaService {
         data: {
           resultDesc: message,
           callbackPayload: payload,
+          providerLastCheckedAt: new Date(),
         },
       });
       return { refreshed: true, terminal: false, status: TransactionStatus.PENDING };
@@ -824,6 +990,8 @@ export class MpesaService {
           where: { id: mpesaTx.id },
           data: {
             status: TransactionStatus.FAILED,
+            providerSubmissionState: MWALONI_PROVIDER_STATE.FAILED,
+            providerLastCheckedAt: new Date(),
             resultCode: params.resultCode,
             resultDesc: params.resultDesc,
             failureReason: params.failureReason,
@@ -868,6 +1036,119 @@ export class MpesaService {
       },
       { isolationLevel: 'Serializable' },
     );
+  }
+
+  private async markMwaloniOutcomeUnknown(mpesaTransactionId: string, reason: string) {
+    await this.prisma.$transaction(async (tx) => {
+      const row = await tx.mpesaTransaction.findUnique({
+        where: { id: mpesaTransactionId },
+        select: {
+          id: true,
+          tenantId: true,
+          memberId: true,
+          referenceId: true,
+          transactionId: true,
+          phoneNumber: true,
+          amount: true,
+          conversationId: true,
+          status: true,
+        },
+      });
+      if (!row) return;
+      const claim = await tx.mpesaTransaction.updateMany({
+        where: {
+          id: mpesaTransactionId,
+          status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+        },
+        data: {
+          status: TransactionStatus.RECON_PENDING,
+          providerSubmissionState: MWALONI_PROVIDER_STATE.OUTCOME_UNKNOWN,
+          providerLastCheckedAt: new Date(),
+          failureReason: 'MWALONI_PROVIDER_SEND_OUTCOME_UNKNOWN',
+          resultDesc: reason.slice(0, 240),
+        },
+      });
+      if (claim.count === 0) return;
+      await this.audit.createAtomic(tx, {
+        tenantId: row.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MWALONI.B2C.SEND_AMBIGUOUS',
+        entityType: 'MpesaTransaction',
+        entityId: row.id,
+        oldValue: { status: row.status },
+        newValue: {
+          status: TransactionStatus.RECON_PENDING,
+          providerSubmissionState: MWALONI_PROVIDER_STATE.OUTCOME_UNKNOWN,
+          reason,
+        },
+        metadata: {
+          provider: 'MWALONI',
+          orderNumber: row.conversationId,
+          referenceId: row.referenceId,
+          transactionId: row.transactionId,
+          memberId: row.memberId,
+          amount: row.amount.toString(),
+          phone: maskPhone(row.phoneNumber),
+        },
+        requestId: `audit.MWALONI.B2C.SEND_AMBIGUOUS.${row.tenantId}.${row.id}`,
+      });
+    });
+  }
+
+  private async markMwaloniMismatchReconciliation(
+    row: {
+      id: string;
+      tenantId: string;
+      memberId: string | null;
+      referenceId: string | null;
+      transactionId: string | null;
+      phoneNumber: string;
+      amount: Decimal;
+      conversationId: string | null;
+    },
+    payload: Prisma.InputJsonObject,
+    mismatches: string[],
+    message: string,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.mpesaTransaction.updateMany({
+        where: {
+          id: row.id,
+          status: { in: [TransactionStatus.PENDING, TransactionStatus.RECON_PENDING] },
+        },
+        data: {
+          status: TransactionStatus.RECON_PENDING,
+          providerSubmissionState: MWALONI_PROVIDER_STATE.OUTCOME_UNKNOWN,
+          providerLastCheckedAt: new Date(),
+          failureReason: 'MWALONI_PROVIDER_RESPONSE_MISMATCH',
+          resultDesc: message,
+          callbackPayload: payload,
+        },
+      });
+      if (claim.count === 0) return;
+      await this.audit.createAtomic(tx, {
+        tenantId: row.tenantId,
+        actorId: 'SYSTEM',
+        action: 'MWALONI.B2C.RESPONSE_MISMATCH',
+        entityType: 'MpesaTransaction',
+        entityId: row.id,
+        newValue: {
+          status: TransactionStatus.RECON_PENDING,
+          failureReason: 'MWALONI_PROVIDER_RESPONSE_MISMATCH',
+          mismatches,
+        },
+        metadata: {
+          provider: 'MWALONI',
+          orderNumber: row.conversationId,
+          referenceId: row.referenceId,
+          transactionId: row.transactionId,
+          memberId: row.memberId,
+          expectedAmount: row.amount.toString(),
+          expectedPhone: maskPhone(row.phoneNumber),
+        },
+        requestId: `audit.MWALONI.B2C.RESPONSE_MISMATCH.${row.tenantId}.${row.id}`,
+      });
+    });
   }
 
   private async auditMwaloniTerminal(
@@ -931,6 +1212,63 @@ export class MpesaService {
     return ['02', '03', 'PENDING', 'PROCESSING', 'QUEUED', 'IN_PROGRESS'].includes(
       status.toUpperCase(),
     );
+  }
+
+  private findMwaloniResponseMismatches(
+    mpesaTx: {
+      amount: Decimal;
+      phoneNumber: string;
+      conversationId: string | null;
+    },
+    response: MwaloniResponse,
+  ): string[] {
+    const mismatches: string[] = [];
+    const providerOrder = this.extractStringField(response, [
+      'orderNumber',
+      'order_number',
+      'conversationId',
+      'ConversationID',
+    ]);
+    if (providerOrder && mpesaTx.conversationId && providerOrder !== mpesaTx.conversationId) {
+      mismatches.push('ORDER_NUMBER_MISMATCH');
+    }
+
+    const providerAmount = this.extractNumericField(response, [
+      'amount',
+      'transactionAmount',
+      'TransactionAmount',
+      'transAmount',
+      'TransAmount',
+    ]);
+    if (
+      providerAmount !== null &&
+      !new Decimal(providerAmount).toDecimalPlaces(4).equals(mpesaTx.amount.toDecimalPlaces(4))
+    ) {
+      mismatches.push('AMOUNT_MISMATCH');
+    }
+
+    const providerPhone = this.extractStringField(response, [
+      'phone',
+      'phoneNumber',
+      'account_number',
+      'accountNumber',
+      'msisdn',
+      'MSISDN',
+      'receiverPhone',
+    ]);
+    if (providerPhone) {
+      const normalizedProviderPhone = normalizePhone(providerPhone).normalized;
+      const normalizedExpectedPhone = normalizePhone(mpesaTx.phoneNumber).normalized;
+      if (
+        normalizedProviderPhone &&
+        normalizedExpectedPhone &&
+        normalizedProviderPhone !== normalizedExpectedPhone
+      ) {
+        mismatches.push('PHONE_MISMATCH');
+      }
+    }
+
+    return mismatches;
   }
 
   private normalizeMwaloniBalance(response: MwaloniResponse): B2cWalletBalanceSnapshot {

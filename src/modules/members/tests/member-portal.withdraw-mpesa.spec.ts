@@ -21,6 +21,9 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
       idempotencyStatus?: 'NEW' | 'PROCESSING' | 'COMPLETED';
       cachedResult?: unknown;
       noFosaAccount?: boolean;
+      memberPhone?: string | null;
+      memberPhoneNumber?: string | null;
+      phoneVerified?: boolean;
     } = {},
   ) {
     const tx = {
@@ -44,7 +47,18 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
 
     const prisma = {
       member: {
-        findFirst: jest.fn().mockResolvedValue({ id: memberId, memberNumber: 'M-001' }),
+        findFirst: jest.fn().mockResolvedValue({
+          id: memberId,
+          memberNumber: 'M-001',
+          user: {
+            firstName: 'Jane',
+            lastName: 'Member',
+            email: 'jane@example.test',
+            phone: args.memberPhone ?? phone,
+            phoneNumber: args.memberPhoneNumber ?? phone,
+            phoneVerified: args.phoneVerified ?? true,
+          },
+        }),
       },
       $transaction: jest.fn((callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
     };
@@ -104,12 +118,19 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
 
   // ── Happy path ───────────────────────────────────────────────────────────
 
-  it('debits the FOSA account exactly once for a fresh idempotency key', async () => {
+  it('debits the FOSA account exactly once for a fresh idempotency key using the verified server-side phone', async () => {
     const { service, ledger, idempotency, payoutOutbox, tx, audit } = buildService({
       idempotencyStatus: 'NEW',
     });
 
-    const result = await service.withdrawMpesa(userId, phone, 500, tenantId, '127.0.0.1', 'key-1');
+    const result = await service.withdrawMpesa(
+      userId,
+      undefined,
+      500,
+      tenantId,
+      '127.0.0.1',
+      'key-1',
+    );
 
     expect(ledger.postEntry).toHaveBeenCalledTimes(1);
     expect(ledger.postEntry).toHaveBeenCalledWith(
@@ -145,6 +166,34 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
       message: 'Withdrawal initiated successfully',
       transactionId: 'txn-500',
     });
+  });
+
+  it('rejects a request phone that differs from the verified server-side phone before debit', async () => {
+    const { service, ledger, payoutOutbox, audit } = buildService();
+
+    await expect(
+      service.withdrawMpesa(userId, '254700000000', 500, tenantId, '127.0.0.1', 'key-1'),
+    ).rejects.toThrow(BadRequestException);
+
+    expect(ledger.postEntry).not.toHaveBeenCalled();
+    expect(payoutOutbox.dispatchIntent).not.toHaveBeenCalled();
+    expect(audit.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'MPESA.WITHDRAW.REJECTED',
+        newValue: expect.objectContaining({ reasonCode: 'REQUEST_PHONE_MISMATCH' }),
+      }),
+    );
+  });
+
+  it('rejects withdrawal when the member phone is not verified before debit', async () => {
+    const { service, ledger, tx } = buildService({ phoneVerified: false });
+
+    await expect(
+      service.withdrawMpesa(userId, phone, 500, tenantId, '127.0.0.1', 'key-1'),
+    ).rejects.toThrow(BadRequestException);
+
+    expect(ledger.postEntry).not.toHaveBeenCalled();
+    expect(tx.mpesaPayoutIntent.upsert).not.toHaveBeenCalled();
   });
 
   // ── Exact replay: same key, same payload ──────────────────────────────────
@@ -191,7 +240,7 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
     expect(payoutOutbox.dispatchIntent).not.toHaveBeenCalled();
   });
 
-  it('rejects a replay that reuses the key with a different phone number', async () => {
+  it('rejects a fresh request that supplies a different phone number', async () => {
     const payloadHashForOriginalPhone = hashPayload(phone, 500);
 
     const { service, ledger } = buildService({

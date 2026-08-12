@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsNumber, IsPhoneNumber, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsPhoneNumber, Min } from 'class-validator';
 
 export class WithdrawMpesaDto {
   @ApiProperty({
@@ -12,10 +12,11 @@ export class WithdrawMpesaDto {
 
   @ApiProperty({
     example: '254700000000',
-    description: 'Valid Kenyan M-Pesa phone number (E.164 format or local 07xx/01xx)',
+    required: false,
+    description:
+      'Deprecated compatibility field. The server resolves the payout destination from the member verified phone and rejects mismatches.',
   })
-  @IsNotEmpty()
+  @IsOptional()
   @IsPhoneNumber('KE', { message: 'Must be a valid Kenyan phone number' })
-  phoneNumber!: string;
+  phoneNumber?: string;
 }
-

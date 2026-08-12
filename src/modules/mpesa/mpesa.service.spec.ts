@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Decimal } from 'decimal.js';
 import { MpesaService } from './mpesa.service';
 import { RedisService } from '../../common/services/redis.service';
 import { IdempotencyService } from '../../common/services/idempotency.service';
@@ -589,7 +590,20 @@ describe('MpesaService.executeB2cDisbursement', () => {
         }),
       },
       mpesaTransaction: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({
+            id: 'mpesa-tx-1',
+            tenantId: 'tenant-1',
+            memberId: 'member-1',
+            referenceId: 'account-1',
+            transactionId: 'ledger-tx-1',
+            phoneNumber: '254712345678',
+            amount: new Decimal(500),
+            conversationId: 'MWD-ledger-tx-1',
+          }),
         create: jest.fn().mockResolvedValue({
           id: 'mpesa-tx-1',
           tenantId: 'tenant-1',
@@ -747,7 +761,21 @@ describe('MpesaService.executeB2cDisbursement', () => {
         }),
       },
       mpesaTransaction: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({
+            id: 'mpesa-tx-1',
+            tenantId: 'tenant-1',
+            memberId: 'member-1',
+            referenceId: 'account-1',
+            transactionId: 'ledger-tx-1',
+            phoneNumber: '254712345678',
+            amount: new Decimal(500),
+            conversationId: 'MWD-ledger-tx-1',
+            status: TransactionStatus.PENDING,
+          }),
         create: jest.fn().mockResolvedValue({
           id: 'mpesa-tx-1',
           tenantId: 'tenant-1',
@@ -758,6 +786,12 @@ describe('MpesaService.executeB2cDisbursement', () => {
           amount: { toString: () => '500' },
           conversationId: 'MWD-ledger-tx-1',
           status: TransactionStatus.PENDING,
+          providerSubmissionState: 'LOCAL_CREATED',
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'mpesa-tx-1',
+          conversationId: 'MWD-ledger-tx-1',
         }),
       },
     } as unknown as PrismaService;
@@ -782,20 +816,161 @@ describe('MpesaService.executeB2cDisbursement', () => {
       {} as never,
     );
 
-    await expect(
-      service.executeB2cDisbursement(
-        'account-1',
-        'FOSA_WITHDRAWAL',
-        'tenant-1',
-        '254712345678',
-        500,
-        'user-1',
-        'ledger-tx-1',
-      ),
-    ).rejects.toMatchObject({ code: 'MWALONI_AUTH_FAILED' });
+    const result = await service.executeB2cDisbursement(
+      'account-1',
+      'FOSA_WITHDRAWAL',
+      'tenant-1',
+      '254712345678',
+      500,
+      'user-1',
+      'ledger-tx-1',
+    );
 
     expect(mwaloni.sendMobile).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ conversationId: 'MWD-ledger-tx-1', mpesaTxId: 'mpesa-tx-1' });
+    expect(prisma.mpesaTransaction.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: TransactionStatus.RECON_PENDING,
+          providerSubmissionState: 'PROVIDER_OUTCOME_UNKNOWN',
+        }),
+      }),
+    );
     expect(mockDaraja.initiateB2C).not.toHaveBeenCalled();
+  });
+
+  it('retries safely when an existing local payout row was never submitted to Mwaloni', async () => {
+    const prisma = {
+      account: {
+        findUnique: jest.fn().mockResolvedValue({
+          memberId: 'member-1',
+          accountNumber: 'FOSA-001',
+        }),
+      },
+      mpesaTransaction: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce({
+            id: 'mpesa-tx-1',
+            tenantId: 'tenant-1',
+            referenceId: 'account-1',
+            referenceType: 'FOSA_WITHDRAWAL',
+            conversationId: 'MWD-ledger-tx-1',
+            status: TransactionStatus.PENDING,
+            providerSubmissionState: 'LOCAL_CREATED',
+          })
+          .mockResolvedValueOnce({
+            id: 'mpesa-tx-1',
+            tenantId: 'tenant-1',
+            memberId: 'member-1',
+            referenceId: 'account-1',
+            transactionId: 'ledger-tx-1',
+            phoneNumber: '254712345678',
+            amount: new Decimal(500),
+            conversationId: 'MWD-ledger-tx-1',
+          }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'mpesa-tx-1',
+          conversationId: 'MWD-ledger-tx-1',
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+    } as unknown as PrismaService;
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(true),
+      sendMobile: jest.fn().mockResolvedValue({ status: '02', message: 'Processing' }),
+    };
+    const service = new MpesaService(
+      mockConfig,
+      prisma,
+      makeRedis(1),
+      mockIdempotency,
+      mockDaraja,
+      mockAudit,
+      mockLoanRepaymentService,
+      mockCallbackQueue as never,
+      mockDisbursementQueue as never,
+      mockB2cTimeoutQueue as never,
+      mockDlqQueue as never,
+      undefined,
+      mwaloni as never,
+      {} as never,
+    );
+
+    const result = await service.executeB2cDisbursement(
+      'account-1',
+      'FOSA_WITHDRAWAL',
+      'tenant-1',
+      '254712345678',
+      500,
+      'user-1',
+      'ledger-tx-1',
+    );
+
+    expect(result).toEqual({ conversationId: 'MWD-ledger-tx-1', mpesaTxId: 'mpesa-tx-1' });
+    expect(mwaloni.sendMobile).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not resend when a retry finds an ambiguous provider send state', async () => {
+    const prisma = {
+      account: {
+        findUnique: jest.fn().mockResolvedValue({
+          memberId: 'member-1',
+          accountNumber: 'FOSA-001',
+        }),
+      },
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(prisma)),
+      mpesaTransaction: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'mpesa-tx-1',
+          tenantId: 'tenant-1',
+          memberId: 'member-1',
+          referenceId: 'account-1',
+          referenceType: 'FOSA_WITHDRAWAL',
+          transactionId: 'ledger-tx-1',
+          phoneNumber: '254712345678',
+          amount: { toString: () => '500' },
+          conversationId: 'MWD-ledger-tx-1',
+          status: TransactionStatus.RECON_PENDING,
+          providerSubmissionState: 'PROVIDER_OUTCOME_UNKNOWN',
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    } as unknown as PrismaService;
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(true),
+      sendMobile: jest.fn(),
+    };
+    const service = new MpesaService(
+      mockConfig,
+      prisma,
+      makeRedis(1),
+      mockIdempotency,
+      mockDaraja,
+      mockAudit,
+      mockLoanRepaymentService,
+      mockCallbackQueue as never,
+      mockDisbursementQueue as never,
+      mockB2cTimeoutQueue as never,
+      mockDlqQueue as never,
+      undefined,
+      mwaloni as never,
+      {} as never,
+    );
+
+    const result = await service.executeB2cDisbursement(
+      'account-1',
+      'FOSA_WITHDRAWAL',
+      'tenant-1',
+      '254712345678',
+      500,
+      'user-1',
+      'ledger-tx-1',
+    );
+
+    expect(result).toEqual({ conversationId: 'MWD-ledger-tx-1', mpesaTxId: 'mpesa-tx-1' });
+    expect(mwaloni.sendMobile).not.toHaveBeenCalled();
   });
 });
 

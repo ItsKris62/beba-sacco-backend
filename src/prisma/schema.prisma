@@ -561,6 +561,10 @@ model MpesaTransaction {
   failureReason            String?
   referenceId              String?
   referenceType            String?
+  providerSubmissionState  String?
+  providerSendAttemptedAt  DateTime?
+  providerAcceptedAt       DateTime?
+  providerLastCheckedAt    DateTime?
   reconciliationDueAt      DateTime?
   lastRecoveryAt           DateTime?
   member                   Member?            @relation(fields: [memberId], references: [id])
@@ -573,6 +577,7 @@ model MpesaTransaction {
   @@index([tenantId, status])
   @@index([tenantId, status, createdAt])
   @@index([tenantId, status, reconciliationDueAt])
+  @@index([tenantId, providerSubmissionState])
   @@index([tenantId, type])
   @@index([checkoutRequestId])
   @@index([conversationId])
