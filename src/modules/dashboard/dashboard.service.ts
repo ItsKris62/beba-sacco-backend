@@ -116,9 +116,9 @@ export interface DashboardDrilldownResponse {
 }
 
 const MEMBER_DASH_CACHE_KEY = (tenantId: string, userId: string) =>
-  `DASH:MEMBER:${tenantId}:${userId}:v4`;
+  `DASH:MEMBER:${tenantId}:${userId}:v5`;
 const MEMBER_DASH_STALE_KEY = (tenantId: string, userId: string) =>
-  `DASH:MEMBER:${tenantId}:${userId}:stale:v4`;
+  `DASH:MEMBER:${tenantId}:${userId}:stale:v5`;
 
 function toDateOnly(date: string): Date {
   return new Date(`${date.slice(0, 10)}T00:00:00.000Z`);
@@ -126,6 +126,56 @@ function toDateOnly(date: string): Date {
 
 function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+function normalizeDashboardPhone(phone?: string | null): string | null {
+  if (!phone) return null;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 9 && digits.startsWith('7')) return `254${digits}`;
+  if (digits.length === 10 && digits.startsWith('07')) return `254${digits.slice(1)}`;
+  if (digits.length === 12 && digits.startsWith('254')) return digits;
+  return phone;
+}
+
+function maskDashboardPhone(phone?: string | null): string | null {
+  const normalized = normalizeDashboardPhone(phone);
+  if (!normalized) return null;
+  if (normalized.length < 7) return '********';
+  return `+${normalized.slice(0, 3)} ${normalized.slice(3, 4)}** *** ${normalized.slice(-3)}`;
+}
+
+function memberWithdrawalReference(createdAt: Date, transactionId: string): string {
+  const date = createdAt.toISOString().slice(0, 10).replace(/-/g, '');
+  return `WD-${date}-${transactionId.slice(0, 8).toUpperCase()}`;
+}
+
+function mapWithdrawalMemberState(params: {
+  transactionStatus?: string | null;
+  mpesaStatus?: string | null;
+  providerSubmissionState?: string | null;
+  manualReviewRequired?: boolean | null;
+}): { memberStatus: string; memberStatusLabel: string } {
+  if (params.mpesaStatus === 'COMPLETED') {
+    return { memberStatus: 'COMPLETED', memberStatusLabel: 'Completed' };
+  }
+  if (params.mpesaStatus === 'FAILED' && params.transactionStatus === 'REVERSED') {
+    return { memberStatus: 'FAILED_FUNDS_RESTORED', memberStatusLabel: 'Failed - funds restored' };
+  }
+  if (
+    params.mpesaStatus === 'RECON_PENDING' ||
+    params.manualReviewRequired ||
+    params.providerSubmissionState === 'PROVIDER_OUTCOME_UNKNOWN' ||
+    params.mpesaStatus === 'FAILED'
+  ) {
+    return {
+      memberStatus: 'CONFIRMATION_DELAYED',
+      memberStatusLabel: 'Processing - confirmation delayed',
+    };
+  }
+  if (params.providerSubmissionState === 'SEND_IN_PROGRESS') {
+    return { memberStatus: 'SENDING_TO_MPESA', memberStatusLabel: 'Sending to M-Pesa' };
+  }
+  return { memberStatus: 'PROCESSING', memberStatusLabel: 'Processing' };
 }
 
 @Injectable()
@@ -1270,7 +1320,18 @@ export class DashboardService {
         memberNumber: true,
         kycStatus: true,
         kycRejectionReason: true,
-        user: { select: { firstName: true, lastName: true, email: true, profileImageKey: true, updatedAt: true } },
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            phoneNumber: true,
+            phoneVerified: true,
+            profileImageKey: true,
+            updatedAt: true,
+          },
+        },
       },
     });
     if (!member) throw new NotFoundException('Member profile not found');
@@ -1304,6 +1365,16 @@ export class DashboardService {
           balanceAfter: true,
           description: true,
           createdAt: true,
+          status: true,
+          reference: true,
+          mpesaTransaction: {
+            select: {
+              phoneNumber: true,
+              status: true,
+              providerSubmissionState: true,
+              manualReviewRequired: true,
+            },
+          },
           account: { select: { accountType: true } },
         },
       }),
@@ -1362,12 +1433,33 @@ export class DashboardService {
 
     const fosa = accounts.find((a) => a.accountType === 'FOSA');
     const bosa = accounts.find((a) => a.accountType === 'BOSA');
+    const phoneCandidates = [member.user.phone, member.user.phoneNumber]
+      .map((phone) => normalizeDashboardPhone(phone))
+      .filter((phone): phone is string => Boolean(phone));
+    const uniquePhones = Array.from(new Set(phoneCandidates));
+    const withdrawalDestination =
+      uniquePhones.length === 0
+        ? { maskedPhone: null, verified: false, status: 'MISSING' as const }
+        : uniquePhones.length > 1
+          ? {
+              maskedPhone: maskDashboardPhone(uniquePhones[0]),
+              verified: false,
+              status: 'NEEDS_REVIEW' as const,
+            }
+          : {
+              maskedPhone: maskDashboardPhone(uniquePhones[0]),
+              verified: member.user.phoneVerified,
+              status: member.user.phoneVerified ? ('VERIFIED' as const) : ('UNVERIFIED' as const),
+            };
     const data: MemberDashboardDto = {
       member: {
         id: member.id,
         memberNumber: member.memberNumber,
         name: `${member.user.firstName} ${member.user.lastName}`,
         email: member.user.email,
+        phone: normalizeDashboardPhone(member.user.phone ?? member.user.phoneNumber),
+        phoneVerified: member.user.phoneVerified,
+        withdrawalDestination,
         kycStatus: member.kycStatus,
         kycRejectionReason: member.kycRejectionReason,
         profileImageKey: member.user.profileImageKey,
@@ -1394,6 +1486,22 @@ export class DashboardService {
         balanceAfter: Number(tx.balanceAfter),
         description: tx.description,
         createdAt: tx.createdAt.toISOString(),
+        status: tx.status,
+        reference: tx.reference,
+        ...(tx.type === 'WITHDRAWAL' && tx.reference.startsWith('MPESA_WD-')
+          ? {
+              memberReference: memberWithdrawalReference(tx.createdAt, tx.id),
+              ...mapWithdrawalMemberState({
+                transactionStatus: tx.status,
+                mpesaStatus: tx.mpesaTransaction?.status,
+                providerSubmissionState: tx.mpesaTransaction?.providerSubmissionState,
+                manualReviewRequired: tx.mpesaTransaction?.manualReviewRequired,
+              }),
+              maskedDestination:
+                maskDashboardPhone(tx.mpesaTransaction?.phoneNumber) ??
+                maskDashboardPhone(tx.description),
+            }
+          : {}),
         account: tx.account,
       })),
       pendingGuarantorRequests: pendingGuarantorRequests.map((request) => ({

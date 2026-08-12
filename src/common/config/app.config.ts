@@ -111,6 +111,26 @@ export default registerAs('app', () => ({
       process.env.MPESA_WITHDRAWAL_RECON_GRACE_MINUTES || '30',
       10,
     ),
+    b2cPendingReconThresholdMinutes: parseInt(
+      process.env.B2C_PENDING_RECON_THRESHOLD_MINUTES ||
+        process.env.MPESA_WITHDRAWAL_RECON_GRACE_MINUTES ||
+        '30',
+      10,
+    ),
+    b2cReconRetryIntervalMinutes: parseInt(
+      process.env.B2C_RECON_RETRY_INTERVAL_MINUTES || '15',
+      10,
+    ),
+    b2cMaxReconAttempts: parseInt(process.env.B2C_MAX_RECON_ATTEMPTS || '5', 10),
+    b2cManualReviewThresholdMinutes: parseInt(
+      process.env.B2C_MANUAL_REVIEW_THRESHOLD_MINUTES || '120',
+      10,
+    ),
+    b2cStaleOutboxThresholdMinutes: parseInt(
+      process.env.B2C_STALE_OUTBOX_THRESHOLD_MINUTES || '10',
+      10,
+    ),
+    b2cReconLockTtlSeconds: parseInt(process.env.B2C_RECON_LOCK_TTL_SECONDS || '300', 10),
   },
 
   // Mwaloni is the mandatory B2C provider for FOSA withdrawals and global B2C wallet

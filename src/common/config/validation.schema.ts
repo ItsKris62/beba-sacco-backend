@@ -172,6 +172,12 @@ export const validationSchema = Joi.object({
     otherwise: Joi.optional(),
   }),
   MPESA_STK_RATE_LIMIT_PER_DAY: Joi.number().integer().min(1).default(3),
+  B2C_PENDING_RECON_THRESHOLD_MINUTES: Joi.number().integer().min(1).default(30),
+  B2C_RECON_RETRY_INTERVAL_MINUTES: Joi.number().integer().min(1).default(15),
+  B2C_MAX_RECON_ATTEMPTS: Joi.number().integer().min(1).default(5),
+  B2C_MANUAL_REVIEW_THRESHOLD_MINUTES: Joi.number().integer().min(1).default(120),
+  B2C_STALE_OUTBOX_THRESHOLD_MINUTES: Joi.number().integer().min(1).default(10),
+  B2C_RECON_LOCK_TTL_SECONDS: Joi.number().integer().min(30).default(300),
 
   // Mwaloni is the mandatory B2C payout and B2C wallet-balance provider. The enabled
   // flag gates availability/config validation; it never routes B2C payouts to Daraja.

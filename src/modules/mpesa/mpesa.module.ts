@@ -3,6 +3,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { MpesaService } from './mpesa.service';
 import { MpesaPayoutOutboxService } from './mpesa-payout-outbox.service';
 import { AdminReconciliationService } from './admin-reconciliation.service';
+import { WithdrawalReconciliationService } from './withdrawal-reconciliation.service';
 import { DarajaClientService } from './daraja-client.service';
 import { MwaloniClientService } from './mwaloni-client.service';
 import { MpesaDisbursementProcessor } from './processors/mpesa-disbursement.processor';
@@ -88,6 +89,7 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
     MpesaService,
     MpesaPayoutOutboxService,
     AdminReconciliationService,
+    WithdrawalReconciliationService,
     MpesaTenantResolverService,
     ...MPESA_WORKER_PROVIDERS,
     // PrismaService is @Global via PrismaModule, but listed explicitly so
@@ -98,6 +100,7 @@ const MPESA_WORKER_PROVIDERS = isWorkerRuntime()
     MpesaService,
     MpesaPayoutOutboxService,
     AdminReconciliationService,
+    WithdrawalReconciliationService,
     DarajaClientService,
     MwaloniClientService,
     MpesaTenantResolverService,

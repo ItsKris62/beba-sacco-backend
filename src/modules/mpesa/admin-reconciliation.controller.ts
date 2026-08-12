@@ -19,41 +19,36 @@ import {
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
-import { UserRole } from '@prisma/client';
+import { Tenant, UserRole } from '@prisma/client';
 import { Request } from 'express';
-import { AdminReconciliationService } from './admin-reconciliation.service';
-import { ReconciliationRecoverDto } from './dto/reconciliation-recover.dto';
-import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
-import type { Tenant } from '@prisma/client';
+import { AdminReconciliationService } from './admin-reconciliation.service';
+import {
+  ControlledResendDto,
+  ManualCompletionDto,
+  ManualReversalDto,
+  ManualStatusRefreshDto,
+} from './dto/reconciliation-recover.dto';
 
-/**
- * Admin recovery workflow for the two M-Pesa withdrawal edge cases that cannot be
- * resolved automatically — see AdminReconciliationService for the full case taxonomy.
- * Restricted to MANAGER: this endpoint moves real money outside the normal member-
- * initiated flows, so it deliberately excludes LOAN_OFFICER/TENANT_ADMIN/TELLER.
- */
-@ApiTags('Admin — M-Pesa Reconciliation')
+@ApiTags('Admin - M-Pesa Reconciliation')
 @ApiBearerAuth()
 @ApiSecurity('X-Tenant-ID')
 @ApiHeader({ name: 'X-Tenant-ID', required: true, description: 'Tenant UUID' })
-@Roles(UserRole.MANAGER)
 @Controller('admin')
 export class AdminReconciliationController {
   constructor(private readonly reconciliation: AdminReconciliationService) {}
 
   @Get('reconciliations/pending')
+  @Roles(UserRole.AUDITOR, UserRole.ACCOUNTANT, UserRole.MANAGER, UserRole.TENANT_ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'List M-Pesa withdrawals requiring manual reconciliation',
+    summary: 'List M-Pesa withdrawals requiring reconciliation or operational review',
     description:
-      'Two case types: STUCK_RECON_PENDING (a withdrawal stuck past the auto-refund grace ' +
-      'window — either a legacy row with no linked ledger transaction, or one whose auto-refund ' +
-      'keeps failing) and LATE_SUCCESS_DOUBLE_CREDIT (a Safaricom success callback arrived after ' +
-      'the system already auto-refunded the same withdrawal — potential double-credit, resolvable ' +
-      'only by a human confirming with Safaricom).',
+      'Tenant-scoped read model for stale withdrawals, RECON_PENDING items, stale payout intents, ' +
+      'dead letters, mismatches, and manual-review cases. Phone numbers are masked.',
   })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'offset', required: false, type: Number })
@@ -75,29 +70,85 @@ export class AdminReconciliationController {
     });
   }
 
-  @Post('reconciliations/:transactionId/recover')
+  @Post('reconciliations/:transactionId/refresh-status')
+  @Roles(UserRole.ACCOUNTANT, UserRole.MANAGER, UserRole.TENANT_ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Execute manual recovery for a stuck or double-credited M-Pesa withdrawal',
+    summary: 'Refresh Mwaloni provider status for one withdrawal',
     description:
-      'MANUAL_B2C_PAYOUT re-debits the FOSA account (only if it was previously auto-refunded) ' +
-      'and sends the member their money via a fresh Mwaloni B2C wallet payout, protected by the same ' +
-      '30-minute timeout + reconciliation sweep as any other B2C payout. REVERSE_AUTO_REFUND ' +
-      'undoes an incorrect auto-refund by re-debiting the FOSA account. Both require investigation ' +
-      'notes and are recorded as MPESA.WITHDRAWAL.MANUALLY_RECOVERED in the audit trail.',
+      'Queries Mwaloni, applies the same safe automated transition rules, and audits the actor.',
   })
   @ApiParam({ name: 'transactionId', description: 'MpesaTransaction UUID' })
-  @ApiResponse({ status: 200, description: 'Recovery executed' })
-  @ApiResponse({ status: 400, description: 'Invalid action for this transaction’s current state' })
-  @ApiResponse({ status: 404, description: 'Transaction not found' })
-  @ApiResponse({ status: 409, description: 'Ledger state inconsistent — requires investigation' })
-  async recover(
+  async refreshStatus(
     @Param('transactionId') transactionId: string,
-    @Body() dto: ReconciliationRecoverDto,
+    @Body() dto: ManualStatusRefreshDto,
     @CurrentTenant() tenant: Tenant,
     @CurrentUser() actor: AuthenticatedUser,
     @Req() req: Request,
   ) {
-    return this.reconciliation.recover(transactionId, dto, tenant.id, actor.id, req.ip);
+    return this.reconciliation.refreshStatus(transactionId, dto, tenant.id, actor.id, req.ip);
+  }
+
+  @Post('reconciliations/:transactionId/mark-completed')
+  @Roles(UserRole.ACCOUNTANT, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark a non-terminal withdrawal completed with provider evidence',
+    description:
+      'Privileged manual completion. Requires reason/evidence, does not create a ledger debit, and is audited.',
+  })
+  @ApiParam({ name: 'transactionId', description: 'MpesaTransaction UUID' })
+  async markCompleted(
+    @Param('transactionId') transactionId: string,
+    @Body() dto: ManualCompletionDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.reconciliation.markCompleted(transactionId, dto, tenant.id, actor.id, req.ip);
+  }
+
+  @Post('reconciliations/:transactionId/reverse')
+  @Roles(UserRole.ACCOUNTANT, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reverse a confirmed failed withdrawal',
+    description:
+      'Privileged manual reversal. Requires provider/operational evidence and uses LedgerService.reverseTransaction.',
+  })
+  @ApiParam({ name: 'transactionId', description: 'MpesaTransaction UUID' })
+  async reverse(
+    @Param('transactionId') transactionId: string,
+    @Body() dto: ManualReversalDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.reconciliation.reverseConfirmedFailure(
+      transactionId,
+      dto,
+      tenant.id,
+      actor.id,
+      req.ip,
+    );
+  }
+
+  @Post('reconciliations/:transactionId/resend')
+  @Roles(UserRole.ACCOUNTANT, UserRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Controlled resend request',
+    description:
+      'Currently blocked by policy unless a formal provider non-submission workflow is added. The request is audited.',
+  })
+  @ApiParam({ name: 'transactionId', description: 'MpesaTransaction UUID' })
+  async resend(
+    @Param('transactionId') transactionId: string,
+    @Body() dto: ControlledResendDto,
+    @CurrentTenant() tenant: Tenant,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: Request,
+  ) {
+    return this.reconciliation.controlledResend(transactionId, dto, tenant.id, actor.id, req.ip);
   }
 }

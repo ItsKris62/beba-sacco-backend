@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { TransactionStatus } from '@prisma/client';
 import { MemberPortalService } from '../member-portal.service';
 
 function hashPayload(phone: string, amount: number): string {
@@ -72,7 +73,7 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
       postEntry: jest
         .fn()
         .mockImplementation(async (params: { amount: { toString(): string } }) => ({
-          transaction: { id: `txn-${params.amount.toString()}` },
+          transaction: { id: `txn-${params.amount.toString()}`, createdAt: new Date('2026-08-12T09:00:00.000Z') },
         })),
     };
 
@@ -165,6 +166,7 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
     expect(result).toEqual({
       message: 'Withdrawal initiated successfully',
       transactionId: 'txn-500',
+      reference: 'WD-20260812-TXN-500',
     });
   });
 
@@ -202,6 +204,7 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
     const cachedResponse = {
       message: 'Withdrawal initiated successfully',
       transactionId: 'txn-500',
+      reference: 'WD-20260812-TXN-500',
     };
     const payloadHash = hashPayload(phone, 500);
 
@@ -228,7 +231,11 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
       idempotencyStatus: 'COMPLETED',
       cachedResult: {
         payloadHash: payloadHashForOriginalAmount,
-        response: { message: 'Withdrawal initiated successfully', transactionId: 'txn-500' },
+        response: {
+          message: 'Withdrawal initiated successfully',
+          transactionId: 'txn-500',
+          reference: 'WD-20260812-TXN-500',
+        },
       },
     });
 
@@ -247,7 +254,11 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
       idempotencyStatus: 'COMPLETED',
       cachedResult: {
         payloadHash: payloadHashForOriginalPhone,
-        response: { message: 'Withdrawal initiated successfully', transactionId: 'txn-500' },
+        response: {
+          message: 'Withdrawal initiated successfully',
+          transactionId: 'txn-500',
+          reference: 'WD-20260812-TXN-500',
+        },
       },
     });
 
@@ -300,5 +311,126 @@ describe('MemberPortalService.withdrawMpesa — idempotency', () => {
       service.withdrawMpesa(userId, phone, 500, tenantId, '127.0.0.1', 'key-1'),
     ).rejects.toThrow(NotFoundException);
     expect(idempotency.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('MemberPortalService.getWithdrawalStatus — member-safe contract', () => {
+  const tenantId = 'tenant-1';
+  const userId = 'user-1';
+  const memberId = 'member-1';
+  const transactionId = '11111111-1111-4111-8111-111111111111';
+
+  function buildStatusService(args: {
+    ledgerStatus?: TransactionStatus;
+    mpesaStatus?: TransactionStatus;
+    providerSubmissionState?: string | null;
+    manualReviewRequired?: boolean;
+    failureReason?: string | null;
+  } = {}) {
+    const ledgerTx = {
+      id: transactionId,
+      status: args.ledgerStatus ?? TransactionStatus.COMPLETED,
+      amount: { toString: () => '5000' },
+      reference: 'MPESA_WD-tenant-1-member-1-key-1',
+      description: 'M-Pesa withdrawal to 254***5678',
+      createdAt: new Date('2026-08-12T09:00:00.000Z'),
+      mpesaTransaction: {
+        id: 'mpesa-tx-1',
+        phoneNumber: '254712345678',
+        status: args.mpesaStatus ?? TransactionStatus.PENDING,
+        updatedAt: new Date('2026-08-12T09:01:00.000Z'),
+        failureReason: args.failureReason ?? null,
+        resultDesc: args.failureReason ?? null,
+        conversationId: 'mwaloni-conv-1',
+        providerSubmissionState: args.providerSubmissionState ?? null,
+        manualReviewRequired: args.manualReviewRequired ?? false,
+      },
+    };
+    const prisma = {
+      member: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: memberId,
+          memberNumber: 'M-001',
+          user: {
+            firstName: 'Jane',
+            lastName: 'Member',
+            email: 'jane@example.test',
+            phone: '254712345678',
+            phoneNumber: '254712345678',
+            phoneVerified: true,
+          },
+        }),
+      },
+      transaction: { findFirst: jest.fn().mockResolvedValue(ledgerTx) },
+      mpesaTransaction: {
+        findUnique: jest.fn().mockResolvedValue({
+          phoneNumber: '254712345678',
+          status: args.mpesaStatus ?? TransactionStatus.PENDING,
+          updatedAt: new Date('2026-08-12T09:01:00.000Z'),
+          failureReason: args.failureReason ?? null,
+          resultDesc: args.failureReason ?? null,
+          conversationId: 'mwaloni-conv-1',
+          providerSubmissionState: args.providerSubmissionState ?? null,
+          manualReviewRequired: args.manualReviewRequired ?? false,
+        }),
+      },
+      mpesaPayoutIntent: {
+        findUnique: jest.fn().mockResolvedValue({
+          phoneNumber: '254712345678',
+          amount: { toString: () => '5000' },
+          metadata: { maskedPhone: '254***5678', withdrawalFee: '0' },
+        }),
+      },
+    };
+    const mpesaService = { refreshMwaloniB2cStatus: jest.fn().mockResolvedValue(undefined) };
+    const service = new MemberPortalService(
+      prisma as any,
+      {} as any,
+      mpesaService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+    return { service, prisma, mpesaService };
+  }
+
+  it('maps RECON_PENDING to confirmation delayed without failure reason leakage', async () => {
+    const { service } = buildStatusService({
+      mpesaStatus: TransactionStatus.RECON_PENDING,
+      providerSubmissionState: 'PROVIDER_OUTCOME_UNKNOWN',
+      failureReason: 'Mwaloni timeout',
+    });
+
+    await expect(service.getWithdrawalStatus(userId, transactionId, tenantId)).resolves.toMatchObject({
+      transactionId,
+      reference: 'WD-20260812-11111111',
+      status: 'PENDING',
+      memberStatus: 'CONFIRMATION_DELAYED',
+      memberStatusLabel: 'Processing - confirmation delayed',
+      terminal: false,
+      amount: '5000',
+      fee: '0',
+      destination: '254***5678',
+      failureReason: undefined,
+    });
+  });
+
+  it('only reports funds restored when provider failure has a reversed ledger transaction', async () => {
+    const { service } = buildStatusService({
+      ledgerStatus: TransactionStatus.REVERSED,
+      mpesaStatus: TransactionStatus.FAILED,
+      failureReason: 'Provider rejected',
+    });
+
+    await expect(service.getWithdrawalStatus(userId, transactionId, tenantId)).resolves.toMatchObject({
+      status: 'FAILED',
+      memberStatus: 'FAILED_FUNDS_RESTORED',
+      memberStatusLabel: 'Failed - funds restored',
+      terminal: true,
+      failureReason: 'Provider rejected',
+    });
   });
 });

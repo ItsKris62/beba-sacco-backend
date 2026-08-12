@@ -12,8 +12,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "HTTP error rate > 1% (5m)"
-          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+          summary: 'HTTP error rate > 1% (5m)'
+          description: 'Error rate is {{ $value | humanizePercentage }} over the last 5 minutes.'
 
       # ── P99 Latency ───────────────────────────────────────────────────────
       - alert: HighP99Latency
@@ -25,8 +25,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "p99 latency > 500ms (5m)"
-          description: "p99 latency is {{ $value | humanizeDuration }}."
+          summary: 'p99 latency > 500ms (5m)'
+          description: 'p99 latency is {{ $value | humanizeDuration }}.'
 
       # ── Queue Depth ───────────────────────────────────────────────────────
       - alert: QueueBacklog
@@ -35,8 +35,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "BullMQ queue depth > 100 for 10m"
-          description: "Queue {{ $labels.queue }} has {{ $value }} waiting jobs."
+          summary: 'BullMQ queue depth > 100 for 10m'
+          description: 'Queue {{ $labels.queue }} has {{ $value }} waiting jobs.'
 
       # ── DB Connections ────────────────────────────────────────────────────
       - alert: DbConnectionsHigh
@@ -45,8 +45,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "DB connections above 80%"
-          description: "Connection pool utilisation: {{ $value | humanizePercentage }}."
+          summary: 'DB connections above 80%'
+          description: 'Connection pool utilisation: {{ $value | humanizePercentage }}.'
 
       # ── M-Pesa Reconciliation Mismatch ────────────────────────────────────
       # M-Pesa Callback Failures
@@ -56,16 +56,70 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "High rate of M-Pesa callback failures"
-          description: "More than 3 M-Pesa callback processing failures occurred in the last 5 minutes."
+          summary: 'High rate of M-Pesa callback failures'
+          description: 'More than 3 M-Pesa callback processing failures occurred in the last 5 minutes.'
       - alert: ReconMismatch
         expr: sacco_recon_mismatch_total > 0
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "M-Pesa reconciliation mismatch detected"
-          description: "{{ $value }} unresolved transaction mismatch(es). Investigate immediately."
+          summary: 'M-Pesa reconciliation mismatch detected'
+          description: '{{ $value }} unresolved transaction mismatch(es). Investigate immediately.'
+
+      - alert: B2cWithdrawalReconPending
+        expr: sum(beba_b2c_stale_withdrawals_count{state="recon_pending"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'B2C withdrawal reconciliation backlog exists'
+          description: '{{ $value }} FOSA-to-M-Pesa withdrawal(s) are awaiting reconciliation.'
+
+      - alert: B2cWithdrawalReconOldestExceededSla
+        expr: max(beba_b2c_recon_oldest_age_seconds) > 7200
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Oldest B2C withdrawal reconciliation exceeds SLA'
+          description: 'Oldest reconciliation item age is {{ $value | humanizeDuration }}.'
+
+      - alert: B2cProviderAmbiguousSend
+        expr: increase(beba_b2c_provider_send_ambiguous_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Ambiguous B2C provider send detected'
+          description: 'At least one Mwaloni send outcome is unknown. Do not resend or refund automatically.'
+
+      - alert: B2cCallbackMismatch
+        expr: increase(beba_b2c_callback_mismatch_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'B2C callback mismatch detected'
+          description: 'A callback amount/phone/reference mismatch was moved to manual reconciliation.'
+
+      - alert: B2cDeadLetterExists
+        expr: sum(beba_b2c_dead_letter_count) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'B2C dead-letter item exists'
+          description: '{{ $value }} B2C dead-letter item(s) require operational review.'
+
+      - alert: B2cReconciliationFailures
+        expr: increase(beba_b2c_reconciliation_failure_total[30m]) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'B2C reconciliation failures increasing'
+          description: 'More than 3 unresolved B2C reconciliation outcomes occurred in 30 minutes.'
 
       # ── Ledger Drift ──────────────────────────────────────────────────────
       - alert: LedgerDrift
@@ -74,8 +128,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Ledger integrity drift detected"
-          description: "{{ $value }} account(s) have balance drift. Disbursement blocked."
+          summary: 'Ledger integrity drift detected'
+          description: '{{ $value }} account(s) have balance drift. Disbursement blocked.'
 
       # ── Interest Accrual Failure ──────────────────────────────────────────
       - alert: AccrualJobFailed
@@ -84,8 +138,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Interest accrual job skipped > 5 loans in 1h"
-          description: "{{ $value }} loans skipped during accrual. Check processor logs."
+          summary: 'Interest accrual job skipped > 5 loans in 1h'
+          description: '{{ $value }} loans skipped during accrual. Check processor logs.'
 
   - name: sacco_synthetic
     interval: 120s
@@ -97,7 +151,5 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Synthetic health probe failing"
-          description: "GET /api/health/synthetic has been failing for 2 minutes."
-
-
+          summary: 'Synthetic health probe failing'
+          description: 'GET /api/health/synthetic has been failing for 2 minutes.'

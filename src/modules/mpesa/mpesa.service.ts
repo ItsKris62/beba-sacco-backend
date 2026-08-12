@@ -774,6 +774,7 @@ export class MpesaService {
       .catch((e: unknown) =>
         this.logger.warn(`Audit emit failed: ${e instanceof Error ? e.message : String(e)}`),
       );
+    this.metrics?.recordB2cProviderSendAttempt(params.tenantId, 'MWALONI');
 
     try {
       const response = await this.mwaloni.sendMobile({
@@ -930,6 +931,7 @@ export class MpesaService {
               providerStatus: response.status,
             },
           });
+          this.metrics?.recordWithdrawalCompleted(row.tenantId, 'mwaloni_status');
         }
         return row;
       });
@@ -1031,6 +1033,12 @@ export class MpesaService {
             phone: maskPhone(mpesaTx.phoneNumber),
           },
         });
+        this.metrics?.recordWithdrawalFailed(
+          mpesaTx.tenantId,
+          'mwaloni_status',
+          params.failureReason,
+        );
+        this.metrics?.recordWithdrawalReversed(mpesaTx.tenantId, 'mwaloni_status');
 
         return updated;
       },
@@ -1092,6 +1100,7 @@ export class MpesaService {
         },
         requestId: `audit.MWALONI.B2C.SEND_AMBIGUOUS.${row.tenantId}.${row.id}`,
       });
+      this.metrics?.recordB2cProviderSendAmbiguous(row.tenantId, 'MWALONI');
     });
   }
 

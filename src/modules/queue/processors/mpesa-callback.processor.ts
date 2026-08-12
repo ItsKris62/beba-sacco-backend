@@ -935,6 +935,9 @@ export class MpesaCallbackProcessor extends WorkerHost {
         },
         requestId: `audit.MPESA.DISBURSEMENT.CALLBACK_MISMATCH.${mpesaTx.tenantId}.${mpesaTx.id}.${details.providerTransactionId}`,
       });
+      for (const mismatch of details.mismatches) {
+        this.metrics?.recordB2cCallbackMismatch(mpesaTx.tenantId, mismatch);
+      }
     });
   }
 

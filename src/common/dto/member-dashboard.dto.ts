@@ -13,6 +13,22 @@ export class MemberIdentityDto {
   @ApiProperty()
   email!: string;
 
+  @ApiPropertyOptional({ nullable: true })
+  phone?: string | null;
+
+  @ApiProperty()
+  phoneVerified!: boolean;
+
+  @ApiProperty({
+    type: () => Object,
+    description: 'Member-safe M-Pesa withdrawal destination metadata.',
+  })
+  withdrawalDestination!: {
+    maskedPhone: string | null;
+    verified: boolean;
+    status: 'VERIFIED' | 'UNVERIFIED' | 'MISSING' | 'NEEDS_REVIEW';
+  };
+
   @ApiProperty()
   kycStatus!: string;
 
@@ -78,6 +94,24 @@ export class MemberDashboardTransactionDto {
 
   @ApiProperty()
   createdAt!: string;
+
+  @ApiProperty()
+  status!: string;
+
+  @ApiProperty()
+  reference!: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  memberReference?: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  memberStatus?: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  memberStatusLabel?: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  maskedDestination?: string | null;
 
   @ApiProperty({ type: () => Object })
   account!: { accountType: string };

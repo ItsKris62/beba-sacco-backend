@@ -1,31 +1,52 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsNotEmpty, IsString, MaxLength, MinLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsNotEmpty, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
-export enum ReconciliationRecoveryAction {
-  MANUAL_B2C_PAYOUT = 'MANUAL_B2C_PAYOUT',
-  REVERSE_AUTO_REFUND = 'REVERSE_AUTO_REFUND',
-}
-
-export class ReconciliationRecoverDto {
+export class ManualReconciliationEvidenceDto {
   @ApiProperty({
-    enum: ReconciliationRecoveryAction,
-    description:
-      'MANUAL_B2C_PAYOUT: pay the member out via M-Pesa now (used when the withdrawal never ' +
-      'reached them and investigation confirms it should). ' +
-      'REVERSE_AUTO_REFUND: undo a system auto-refund that a late Safaricom success callback ' +
-      'proved was a false positive — re-debits the FOSA account that was incorrectly credited back.',
-    example: ReconciliationRecoveryAction.MANUAL_B2C_PAYOUT,
-  })
-  @IsEnum(ReconciliationRecoveryAction)
-  action!: ReconciliationRecoveryAction;
-
-  @ApiProperty({
-    description: 'Investigation notes — mandatory compliance record for any manual money movement.',
-    example: 'Confirmed with Safaricom support ref SR-88213: original B2C payout never settled.',
+    description: 'Operational reason for the manual reconciliation action.',
+    example: 'Confirmed with Mwaloni support that the provider status endpoint is unavailable.',
   })
   @IsNotEmpty()
   @IsString()
   @MinLength(10)
   @MaxLength(1000)
-  notes!: string;
+  reason!: string;
+
+  @ApiProperty({
+    description: 'External provider/support/reference evidence supporting the action.',
+    example: 'MWALONI-SR-88213',
+  })
+  @IsNotEmpty()
+  @IsString()
+  @MinLength(3)
+  @MaxLength(200)
+  evidenceReference!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Additional sanitized evidence notes. Do not include secrets or full phone numbers.',
+    example:
+      'Provider confirmed order MWD-ledger-tx-1 settled successfully at 2026-08-12T08:40:00Z.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  evidenceNote?: string;
 }
+
+export class ManualStatusRefreshDto {
+  @ApiPropertyOptional({
+    description: 'Optional reason for the manual provider-status refresh.',
+    example: 'Finance desk requested a fresh status check before closing the case.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  reason?: string;
+}
+
+export class ManualCompletionDto extends ManualReconciliationEvidenceDto {}
+
+export class ManualReversalDto extends ManualReconciliationEvidenceDto {}
+
+export class ControlledResendDto extends ManualReconciliationEvidenceDto {}

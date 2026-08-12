@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { createHash } from 'crypto';
-import { AccountType, LoanStatus, JournalEntryType } from '@prisma/client';
+import { AccountType, LoanStatus, JournalEntryType, TransactionStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { MpesaService } from '../mpesa/mpesa.service';
@@ -37,6 +37,65 @@ const PROFILE_IMAGE_CONTENT_TYPES: Record<string, string> = {
   png: 'image/png',
   webp: 'image/webp',
 };
+
+function memberWithdrawalReference(createdAt: Date, transactionId: string): string {
+  const date = createdAt.toISOString().slice(0, 10).replace(/-/g, '');
+  return `WD-${date}-${transactionId.slice(0, 8).toUpperCase()}`;
+}
+
+function mapWithdrawalMemberState(params: {
+  transactionStatus?: TransactionStatus | string | null;
+  mpesaStatus?: TransactionStatus | string | null;
+  providerSubmissionState?: string | null;
+  manualReviewRequired?: boolean | null;
+}): { memberStatus: string; memberStatusLabel: string; terminal: boolean; legacyStatus: 'PENDING' | 'SUCCESS' | 'FAILED' } {
+  if (params.mpesaStatus === TransactionStatus.COMPLETED) {
+    return {
+      memberStatus: 'COMPLETED',
+      memberStatusLabel: 'Completed',
+      terminal: true,
+      legacyStatus: 'SUCCESS',
+    };
+  }
+  if (
+    params.mpesaStatus === TransactionStatus.FAILED &&
+    params.transactionStatus === TransactionStatus.REVERSED
+  ) {
+    return {
+      memberStatus: 'FAILED_FUNDS_RESTORED',
+      memberStatusLabel: 'Failed - funds restored',
+      terminal: true,
+      legacyStatus: 'FAILED',
+    };
+  }
+  if (
+    params.mpesaStatus === TransactionStatus.RECON_PENDING ||
+    params.manualReviewRequired ||
+    params.providerSubmissionState === 'PROVIDER_OUTCOME_UNKNOWN' ||
+    params.mpesaStatus === TransactionStatus.FAILED
+  ) {
+    return {
+      memberStatus: 'CONFIRMATION_DELAYED',
+      memberStatusLabel: 'Processing - confirmation delayed',
+      terminal: false,
+      legacyStatus: 'PENDING',
+    };
+  }
+  if (params.providerSubmissionState === 'SEND_IN_PROGRESS') {
+    return {
+      memberStatus: 'SENDING_TO_MPESA',
+      memberStatusLabel: 'Sending to M-Pesa',
+      terminal: false,
+      legacyStatus: 'PENDING',
+    };
+  }
+  return {
+    memberStatus: 'PROCESSING',
+    memberStatusLabel: 'Processing',
+    terminal: false,
+    legacyStatus: 'PENDING',
+  };
+}
 
 /**
  * Member Portal Service
@@ -388,7 +447,7 @@ export class MemberPortalService {
     if (idem.status === 'COMPLETED') {
       const cached = idem.result as {
         payloadHash: string;
-        response: { message: string; transactionId: string };
+        response: { message: string; transactionId: string; reference: string };
       };
       if (cached.payloadHash !== payloadHash) {
         throw new BadRequestException(
@@ -432,7 +491,7 @@ export class MemberPortalService {
     tenantId: string,
     ipAddress: string | undefined,
     idempotencyKey: string,
-  ): Promise<{ message: string; transactionId: string }> {
+  ): Promise<{ message: string; transactionId: string; reference: string }> {
     // Hardcode withdrawal fee or fetch from config
     const withdrawalFee = new Decimal(0); // Add logic to calculate fee if needed
     const requestedAmount = new Decimal(amount);
@@ -521,6 +580,7 @@ export class MemberPortalService {
         return {
           message: 'Withdrawal initiated successfully',
           transactionId: transaction.id,
+          reference: memberWithdrawalReference(transaction.createdAt, transaction.id),
           accountId: fosaAccount.id,
           payoutIntentId: payoutIntent.id,
         };
@@ -538,6 +598,7 @@ export class MemberPortalService {
     return {
       message: result.message,
       transactionId: result.transactionId,
+      reference: result.reference,
     };
   }
 
@@ -964,8 +1025,15 @@ export class MemberPortalService {
     tenantId: string,
   ): Promise<{
     transactionId: string;
+    reference: string;
     status: 'PENDING' | 'SUCCESS' | 'FAILED';
+    memberStatus: string;
+    memberStatusLabel: string;
+    terminal: boolean;
     amount: string;
+    fee: string;
+    totalDebit: string;
+    destination: string | null;
     requestedAt: Date;
     lastUpdated?: Date;
     failureReason?: string;
@@ -981,16 +1049,22 @@ export class MemberPortalService {
       },
       select: {
         id: true,
+        status: true,
         amount: true,
+        reference: true,
+        description: true,
         createdAt: true,
         mpesaTransaction: {
           select: {
             id: true,
+            phoneNumber: true,
             status: true,
             updatedAt: true,
             failureReason: true,
             resultDesc: true,
             conversationId: true,
+            providerSubmissionState: true,
+            manualReviewRequired: true,
           },
         },
       },
@@ -1007,35 +1081,60 @@ export class MemberPortalService {
     const refreshed = await this.prisma.mpesaTransaction.findUnique({
       where: { transactionId: ledgerTx.id },
       select: {
+        phoneNumber: true,
         status: true,
         updatedAt: true,
         failureReason: true,
         resultDesc: true,
         conversationId: true,
+        providerSubmissionState: true,
+        manualReviewRequired: true,
       },
     });
 
-    const statusMap: Record<string, 'PENDING' | 'SUCCESS' | 'FAILED'> = {
-      PENDING: 'PENDING',
-      RECON_PENDING: 'PENDING',
-      COMPLETED: 'SUCCESS',
-      FAILED: 'FAILED',
-      REVERSED: 'FAILED',
-    };
+    const payoutIntent = await this.prisma.mpesaPayoutIntent.findUnique({
+      where: { sourceTransactionId: ledgerTx.id },
+      select: { phoneNumber: true, amount: true, metadata: true },
+    });
     const providerStatus = refreshed?.status ?? ledgerTx.mpesaTransaction?.status;
+    const memberState = mapWithdrawalMemberState({
+      transactionStatus: ledgerTx.status,
+      mpesaStatus: providerStatus,
+      providerSubmissionState:
+        refreshed?.providerSubmissionState ?? ledgerTx.mpesaTransaction?.providerSubmissionState,
+      manualReviewRequired:
+        refreshed?.manualReviewRequired ?? ledgerTx.mpesaTransaction?.manualReviewRequired,
+    });
+    const metadata =
+      payoutIntent?.metadata && typeof payoutIntent.metadata === 'object'
+        ? (payoutIntent.metadata as Record<string, unknown>)
+        : {};
+    const maskedPhone =
+      (metadata.maskedPhone as string | undefined) ??
+      maskPhone(refreshed?.phoneNumber ?? ledgerTx.mpesaTransaction?.phoneNumber ?? payoutIntent?.phoneNumber ?? '');
+    const fee = typeof metadata.withdrawalFee === 'string' ? metadata.withdrawalFee : '0';
 
     return {
       transactionId: ledgerTx.id,
-      status: providerStatus ? (statusMap[providerStatus] ?? 'PENDING') : 'PENDING',
-      amount: ledgerTx.amount.toString(),
+      reference: memberWithdrawalReference(ledgerTx.createdAt, ledgerTx.id),
+      status: memberState.legacyStatus,
+      memberStatus: memberState.memberStatus,
+      memberStatusLabel: memberState.memberStatusLabel,
+      terminal: memberState.terminal,
+      amount: payoutIntent?.amount.toString() ?? ledgerTx.amount.toString(),
+      fee,
+      totalDebit: ledgerTx.amount.toString(),
+      destination: maskedPhone || null,
       requestedAt: ledgerTx.createdAt,
       lastUpdated: refreshed?.updatedAt ?? ledgerTx.mpesaTransaction?.updatedAt,
       failureReason:
-        refreshed?.failureReason ??
-        refreshed?.resultDesc ??
-        ledgerTx.mpesaTransaction?.failureReason ??
-        ledgerTx.mpesaTransaction?.resultDesc ??
-        undefined,
+        memberState.memberStatus === 'FAILED_FUNDS_RESTORED'
+          ? (refreshed?.failureReason ??
+            refreshed?.resultDesc ??
+            ledgerTx.mpesaTransaction?.failureReason ??
+            ledgerTx.mpesaTransaction?.resultDesc ??
+            undefined)
+          : undefined,
       providerReference:
         refreshed?.conversationId ?? ledgerTx.mpesaTransaction?.conversationId ?? null,
     };

@@ -533,43 +533,51 @@ model Transaction {
 }
 
 model MpesaTransaction {
-  id                       String             @id @default(uuid())
-  tenantId                 String
-  transactionId            String?            @unique
-  checkoutRequestId        String?            @unique
-  merchantRequestId        String?
-  phoneNumber              String
-  amount                   Decimal            @db.Decimal(18, 4)
-  status                   TransactionStatus  @default(PENDING)
-  resultCode               Int?
-  resultDesc               String?
-  mpesaReceiptNumber       String?            @unique
-  callbackPayload          Json?
-  createdAt                DateTime           @default(now())
-  updatedAt                DateTime           @updatedAt
-  accountReference         String?
-  conversationId           String?            @unique
-  description              String?
-  loanId                   String?
-  loanRepaymentId          String?
-  memberId                 String?
-  originatorConversationId String?            @unique
-  reference                String             @unique
-  transactionDate          DateTime?
-  triggerSource            MpesaTriggerSource
-  type                     MpesaTxType
-  failureReason            String?
-  referenceId              String?
-  referenceType            String?
-  providerSubmissionState  String?
-  providerSendAttemptedAt  DateTime?
-  providerAcceptedAt       DateTime?
-  providerLastCheckedAt    DateTime?
-  reconciliationDueAt      DateTime?
-  lastRecoveryAt           DateTime?
-  member                   Member?            @relation(fields: [memberId], references: [id])
-  transaction              Transaction?       @relation(fields: [transactionId], references: [id])
-  supportTickets           SupportTicket[]
+  id                         String                                 @id @default(uuid())
+  tenantId                   String
+  transactionId              String?                                @unique
+  checkoutRequestId          String?                                @unique
+  merchantRequestId          String?
+  phoneNumber                String
+  amount                     Decimal                                @db.Decimal(18, 4)
+  status                     TransactionStatus                      @default(PENDING)
+  resultCode                 Int?
+  resultDesc                 String?
+  mpesaReceiptNumber         String?                                @unique
+  callbackPayload            Json?
+  createdAt                  DateTime                               @default(now())
+  updatedAt                  DateTime                               @updatedAt
+  accountReference           String?
+  conversationId             String?                                @unique
+  description                String?
+  loanId                     String?
+  loanRepaymentId            String?
+  memberId                   String?
+  originatorConversationId   String?                                @unique
+  reference                  String                                 @unique
+  transactionDate            DateTime?
+  triggerSource              MpesaTriggerSource
+  type                       MpesaTxType
+  failureReason              String?
+  referenceId                String?
+  referenceType              String?
+  providerSubmissionState    String?
+  providerSendAttemptedAt    DateTime?
+  providerAcceptedAt         DateTime?
+  providerLastCheckedAt      DateTime?
+  reconciliationDueAt        DateTime?
+  lastRecoveryAt             DateTime?
+  reconciliationAttemptCount Int                                    @default(0)
+  reconciliationNextRetryAt  DateTime?
+  reconciliationLockedAt     DateTime?
+  reconciliationLockedBy     String?
+  manualReviewRequired       Boolean                                @default(false)
+  manualReviewReason         String?
+  reconciliationLastReason   String?
+  member                     Member?                                @relation(fields: [memberId], references: [id])
+  transaction                Transaction?                           @relation(fields: [transactionId], references: [id])
+  supportTickets             SupportTicket[]
+  reconciliationAttempts     MpesaWithdrawalReconciliationAttempt[]
 
   @@index([tenantId])
   @@index([tenantId, memberId])
@@ -577,6 +585,8 @@ model MpesaTransaction {
   @@index([tenantId, status])
   @@index([tenantId, status, createdAt])
   @@index([tenantId, status, reconciliationDueAt])
+  @@index([tenantId, status, reconciliationNextRetryAt])
+  @@index([tenantId, manualReviewRequired])
   @@index([tenantId, providerSubmissionState])
   @@index([tenantId, type])
   @@index([checkoutRequestId])
@@ -614,6 +624,37 @@ model MpesaPayoutIntent {
   @@index([tenantId, status, nextRetryAt])
   @@index([tenantId, referenceType, referenceId])
   @@index([sourceTransactionId])
+  @@schema("public")
+}
+
+model MpesaWithdrawalReconciliationAttempt {
+  id                       String             @id @default(uuid())
+  tenantId                 String
+  mpesaTransactionId       String
+  payoutIntentId           String?
+  provider                 String             @default("MWALONI")
+  attemptNumber            Int
+  triggerType              String
+  actorId                  String?
+  startedAt                DateTime           @default(now())
+  completedAt              DateTime?
+  providerRequestReference String?
+  providerResult           Json?
+  correlationResult        Json?
+  oldStatus                TransactionStatus?
+  newStatus                TransactionStatus?
+  reasonCode               String?
+  errorCategory            String?
+  nextRetryAt              DateTime?
+  createdAt                DateTime           @default(now())
+
+  mpesaTransaction MpesaTransaction @relation(fields: [mpesaTransactionId], references: [id])
+
+  @@unique([mpesaTransactionId, attemptNumber])
+  @@index([tenantId])
+  @@index([tenantId, triggerType, startedAt])
+  @@index([tenantId, reasonCode])
+  @@index([tenantId, nextRetryAt])
   @@schema("public")
 }
 
