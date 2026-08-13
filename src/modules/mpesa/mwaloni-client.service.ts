@@ -258,7 +258,7 @@ export class MwaloniClientService implements OnModuleInit {
     const response = await this.post<MwaloniResponse>(
       'authenticate',
       { username, password },
-      undefined,
+      false,
       'authentication',
     );
 
@@ -287,27 +287,31 @@ export class MwaloniClientService implements OnModuleInit {
     label: string,
     attempts = RETRY_ATTEMPTS,
   ): Promise<MwaloniResponse> {
-    const token = await this.authenticate();
-    return this.post<MwaloniResponse>(endpoint, body, token, label, attempts);
+    return this.post<MwaloniResponse>(endpoint, body, true, label, attempts);
   }
 
   private async post<T>(
     endpoint: string,
     body: Record<string, unknown>,
-    token: string | undefined,
+    requiresAuth: boolean,
     label: string,
     attempts = RETRY_ATTEMPTS,
   ): Promise<T> {
     const apiKey = this.getRequiredConfig('apiKey', 'MWALONI_API_KEY');
     const url = `${this.baseUrl()}${endpoint}`;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-    };
-    if (token) headers.Authorization = `Bearer ${token}`;
 
     return this.withRetry(
       async () => {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+        };
+
+        if (requiresAuth) {
+          const token = await this.authenticate();
+          headers.Authorization = `Bearer ${token}`;
+        }
+
         let res: Response;
         try {
           res = await fetch(url, {
