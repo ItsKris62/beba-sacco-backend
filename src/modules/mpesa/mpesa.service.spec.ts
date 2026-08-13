@@ -1008,6 +1008,32 @@ describe('MpesaService.getB2cWalletBalance', () => {
     expect(mockDaraja.initiateSTKPush).not.toHaveBeenCalled();
   });
 
+  it('correctly preserves negative provider balances and balanceBreakdown fields', async () => {
+    const mwaloni = {
+      isEnabled: jest.fn().mockReturnValue(true),
+      fetchBalance: jest.fn().mockResolvedValue({
+        status: '00',
+        balance: -55.85,
+        balanceBreakdown: {
+          utilityBalance: -55.85,
+          workingBalance: '0.00',
+        },
+      }),
+    };
+    const service = makeServiceWithMwaloni(mwaloni);
+
+    const result = await service.getB2cWalletBalance('super-1', 'tenant-1');
+
+    expect(result).toMatchObject({
+      provider: 'MWALONI',
+      currency: 'KES',
+      balance: -55.85,
+      availableBalance: -55.85,
+      actualBalance: 0,
+      providerStatus: '00',
+    });
+  });
+
   it('fails closed when the Mwaloni B2C wallet provider is disabled', async () => {
     const mwaloni = {
       isEnabled: jest.fn().mockReturnValue(false),

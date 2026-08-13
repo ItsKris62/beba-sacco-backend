@@ -1282,6 +1282,8 @@ export class MpesaService {
 
   private normalizeMwaloniBalance(response: MwaloniResponse): B2cWalletBalanceSnapshot {
     const availableBalance = this.extractNumericField(response, [
+      'utilityBalance',
+      'utility_balance',
       'availableBalance',
       'available_balance',
       'available',
@@ -1290,6 +1292,8 @@ export class MpesaService {
       'balance',
     ]);
     const actualBalance = this.extractNumericField(response, [
+      'workingBalance',
+      'working_balance',
       'actualBalance',
       'actual_balance',
       'ledgerBalance',
@@ -1298,7 +1302,8 @@ export class MpesaService {
       'current_balance',
       'balance',
     ]);
-    const balance = availableBalance ?? actualBalance;
+    const mainBalance = this.extractNumericField(response, ['balance']);
+    const balance = mainBalance ?? availableBalance ?? actualBalance;
     const currency =
       this.extractStringField(response, ['currency', 'currencyCode', 'currency_code']) ?? 'KES';
 
@@ -1316,26 +1321,37 @@ export class MpesaService {
   }
 
   private extractNumericField(value: unknown, fieldNames: string[]): number | null {
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const found = this.extractNumericField(item, fieldNames);
+    if (!value || typeof value !== 'object') return null;
+
+    for (const fieldName of fieldNames) {
+      const found = this.findFieldValue(value, fieldName.toLowerCase());
+      if (found !== null) {
+        const numeric = this.toFiniteNumber(found);
+        if (numeric !== null) return numeric;
+      }
+    }
+    return null;
+  }
+
+  private findFieldValue(obj: unknown, targetKey: string): unknown | null {
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        const found = this.findFieldValue(item, targetKey);
         if (found !== null) return found;
       }
       return null;
     }
+    if (!obj || typeof obj !== 'object') return null;
+    const record = obj as Record<string, unknown>;
 
-    if (!value || typeof value !== 'object') return null;
-    const record = value as Record<string, unknown>;
-    const wanted = new Set(fieldNames.map((name) => name.toLowerCase()));
-
-    for (const [key, raw] of Object.entries(record)) {
-      if (!wanted.has(key.toLowerCase())) continue;
-      const numeric = this.toFiniteNumber(raw);
-      if (numeric !== null) return numeric;
+    for (const [key, val] of Object.entries(record)) {
+      if (key.toLowerCase() === targetKey) {
+        return val;
+      }
     }
 
-    for (const raw of Object.values(record)) {
-      const found = this.extractNumericField(raw, fieldNames);
+    for (const val of Object.values(record)) {
+      const found = this.findFieldValue(val, targetKey);
       if (found !== null) return found;
     }
     return null;
