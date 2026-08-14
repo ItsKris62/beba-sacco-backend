@@ -504,14 +504,35 @@ export class MemberPortalService {
           select: {
             id: true,
             balance: true,
+            minimumBalance: true,
             lockedBalance: true,
             frozenSavings: true,
+            allowsNegative: true,
             accountNumber: true,
           },
         });
 
         if (!fosaAccount) {
           throw new NotFoundException('No active FOSA account found for withdrawal');
+        }
+
+        const currentBalance = new Decimal(fosaAccount.balance?.toString() ?? '0');
+        const lockedBalance = new Decimal(fosaAccount.lockedBalance?.toString() ?? '0');
+        const frozenSavings = new Decimal(fosaAccount.frozenSavings?.toString() ?? '0');
+        const minimumBalance = fosaAccount.allowsNegative
+          ? new Decimal(0)
+          : new Decimal(fosaAccount.minimumBalance?.toString() ?? '0');
+        const availableBalance = Decimal.max(
+          new Decimal(0),
+          currentBalance.minus(lockedBalance).minus(frozenSavings).minus(minimumBalance),
+        );
+
+        if (availableBalance.lt(totalDeduction)) {
+          throw new BadRequestException(
+            `Insufficient available FOSA balance (available: KES ${availableBalance.toFixed(
+              2,
+            )}). Please try again with a smaller amount or deposit funds into your account.`,
+          );
         }
 
         // lockedBalance/frozenSavings (guarantor holds) are now enforced centrally by
