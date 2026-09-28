@@ -131,8 +131,8 @@ const RIDERS = [
     memberNumber: 'R-0006',
     nationalId: '40001006',
     kraPin: 'A400010066B',
-    fosaBalance: 0,
-    bosaBalance: 0,
+    fosaBalance: 25_000,
+    bosaBalance: 40_000,
     position: 'MEMBER',
   },
 ];
